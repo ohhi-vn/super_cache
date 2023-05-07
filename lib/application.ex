@@ -12,7 +12,9 @@ defmodule SuperCache.Application do
   def start(_type, _args) do
     Logger.info("startting SuperCache app...")
     children = [
-      {SuperCache.Common, [[fixed_range: 3]]}
+      {SuperCache.Common, [[fixed_range: 3]]},
+      {SuperCache.Sup, []},
+      {SuperCache.Hash.Holder, :user_gps_table}
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html

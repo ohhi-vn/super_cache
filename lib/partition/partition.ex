@@ -1,4 +1,4 @@
-defmodule SuperCache.Partition do
+defmodule SuperCache.Partition.Utils do
   @moduledoc """
   Documentation for `SuperCache`.
   """
