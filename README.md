@@ -8,20 +8,20 @@ This is a auto scale & distriubted cache library for Elixir.
 
  Sequencer flow of api:
 
-```sequenceDiagram
+```mermaid
 sequenceDiagram
   participant Client
   participant Api
   participant Hash
   participant Partition
 
-  Client->> Api: Add new term to cache
+  Client->>Api: Add new term to cache
   Api->>Hash: Get partition for term (based on key)
   Hash->>Api: Your partition
   Api->>Partition: Put new/update term
   Partition->>Api: Result
   Api->>Client: Result
-
+  
   Client->>Api: Get data for key/pattern
   Api->>Hash: Get partition for key/pattern
   Hash->>Api: Your patition
@@ -30,13 +30,16 @@ sequenceDiagram
   Api->>Client: Your data
 ```
 
+(If diagram doesn't show, please install mermaid support extension for VS Code)
+
+Simple flow api:
 
 ```mermaid
 graph LR
-Client[Hard edge] -->Api(Round edge)
-    Api --> Hash{Decision}
-    Api -->|Partition1| D[Result one]
-    Api -->|Partition2| E[Result two]
+Client(Round edge)<-->Api(Round edge)
+    Api<-->Hash(Round edge)
+    Api -->|Partition1| E1[Term cache 1]
+    Api -->|Partition2| E2[Term cache 2]
 ```
 
 ## Installation
