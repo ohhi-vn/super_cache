@@ -14,20 +14,20 @@ sequenceDiagram
   participant Api
   participant Hash
   participant Partition
-  
-  Client -> Api: Add new term to cache
-  Api -> Hash: Get partition for term (based on key)
-  Hash -> Api: Your partition
-  Api -> Partition: Put new/update term
-  Partition -> Api: Result
-  Api -> Client: Result
 
-  Client -> Api: Get data for key/pattern
-  Api -> Hash: Get partition for key/pattern
-  Hash -> Api: Your patition
-  Api -> Partition: Get data for key/pattern
-  Partition -> Api: Data for key
-  Api -> Client: Your data
+  Client->> Api: Add new term to cache
+  Api->>Hash: Get partition for term (based on key)
+  Hash->>Api: Your partition
+  Api->>Partition: Put new/update term
+  Partition->>Api: Result
+  Api->>Client: Result
+
+  Client->>Api: Get data for key/pattern
+  Api->>Hash: Get partition for key/pattern
+  Hash->>Api: Your patition
+  Api->>Partition: Get data for key/pattern
+  Partition->>Api: Data for key
+  Api->>Client: Your data
 ```
 
 
