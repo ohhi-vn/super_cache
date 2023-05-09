@@ -7,7 +7,7 @@ defmodule SuperCache.Partition.Utils do
     :erlang.phash2(term)
   end
 
-  def get_pattition(term, range) do
+  def get_pattition_order(term, range) do
     :erlang.phash2(term, range)
   end
 end

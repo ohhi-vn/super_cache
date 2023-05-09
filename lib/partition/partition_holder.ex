@@ -9,15 +9,25 @@ defmodule SuperCache.Partition.Holder do
   Starts the server.
   """
   def start_link(name) do
-    GenServer.start_link(__MODULE__, name, name: name)
+    GenServer.start_link(__MODULE__, name, name: __MODULE__)
   end
 
-  def stop(name) do
-   GenServer.call(name, :stop)
+  def stop() do
+   GenServer.call(__MODULE__, :stop)
   end
 
-  def clean(name) do
-    GenServer.call(name, :clean)
+  def clean() do
+    GenServer.call(__MODULE__, :clean)
+  end
+
+  def set(order) when is_function(order) and (order > 0) do
+    GenServer.call(__MODULE__, {:set_partition, order})
+  end
+
+  def get(order) do
+    # get direct from ets table
+    [partition] = Ets.lookup(__MODULE__, order)
+    partition
   end
 
   # Server (callbacks)
@@ -27,7 +37,7 @@ defmodule SuperCache.Partition.Holder do
     if !Keyword.has_key?(opts, :table_name) do
       raise "missed table_name in parameters"
     end
-    table_name = Keyword.get(opts, :table_name)
+    table_name = __MODULE__ #Keyword.get(opts, :table_name)
     Logger.info("start process own ets cache table for #{inspect table_name}")
     state = %{table_name: table_name}
 
@@ -35,19 +45,20 @@ defmodule SuperCache.Partition.Holder do
       fn ->
         ^table_name = Ets.new(table_name, [
           :set,
-          :public,
+          :protect,
           :named_table,
-          {:read_concurrency, true},
-          {:decentralized_counters, true}
-        ])
+          {:read_concurrency, true}
+          ])
 
-      Ets.insert(table_name, {__MODULE__, self()})
-      Logger.info("table #{inspect table_name} is created")
-    end
+        Ets.insert(table_name, {__MODULE__, self()})
+        Logger.info("table #{inspect table_name} is created")
+        # suspend process
+        Process.sleep(:infinity)
+      end
 
     ets_pid =
       case Ets.whereis(table_name) do
-        :undefined ->
+        :undefined -> # create new table
           spawn(fun)
         _ ->
           [pid] = Ets.lookup(table_name, __MODULE__)
@@ -68,6 +79,15 @@ defmodule SuperCache.Partition.Holder do
   def handle_call(:clean, _from, state) do
     %{table_name: table_name} = state
     {:reply,  clean_up(table_name), state}
+  end
+
+  @impl true
+  def handle_call( {:set_partition, order}, _from, state) do
+    %{table_name: table_name} = state
+    partition = String.to_atom("partition_#{order}")
+    Logger.debug("add partition #{inspect partition} for order #{order}")
+    Ets.insert(table_name, {order, partition})
+    {:reply,  :ok, state}
   end
 
   @impl true
