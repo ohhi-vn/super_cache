@@ -18,7 +18,7 @@ defmodule SuperCache.Partition.Common do
   end
 
   def get_schedulers() do
-    :erlang.system_info(:schedulers_online)
+    System.schedulers_online()
   end
 
   def set_num_partition(:schedulers_online) do
@@ -44,7 +44,7 @@ defmodule SuperCache.Partition.Common do
     num =
       case Keyword.get(opts, :fixed_num_partition) do
         nil -> # num_partition = number of online schedule of node
-          :erlang.system_info(:schedulers_online)
+          System.schedulers_online()
         n when is_integer(n) and n > 0 ->
           n
       end

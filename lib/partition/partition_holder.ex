@@ -1,5 +1,6 @@
 defmodule SuperCache.Partition.Holder do
-  use GenServer
+  use GenServer, restart: :transient, shutdown: 1_000
+
   require Logger
 
   alias :ets, as: Ets
@@ -8,8 +9,8 @@ defmodule SuperCache.Partition.Holder do
   @doc """
   Starts the server.
   """
-  def start_link(name) do
-    GenServer.start_link(__MODULE__, name, name: __MODULE__)
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
   def stop() do
@@ -33,39 +34,20 @@ defmodule SuperCache.Partition.Holder do
   # Server (callbacks)
 
   @impl true
-  def init(opts) do
-    if !Keyword.has_key?(opts, :table_name) do
-      raise "missed table_name in parameters"
-    end
-    table_name = __MODULE__ #Keyword.get(opts, :table_name)
+  def init(_opts) do
+    table_name = __MODULE__
     Logger.info("start process own ets cache table for #{inspect table_name}")
     state = %{table_name: table_name}
 
-    fun =
-      fn ->
-        ^table_name = Ets.new(table_name, [
-          :set,
-          :public,
-          :named_table,
-          {:read_concurrency, true}
-          ])
+    ^table_name = Ets.new(table_name, [
+      :set,
+      :protected,
+      :named_table,
+      {:read_concurrency, true}
+      ])
 
-        Ets.insert(table_name, {__MODULE__, self()})
-        Logger.info("table #{inspect table_name} is created")
-        # suspend process
-        Process.sleep(:infinity)
-      end
-
-    ets_pid =
-      case Ets.whereis(table_name) do
-        :undefined -> # create new table
-          spawn(fun)
-        _ ->
-          [pid] = Ets.lookup(table_name, __MODULE__)
-          pid
-      end
-
-    state = Map.put(state, :ets_pid, ets_pid)
+    Ets.insert(table_name, {__MODULE__, self()})
+    Logger.info("table #{inspect table_name} is created")
 
     {:ok, state}
   end
@@ -91,11 +73,7 @@ defmodule SuperCache.Partition.Holder do
   end
 
   @impl true
-  def terminate(_reason, state) do
-    %{ets_pid: pid} = state
-    # kill process owner ets to remove ets.
-    Process.exit(pid, :shutdown)
-
+  def terminate(_reason, _state) do
     :stop
   end
 

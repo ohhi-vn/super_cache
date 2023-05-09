@@ -93,6 +93,6 @@ defmodule SuperCache do
   end
 
   def add_node(node) do
-
+    :ok
   end
 end

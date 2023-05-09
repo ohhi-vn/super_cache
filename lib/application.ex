@@ -13,9 +13,9 @@ defmodule SuperCache.Application do
     Logger.info("startting SuperCache app...")
     children = [
       {SuperCache.Api, [key_pos: 0, partition_pos: 0]},
-      {SuperCache.Partition.Common, [fixed_num_partition: 3]},
+      {SuperCache.Partition.Common, []},
       {SuperCache.Sup, []},
-      {SuperCache.Partition.Holder, [table_name: :super_cache_hash_table]}
+      {SuperCache.Partition.Holder, []}
 
     ]
 
