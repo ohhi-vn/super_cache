@@ -2,6 +2,8 @@ defmodule SuperCache.EtsHolder do
   use GenServer, restart: :temporary
   require Logger
 
+  alias SuperCache.Api
+
   @spec start_link(any) :: :ignore | {:error, any} | {:ok, pid}
   @doc """
   Starts the server.
@@ -23,10 +25,13 @@ defmodule SuperCache.EtsHolder do
   @impl true
   def init(table_name) do
     Logger.info("start process own ets cache table for #{inspect table_name}")
+    key_pos = Api.get_config(:key_pos) + 1 # key order of ets start from 1
+
     ^table_name = :ets.new(table_name, [
       :set,
       :public,
       :named_table,
+      {:keypos, key_pos},
       {:write_concurrency, true},
       {:read_concurrency, true},
       {:decentralized_counters, true}
@@ -38,7 +43,7 @@ defmodule SuperCache.EtsHolder do
 
   @impl true
   def handle_call(:stop, _from, table_name) do
-    {:stop, :ok, table_name}
+    {:stop, :normal, :ok, table_name}
   end
 
   @impl true
@@ -47,7 +52,8 @@ defmodule SuperCache.EtsHolder do
   end
 
   @impl true
-  def terminate(_reason, _) do
+  def terminate(reason, name) do
+    Logger.debug("#{inspect name} shutdown with reason #{inspect reason}")
     :stop
   end
 

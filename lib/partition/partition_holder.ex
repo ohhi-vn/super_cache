@@ -100,6 +100,6 @@ defmodule SuperCache.Partition.Holder do
   end
 
   defp clean_up(table_name) do
-    :ets.delete_all_objects(table_name)
+    Ets.delete_all_objects(table_name)
   end
 end

@@ -14,4 +14,8 @@ defmodule SuperCache.Partition do
       Holder.set(order)
     end)
   end
+
+  def stop() do
+    Holder.clean()
+  end
 end

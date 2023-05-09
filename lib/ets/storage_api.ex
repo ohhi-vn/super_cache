@@ -1,8 +1,7 @@
 defmodule SuperCache.Storage do
   require Logger
 
-  alias  SuperCache.Sup
-  alias SuperCache.EtsHolder
+  alias  SuperCache.{Sup, EtsHolder}
   alias :ets, as: Ets
 
   def start(num) when is_integer(num) and (num > 0) do
@@ -17,11 +16,11 @@ defmodule SuperCache.Storage do
   end
 
   def stop(num) when is_integer(num) and (num > 0) do
-    Logger.debug("stop storage worker")
+    Logger.debug("stop storage workers (#{num})")
 
-    Enum.each(1..num, fn (el) ->
+    Enum.each(0..num-1, fn (el) ->
       name = String.to_atom("partition_#{el}")
-      Logger.debug("stop storage workers: #{inspect name}")
+      Logger.debug("stop storage workers #{inspect name}")
       EtsHolder.stop(name)
     end )
   end
