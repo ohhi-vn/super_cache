@@ -20,13 +20,13 @@ defmodule SuperCache.Partition.Holder do
     GenServer.call(__MODULE__, :clean)
   end
 
-  def set(order) when is_function(order) and (order > 0) do
+  def set(order) when is_integer(order) and (order >= 0) do
     GenServer.call(__MODULE__, {:set_partition, order})
   end
 
   def get(order) do
     # get direct from ets table
-    [partition] = Ets.lookup(__MODULE__, order)
+    [{_, partition}] = Ets.lookup(__MODULE__, order)
     partition
   end
 
@@ -45,7 +45,7 @@ defmodule SuperCache.Partition.Holder do
       fn ->
         ^table_name = Ets.new(table_name, [
           :set,
-          :protect,
+          :public,
           :named_table,
           {:read_concurrency, true}
           ])

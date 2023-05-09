@@ -12,9 +12,11 @@ defmodule SuperCache.Application do
   def start(_type, _args) do
     Logger.info("startting SuperCache app...")
     children = [
-      {SuperCache.Common, [[fixed_num_partition: 3]]},
+      {SuperCache.Api, [key_pos: 0, partition_pos: 0]},
+      {SuperCache.Partition.Common, [fixed_num_partition: 3]},
       {SuperCache.Sup, []},
-      {SuperCache.Hash.Holder, :super_cache_hash_table}
+      {SuperCache.Partition.Holder, [table_name: :super_cache_hash_table]}
+
     ]
 
     Logger.info("startting SuperCache with workers: #{inspect children}")

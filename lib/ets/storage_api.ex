@@ -7,9 +7,9 @@ defmodule SuperCache.Storage do
 
   def start(num) when is_integer(num) and (num > 0) do
     workers =
-      Enum.reduce(1..num, [], fn (el, result) ->
+      Enum.reduce(0..num-1, [], fn (el, result) ->
         name = String.to_atom("partition_#{el}")
-        [{EtsHolder, [name]} | result]
+        [{EtsHolder, name} | result]
       end )
     Logger.debug("start storage workers: #{inspect workers}")
 
