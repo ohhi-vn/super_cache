@@ -2,6 +2,10 @@ defmodule SuperCache.Api do
   use GenServer, restart: :permanent, shutdown: 5_000
   require Logger
 
+  defexception message: "incorrect config"
+
+  alias SuperCache.Api
+
   @spec start_link(any) :: :ignore | {:error, any} | {:ok, pid}
   @doc """
   Starts the server.
@@ -15,7 +19,7 @@ defmodule SuperCache.Api do
     if pos < tuple_size(data) do
       elem(data, pos)
     else
-     raise "tuple size is lower than key pos"
+     raise Api, message: "tuple size is lower than key pos"
     end
   end
 
@@ -24,12 +28,16 @@ defmodule SuperCache.Api do
     if pos < tuple_size(data) do
       elem(data, pos)
     else
-      raise "tuple size is lower than partition pos"
+      raise Api, message: "tuple size is lower than partition pos"
     end
   end
 
   def get_config(key, default \\ nil) do
     GenServer.call(__MODULE__, {:get, key, default}, 1_000)
+  end
+
+  def has_config?(key) do
+    GenServer.call(__MODULE__, {:has_config, key}, 1_000)
   end
 
   def set_config(key, value) do
@@ -58,6 +66,12 @@ defmodule SuperCache.Api do
   @impl true
   def handle_call({:get, key, default}, _from, state) do
     result = Map.get(state, key, default)
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call({:has_config, key}, _from, state) do
+    result = Map.has_key?(state, key)
     {:reply, result, state}
   end
 

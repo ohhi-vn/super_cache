@@ -53,7 +53,7 @@ defmodule SuperCache.Partition.Common do
   end
 
   @impl GenServer
-  def handle_call(:get_num_partition, _from, %{num_partitiion: num} = state) do
+  def handle_call(:get_num_partition, _from, %{num_partition: num} = state) do
     {:reply, num, state}
   end
 
@@ -61,7 +61,7 @@ defmodule SuperCache.Partition.Common do
   def handle_call({:set_num_partition, num}, _from, state) do
     case num do
       n when is_integer(n) and (n > 0) ->
-        {:reply, :ok, Map.put(state, :num_partitiion, num)}
+        {:reply, :ok, Map.put(state, :num_partition, num)}
       _ ->
         {:reply, {:error, :incorrect_param}, state}
     end

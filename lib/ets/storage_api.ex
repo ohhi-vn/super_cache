@@ -7,7 +7,7 @@ defmodule SuperCache.Storage do
   def start(num) when is_integer(num) and (num > 0) do
     workers =
       Enum.reduce(0..num-1, [], fn (el, result) ->
-        name = String.to_atom("partition_#{el}")
+        name = String.to_atom("supercache_partition_#{el}")
         [{EtsHolder, name} | result]
       end )
     Logger.debug("start storage workers: #{inspect workers}")
@@ -19,7 +19,7 @@ defmodule SuperCache.Storage do
     Logger.debug("stop storage workers (#{num})")
 
     Enum.each(0..num-1, fn (el) ->
-      name = String.to_atom("partition_#{el}")
+      name = String.to_atom("supercache_partition_#{el}")
       Logger.debug("stop storage workers #{inspect name}")
       EtsHolder.stop(name)
     end )
@@ -31,5 +31,10 @@ defmodule SuperCache.Storage do
 
   def get(key, partition) do
     Ets.lookup(partition, key)
+  end
+
+  def get_by_pattern(pattern, partition) do
+    Logger.debug("storage, pattern for match: #{inspect pattern}, partition: #{partition}")
+    Ets.match(partition, pattern)
   end
 end

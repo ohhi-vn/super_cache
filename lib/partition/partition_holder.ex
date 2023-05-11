@@ -31,6 +31,10 @@ defmodule SuperCache.Partition.Holder do
     partition
   end
 
+  def get_all() do
+    Ets.match(__MODULE__, {:_, :"$1"})
+  end
+
   # Server (callbacks)
 
   @impl true
@@ -46,7 +50,6 @@ defmodule SuperCache.Partition.Holder do
       {:read_concurrency, true}
       ])
 
-    Ets.insert(table_name, {__MODULE__, self()})
     Logger.info("table #{inspect table_name} is created")
 
     {:ok, state}
@@ -66,7 +69,7 @@ defmodule SuperCache.Partition.Holder do
   @impl true
   def handle_call( {:set_partition, order}, _from, state) do
     %{table_name: table_name} = state
-    partition = String.to_atom("partition_#{order}")
+    partition = String.to_atom("supercache_partition_#{order}")
     Logger.debug("add partition #{inspect partition} for order #{order}")
     Ets.insert(table_name, {order, partition})
     {:reply,  :ok, state}

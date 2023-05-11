@@ -26,9 +26,10 @@ defmodule SuperCache.EtsHolder do
   def init(table_name) do
     Logger.info("start process own ets cache table for #{inspect table_name}")
     key_pos = Api.get_config(:key_pos) + 1 # key order of ets start from 1
+    table_type = Api.get_config(:table_type)
 
     ^table_name = :ets.new(table_name, [
-      :set,
+      table_type,
       :public,
       :named_table,
       {:keypos, key_pos},

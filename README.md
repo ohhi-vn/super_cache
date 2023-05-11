@@ -15,10 +15,10 @@ sequenceDiagram
   participant Partition
   participant Storage
 
-  Client->>Api: Add new term to cache
-  Api->>Partition: Get partition for term (based on key)
+  Client->>Api: Add new tuple to cache
+  Api->>Partition: Get partition
   Partition->>Api: Your partition
-  Api->>Storage: Put new/update term
+  Api->>Storage: Put new/update tuple
   Storage->>Api: Result
   Api->>Client: Result
   

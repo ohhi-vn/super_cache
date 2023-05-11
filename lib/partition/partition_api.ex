@@ -8,6 +8,10 @@ defmodule SuperCache.Partition do
     Holder.get(order)
   end
 
+  def get_all_partition() do
+    Holder.get_all()
+  end
+
   def start(num_partition) when is_integer(num_partition) do
     Common.set_num_partition(num_partition)
     Enum.each(0..num_partition - 1, fn order ->
