@@ -33,8 +33,26 @@ defmodule SuperCache.Storage do
     Ets.lookup(partition, key)
   end
 
-  def get_by_pattern(pattern, partition) do
+  def get_by_match(pattern, partition) do
     Logger.debug("storage, pattern for match: #{inspect pattern}, partition: #{partition}")
     Ets.match(partition, pattern)
+  end
+
+  def get_by_match_object(pattern, partition) do
+    Logger.debug("storage, pattern for match: #{inspect pattern}, partition: #{partition}")
+    Ets.match_object(partition, pattern)
+  end
+
+  def scan(fun, acc, partition) do
+    Ets.foldl(fun, acc, partition)
+  end
+
+  def delete(key, partition) do
+    Ets.delete(partition, key)
+  end
+
+  def delete_match(pattern, partition) do
+    Logger.debug("storage, pattern for match: #{inspect pattern}, partition: #{partition}")
+    Ets.match_delete(partition, pattern)
   end
 end
