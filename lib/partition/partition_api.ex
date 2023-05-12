@@ -21,5 +21,6 @@ defmodule SuperCache.Partition do
 
   def stop() do
     Holder.clean()
+    :ok
   end
 end

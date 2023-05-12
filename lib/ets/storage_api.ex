@@ -1,4 +1,6 @@
 defmodule SuperCache.Storage do
+  @moduledoc false
+
   require Logger
 
   alias  SuperCache.{Sup, EtsHolder}

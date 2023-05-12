@@ -21,17 +21,22 @@ defmodule SuperCache do
   require Logger
 
   alias SuperCache.{Partition, Api, Storage}
-  alias SuperCache.Partition.{Common}
+  alias Partition.{Common}
+
+  ## API interface ##
 
   @doc """
   Start SuperCache service. This function will use default config.
+
+  If function is failed, it will raise a error.
 
   Default config:
     - key_pos: 0
     - partition_pos: 0
     - table_type: :set
-    - num_partition: = online_schedulers of VM
+    - num_partition: = number of online_schedulers of ErlVM
   """
+  @spec start!() :: :ok
   def start!() do
     opts = [key_pos: 0, partition_pos: 0]
     start!(opts)
@@ -40,10 +45,11 @@ defmodule SuperCache do
   @doc """
   Start SuperCache service with config.
 
-  Config is in Keyword format
+  Config is in Keyword list
 
   If key_pos or parition_pos is missed, start SuperCache will fail.
   """
+  @spec start!(list(tuple())) :: :ok
   def start!(opts) do
     Logger.info("start SuperCache with options: #{inspect opts}")
     unless Keyword.keyword?(opts) do
@@ -93,6 +99,13 @@ defmodule SuperCache do
 
   end
 
+  @doc """
+  Init & start library.
+
+  Function uses default config like `start!()`
+  """
+  @spec start() ::
+         :ok | {:error, %{:__exception__ => true, :__struct__ => atom, optional(atom) => any}}
   def start() do
     try do
       start!()
@@ -103,6 +116,11 @@ defmodule SuperCache do
     end
   end
 
+  @doc """
+  Start library with config. Parameters like `start!(opts)`
+  """
+  @spec start(any) ::
+          :ok | {:error, %{:__exception__ => true, :__struct__ => atom, optional(atom) => any}}
   def start(opts) do
     try do
       start!(opts)
@@ -113,7 +131,10 @@ defmodule SuperCache do
     end
   end
 
-
+  @doc """
+  Clear data & stop library. Call if application no more use SuperCache to free memory.
+  """
+  @spec stop() :: :ok
   def stop() do
     case Api.get_config(:num_partition) do
       nil ->
@@ -125,7 +146,17 @@ defmodule SuperCache do
     Partition.stop()
   end
 
-  def put(data) when is_tuple(data) do
+  @doc """
+  Store tuple to cache.
+
+  Tuple size of parameter must be equal or larger than key_pos/partition_pos.
+
+  The function must call after `start!` SuperCache.
+
+  If success the function will return true, other cases it will raise a error.
+  """
+  @spec put!(tuple()) :: true
+  def put!(data) when is_tuple(data) do
     part_data = Api.get_partition!(data)
     Logger.debug("data used for get partition #{inspect part_data}")
     part = Partition.get_partition(part_data)
@@ -133,7 +164,26 @@ defmodule SuperCache do
     Storage.put(data, part)
   end
 
-  def get(data) when is_tuple(data) do
+  @doc """
+  Store tuple to cache. The function works like `put!(data)`
+  Result return is true or {:error, reason}
+  """
+  @spec put(tuple()) :: true | {:error, %{:__exception__ => true, :__struct__ => atom, optional(atom) => any}}
+  def put(data) do
+    try do
+      put!(data)
+    rescue
+      err ->
+        Logger.error(Exception.format(:error, err, __STACKTRACE__))
+        {:error, err}
+    end
+  end
+
+  @doc """
+  Get data (list of tuple) from cache.
+  """
+  @spec get!(tuple) :: [tuple]
+  def get!(data) when is_tuple(data) do
     key = Api.get_key!(data)
     part_data = Api.get_partition!(data)
     Logger.debug("data used for get partition #{inspect part_data}")
@@ -142,22 +192,49 @@ defmodule SuperCache do
     Storage.get(key, part)
   end
 
-  def get_by_key_partition(key, partition) do
+  @doc """
+  Get data (list of tuple) from cache.
+  """
+  @spec get(tuple) :: [tuple] | {:error, %{:__exception__ => true, :__struct__ => atom, optional(atom) => any}}
+  def get(data) when is_tuple(data) do
+    try do
+      get!(data)
+    rescue
+      err ->
+        Logger.error(Exception.format(:error, err, __STACKTRACE__))
+        {:error, err}
+    end
+  end
+
+  @doc """
+  Get data from cache with key and data which is used for getting paritition.
+  Function return list of tuple.
+  """
+  @spec get_by_key_partition!(any, any) :: [tuple]
+  def get_by_key_partition!(key, partition) do
     part = Partition.get_partition(partition)
     Logger.debug("get data (key: #{inspect key}) from partition #{inspect part}")
     Storage.get(key, part)
   end
 
-  @spec get_same_key_partition(any) :: [tuple]
-  def get_same_key_partition(key) do
-    get_by_key_partition(key, key)
+  @doc """
+  Get data from cache with key and data which is used for getting paritition is same with key.
+  Function return list of tuple.
+  """
+  @spec get_same_key_partition!(any) :: [tuple]
+  def get_same_key_partition!(key) do
+    get_by_key_partition!(key, key)
   end
+
 
   @doc """
   Gets objects in storage by pattern matching. If partition data is atom :_, it will scan all
-  partitions
+  partitions.
+
+  Function works like `:ets.match_pattern/2`
   """
-  def get_by_match(partition_data, pattern) when is_tuple(pattern) do
+  @spec get_by_match!(any, tuple) :: any
+  def get_by_match!(partition_data, pattern) when is_tuple(pattern) do
     partitions =
       case partition_data do
         :_ -> # scan all partitions
@@ -171,11 +248,22 @@ defmodule SuperCache do
     end)
   end
 
-  def get_by_match(pattern) when is_tuple(pattern) do
-    get_by_match(:_, pattern)
+  @doc """
+  Scan all storage partitions with pattern.
+
+  Function works like :ets.
+  """
+  @spec get_by_match!(tuple) :: any
+  def get_by_match!(pattern) when is_tuple(pattern) do
+    get_by_match!(:_, pattern)
   end
 
-  def get_by_match_object(partition_data, pattern) when is_tuple(pattern) do
+  @doc """
+  The function works like `:ets.match_object/2`.
+  partition_data is used to get partition. if partition_data = :_ the function will scan all partitions.
+  """
+  @spec get_by_match_object!(any, tuple) :: any
+  def get_by_match_object!(partition_data, pattern) when is_tuple(pattern) do
     partitions =
       case partition_data do
         :_ -> # scan all partitions
@@ -189,12 +277,20 @@ defmodule SuperCache do
     end)
   end
 
-  def get_by_match_object(pattern) when is_tuple(pattern) do
-    get_by_match_object(:_, pattern)
+  @doc """
+  Function works like `get_by_match_object!/2`, it will scan all partitions.
+  """
+  @spec get_by_match_object!(tuple) :: any
+  def get_by_match_object!(pattern) when is_tuple(pattern) do
+    get_by_match_object!(:_, pattern)
   end
 
-
-  def scan(partition_data, fun, acc) when is_function(fun, 2) do
+  @doc """
+  Function is used to call anonymous function with data(tuple) in a partition.
+  acc parameter is used to call function with special options or store data.
+  """
+  @spec scan!(any, (any, any -> any), any) :: any
+  def scan!(partition_data, fun, acc) when is_function(fun, 2) do
     partitions =
       case partition_data do
         :_ -> # scan all partitions
@@ -208,11 +304,19 @@ defmodule SuperCache do
     end)
   end
 
-  def scan(fun, acc) when is_function(fun, 2) do
-    scan(:_, fun, acc)
+  @doc """
+  Function works like `scan!/2` but with all paritions.
+  """
+  @spec scan!((any, any -> any), any) :: any
+  def scan!(fun, acc) when is_function(fun, 2) do
+    scan!(:_, fun, acc)
   end
 
-  def delete(data) when is_tuple(data) do
+  @doc """
+  Detele data in cache with key & partition store same as `put!` function
+  """
+  @spec delete!(tuple) :: true
+  def delete!(data) when is_tuple(data) do
     key = Api.get_key!(data)
     part_data = Api.get_partition!(data)
     Logger.debug("data used for get partition #{inspect part_data}")
@@ -221,8 +325,11 @@ defmodule SuperCache do
     Storage.delete(key, part)
   end
 
-
-  def delete_by_match(partition_data, pattern) when is_tuple(pattern) do
+  @doc """
+  Delete data by pattern in a partition.
+  """
+  @spec delete_by_match!(any, tuple) :: any
+  def delete_by_match!(partition_data, pattern) when is_tuple(pattern) do
     partitions =
       case partition_data do
         :_ -> # scan all partitions
@@ -236,20 +343,29 @@ defmodule SuperCache do
     end)
   end
 
-  def delete_by_match(pattern) when is_tuple(pattern) do
-    delete_by_match(:_, pattern)
+  @doc """
+  Same as `delete_by_match` but with all partitions in cache.
+  """
+  @spec delete_by_match!(tuple) :: any
+  def delete_by_match!(pattern) when is_tuple(pattern) do
+    delete_by_match!(:_, pattern)
   end
 
-
-  def delete_by_key_partition(key, partition_data) do
+  @doc """
+  Delete data in a partition by key & data which used to get partition.
+  """
+  @spec delete_by_key_partition!(any, any) :: true
+  def delete_by_key_partition!(key, partition_data) do
     part = Partition.get_partition(partition_data)
     Logger.debug("get data (key: #{inspect key}) from partition #{inspect part}")
     Storage.delete(key, part)
   end
 
+  @doc """
+  Delete data in a partition by key & data which used to get partition is key.
+  """
+  @spec delete_same_key_partition(any) :: true
   def delete_same_key_partition(key) do
-    part = Partition.get_partition(key)
-    Logger.debug("get data (key: #{inspect key}) from partition #{inspect part}")
-    Storage.delete(key, part)
+    delete_by_key_partition!(key, key)
   end
 end
