@@ -5,16 +5,13 @@ defmodule SuperCache do
   SuperCache support auto scale based on number of cpu cores and easy to use.
   type of data is supported is tuple, other type of data can put in a tuple an storage in SuperCache.
 
-  ## Basic example:
+  ## Examples
 
-  opts = [key_pos: 0, partition_pos: 1, table_type: :bag, num_partition: 3]
-  SuperCache.start(opts)
-
-  SuperCache.put({:hello, :world, "hello world!"})
-
-  SuperCache.get_by_key_partition(:hello, :world)
-
-  SuperCache.delete_by_key_partition(:hello, :world)
+      iex> opts = [key_pos: 0, partition_pos: 1, table_type: :bag, num_partition: 3]
+      iex> SuperCache.start(opts)
+      iex> SuperCache.put({:hello, :world, "hello world!"})
+      iex> SuperCache.get_by_key_partition(:hello, :world)
+      iex> SuperCache.delete_by_key_partition(:hello, :world)
 
   """
 
@@ -34,7 +31,7 @@ defmodule SuperCache do
     - key_pos: 0
     - partition_pos: 0
     - table_type: :set
-    - num_partition: = number of online_schedulers of ErlVM
+    - num_partition: = number of online_schedulers of Erlang VM
   """
   @spec start!() :: :ok
   def start!() do
