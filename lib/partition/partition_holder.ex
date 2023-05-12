@@ -1,9 +1,13 @@
 defmodule SuperCache.Partition.Holder do
+  @moduledoc false
+
   use GenServer, restart: :transient, shutdown: 1_000
 
   require Logger
 
   alias :ets, as: Ets
+
+  ## APIs ##
 
   @spec start_link(any) :: :ignore | {:error, any} | {:ok, pid}
   @doc """
@@ -13,31 +17,52 @@ defmodule SuperCache.Partition.Holder do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
+  @doc """
+  Stops GenServer (in case shutdown library).
+  """
+  @spec stop :: :ok
   def stop() do
    GenServer.call(__MODULE__, :stop)
   end
 
+  @doc """
+  Clears all partitions' info.
+  """
+  @spec clean :: any
   def clean() do
     GenServer.call(__MODULE__, :clean)
   end
 
+  @doc """
+  Sets key/value for partition.
+  """
+  @spec set(non_neg_integer) :: any
   def set(order) when is_integer(order) and (order >= 0) do
     GenServer.call(__MODULE__, {:set_partition, order})
   end
 
+  @doc """
+  Gets partition belong with key.
+  """
+  @spec get(any) :: atom
   def get(order) do
     # get direct from ets table
     [{_, partition}] = Ets.lookup(__MODULE__, order)
     partition
   end
 
+  @doc """
+  Gets all partitions.
+  """
+  @spec get_all :: [list]
   def get_all() do
     Ets.match(__MODULE__, {:_, :"$1"})
   end
 
-  # Server (callbacks)
+  ## Callbacks ##
 
   @impl true
+  @spec init(any) :: {:ok, %{table_name: SuperCache.Partition.Holder}}
   def init(_opts) do
     table_name = __MODULE__
     Logger.info("start process own ets cache table for #{inspect table_name}")
@@ -80,6 +105,7 @@ defmodule SuperCache.Partition.Holder do
     :stop
   end
 
+  @spec clean_up(atom) :: true
   defp clean_up(table_name) do
     Ets.delete_all_objects(table_name)
   end

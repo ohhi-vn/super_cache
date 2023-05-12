@@ -1,6 +1,5 @@
 defmodule SuperCache.Partition.Utils do
-  @moduledoc """
-  Documentation for `SuperCache`.
-  """
+  @moduledoc false
 
+  # TO-DO: reserved for future.
 end

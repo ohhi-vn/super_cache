@@ -1,4 +1,6 @@
 defmodule SuperCache.EtsHolder do
+  @moduledoc false
+
   use GenServer, restart: :temporary
   require Logger
 
@@ -6,23 +8,32 @@ defmodule SuperCache.EtsHolder do
 
   @spec start_link(any) :: :ignore | {:error, any} | {:ok, pid}
   @doc """
-  Starts the server.
+  Starts the GenServer owner Ets table.
   """
   def start_link(name) do
     GenServer.start_link(__MODULE__, name, name: name)
   end
 
+  @doc """
+  Stops GenServer and delete Ets table.
+  """
+  @spec stop(atom | pid | {atom, any} | {:via, atom, any}) :: any
   def stop(name) do
    GenServer.call(name, :stop)
   end
 
+  @doc """
+  Clear all data in Ets table of GenServer.
+  """
+  @spec clean(atom | pid | {atom, any} | {:via, atom, any}) :: any
   def clean(name) do
     GenServer.call(name, :clean)
    end
 
-  # Server (callbacks)
+  ### Callbacks ###
 
   @impl true
+  @spec init(atom) :: {:ok, atom}
   def init(table_name) do
     Logger.info("start process own ets cache table for #{inspect table_name}")
     key_pos = Api.get_config(:key_pos) + 1 # key order of ets start from 1
