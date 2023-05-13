@@ -6,7 +6,37 @@ This is a auto scale & distriubted (in the future) cache library for Elixir. The
 
 ## Design
 
- Sequencer flow of api (on a node):
+
+```
+Client -> API -> Partition -> Storage
+```
+
+Current version, library has three main part:
+1. API interface & config holder.
+2. Partition holder.
+3. Storage partition.
+    
+### API interface:
+
+Client interacts with library throw qua api interface. All config after start will be hold in this part.
+
+### Partition
+
+Support api get right storage part for data. 
+
+Partition based on Erlang phash2/2. Piece data after extract with config's info will get order of partition. Order is used get target partition.
+
+All partitions will be calculated after client call start/n start!/n function.
+
+### Storage
+
+Storage data of client. Number of storage partition is same with number of partition above.
+
+Core of storage is Ets table.
+
+### call flow of api
+
+Sequencer flow of api (on a node):
 
 ```mermaid
 sequenceDiagram

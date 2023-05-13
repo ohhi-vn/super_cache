@@ -4,10 +4,21 @@ defmodule SuperCache.MixProject do
   def project do
     [
       app: :super_cache,
-      version: "0.3.0",
+      version: "0.3.0-dev",
       elixir: "~> 1.14",
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+
+      # Docs
+      name: "SuperCache",
+      source_url: "https://github.com/ohhi-vn/super_cache",
+      homepage_url: "https://ohhi.vn",
+      docs: [
+        main: "SuperCache",
+        extras: ["README.md"]
+      ],
+      description: description(),
+      package: package()
     ]
   end
 
@@ -25,6 +36,18 @@ defmodule SuperCache.MixProject do
       # {:dep_from_hexpm, "~> 0.3.0"},
       # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"}
       {:ex_doc, "~> 0.2", only: :dev, runtime: false}
+    ]
+  end
+
+  defp description() do
+    "A library for cache data in memory"
+  end
+
+  defp package() do
+    [
+      maintainers: ["Manh Van Vu", "Tam Nhat Ly"],
+      licenses: ["MIT"],
+      links: %{"GitHub" => "https://github.com/ohhi-vn/super_cache", "HexDoc" => "https://hexdocs.pm/super_cache"}
     ]
   end
 end
