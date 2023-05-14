@@ -5,6 +5,8 @@ defmodule SuperCache do
   SuperCache support auto scale based on number of cpu cores and easy to use.
   type of data is supported is tuple, other type of data can put in a tuple an storage in SuperCache.
 
+  Note: This version doesn't support for cluster.
+
   ## Examples
 
       iex> opts = [key_pos: 0, partition_pos: 0, table_type: :bag, num_partition: 3]
@@ -166,7 +168,6 @@ defmodule SuperCache do
   @spec put!(tuple()) :: true
   def put!(data) when is_tuple(data) do
     part_data = Api.get_partition!(data)
-    Logger.debug("data used for get partition #{inspect part_data}")
     part = Partition.get_partition(part_data)
     Logger.debug("store data (key: #{inspect Api.get_key!(data)}) to partition: #{inspect part}")
     Storage.put(data, part)
@@ -189,19 +190,19 @@ defmodule SuperCache do
 
   @doc """
   Get data (list of tuple) from cache.
+  This is simple way to get data but need key & partition data must same postion with config.
   """
   @spec get!(tuple) :: [tuple]
   def get!(data) when is_tuple(data) do
     key = Api.get_key!(data)
     part_data = Api.get_partition!(data)
-    Logger.debug("data used for get partition #{inspect part_data}")
     part = Partition.get_partition(part_data)
     Logger.debug("store data (key: #{inspect key}) to partition: #{inspect part}")
     Storage.get(key, part)
   end
 
   @doc """
-  Get data (list of tuple) from cache.
+  Same with get!/1 function but doesn's raise error if failed.
   """
   @spec get(tuple) :: [tuple] | {:error, %{:__exception__ => true, :__struct__ => atom, optional(atom) => any}}
   def get(data) when is_tuple(data) do
@@ -215,7 +216,7 @@ defmodule SuperCache do
   end
 
   @doc """
-  Get data from cache with key and data which is used for getting paritition.
+  Get data from cache with key and paritition.
   Function return list of tuple.
   """
   @spec get_by_key_partition!(any, any) :: [tuple]
@@ -226,7 +227,7 @@ defmodule SuperCache do
   end
 
   @doc """
-  Get data from cache with key and data which is used for getting paritition is same with key.
+  Get data from cache in case key_pos & partition in config is same.
   Function return list of tuple.
   """
   @spec get_same_key_partition!(any) :: [tuple]

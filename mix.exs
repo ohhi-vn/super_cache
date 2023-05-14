@@ -47,7 +47,7 @@ defmodule SuperCache.MixProject do
     [
       maintainers: ["Manh Van Vu", "Tam Nhat Ly"],
       licenses: ["MIT"],
-      links: %{"GitHub" => "https://github.com/ohhi-vn/super_cache", "HexDoc" => "https://hexdocs.pm/super_cache"}
+      links: %{"GitHub" => "https://github.com/ohhi-vn/super_cache", "About us" => "https://ohhi.vn/team"}
     ]
   end
 end
