@@ -94,7 +94,7 @@ be found at <https://hexdocs.pm/super_cache>.
 Start SuperCache with default config:
 
 ```elixir
-SuperCache.start()
+SuperCache.start!()
 ```
 *(key_pos = partition_pos = 0, table_type = :set, num_partition = on_line schedulers of Erlang VM)*
 
@@ -102,7 +102,7 @@ Start with config:
 
 ```elixir
 opts = [key_pos: 0, partition_pos: 1, table_type: :bag, num_partition: 3]
-SuperCache.start(opts)
+SuperCache.start!(opts)
 ```
 
 Note:
@@ -119,13 +119,13 @@ Basic usage:
 
 ```elixir
 opts = [key_pos: 0, partition_pos: 1, table_type: :bag, num_partition: 3]
-SuperCache.start(opts)
+SuperCache.start!(opts)
 
-SuperCache.put({:hello, :world, "hello world!"})
+SuperCache.put!({:hello, :world, "hello world!"})
 
-SuperCache.get_by_key_partition(:hello, :world)
+SuperCache.get_by_key_partition!(:hello, :world)
 
-SuperCache.delete_by_key_partition(:hello, :world)
+SuperCache.delete_by_key_partition!(:hello, :world)
 ```
 
 Other APIs please go to document on hexdocs.pm
