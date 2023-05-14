@@ -54,9 +54,9 @@ defmodule SuperCache.Partition.Holder do
   @doc """
   Gets all partitions.
   """
-  @spec get_all :: [list]
+  @spec get_all :: [atom]
   def get_all() do
-    Ets.match(__MODULE__, {:_, :"$1"})
+    List.flatten(Ets.match(__MODULE__, {:_, :"$1"}))
   end
 
   ## Callbacks ##

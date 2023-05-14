@@ -7,11 +7,11 @@ defmodule SuperCache do
 
   ## Examples
 
-      iex> opts = [key_pos: 0, partition_pos: 1, table_type: :bag, num_partition: 3]
+      iex> opts = [key_pos: 0, partition_pos: 0, table_type: :bag, num_partition: 3]
       iex> SuperCache.start(opts)
       iex> SuperCache.put({:hello, :world, "hello world!"})
-      iex> SuperCache.get_by_key_partition(:hello, :world)
-      iex> SuperCache.delete_by_key_partition(:hello, :world)
+      iex> SuperCache.get_by_key_partition!(:hello, :world)
+      iex> SuperCache.delete_by_key_partition!(:hello, :world)
 
   """
 
@@ -94,6 +94,16 @@ defmodule SuperCache do
     # start to create number of partitions
     Storage.start(num_part)
 
+    Api.set_config(:started, true)
+  end
+
+
+  @doc """
+  Check library is started or not.
+  """
+  @spec started? :: boolean()
+  def started?() do
+    Api.get_config(:started, false)
   end
 
   @doc """
@@ -141,6 +151,7 @@ defmodule SuperCache do
     end
 
     Partition.stop()
+    Api.set_config(:started, false)
   end
 
   @doc """
@@ -323,6 +334,17 @@ defmodule SuperCache do
   end
 
   @doc """
+  Detele all data in cache.
+  """
+  @spec delete_all() :: any
+  def delete_all() do
+    partitions = List.flatten(Partition.get_all_partition())
+    Enum.each(partitions, fn el ->
+      Storage.delete_all(el)
+    end)
+  end
+
+  @doc """
   Delete data by pattern in a partition.
   """
   @spec delete_by_match!(any, tuple) :: any
@@ -361,8 +383,8 @@ defmodule SuperCache do
   @doc """
   Delete data in a partition by key & data which used to get partition is key.
   """
-  @spec delete_same_key_partition(any) :: true
-  def delete_same_key_partition(key) do
+  @spec delete_same_key_partition!(any) :: true
+  def delete_same_key_partition!(key) do
     delete_by_key_partition!(key, key)
   end
 end

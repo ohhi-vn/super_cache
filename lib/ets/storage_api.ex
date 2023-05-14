@@ -86,6 +86,14 @@ defmodule SuperCache.Storage do
   end
 
   @doc """
+  Deletes all data in a partition.
+  """
+  @spec delete_all(atom | :ets.tid()) :: true
+  def delete_all(partition) do
+    Ets.delete_all_objects(partition)
+  end
+
+  @doc """
   Deletes by pattern in a partition.
   """
   @spec delete_match(atom | tuple, atom | :ets.tid()) :: true
