@@ -2,7 +2,7 @@
 
 ## Introduce
 
-This is a auto scale & distriubted (in the future) cache library for Elixir. The library use Ets table for storage data.
+This is a auto scale & distributed (in the future) cache library for Elixir. The library use Ets table for storage data.
 
 ## Design
 
