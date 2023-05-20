@@ -4,7 +4,7 @@ defmodule SuperCache.MixProject do
   def project do
     [
       app: :super_cache,
-      version: "0.3.1-dev",
+      version: "0.3.1",
       elixir: "~> 1.14",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -40,7 +40,7 @@ defmodule SuperCache.MixProject do
   end
 
   defp description() do
-    "A library for cache data in memory"
+    "A library for cache data in memory. The library uses partition storage for a can cache service a mount of request. We are still developing please don't use for product."
   end
 
   defp package() do

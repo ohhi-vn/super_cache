@@ -7,7 +7,9 @@ defmodule SuperCache.StorageTest do
   alias SuperCache.Storage
 
   setup_all do
-    SuperCache.start!()
+    unless SuperCache.started?() do
+      SuperCache.start!()
+    end
     :ok
   end
 
