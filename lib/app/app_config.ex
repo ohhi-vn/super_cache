@@ -1,4 +1,4 @@
-defmodule SuperCache.Api do
+defmodule SuperCache.Config do
   @moduledoc false
 
   use GenServer, restart: :permanent, shutdown: 5_000
@@ -6,7 +6,7 @@ defmodule SuperCache.Api do
 
   defexception message: "incorrect config"
 
-  alias SuperCache.Api
+  alias __MODULE__
 
   @spec start_link(any) :: :ignore | {:error, any} | {:ok, pid}
   @doc """
@@ -25,7 +25,7 @@ defmodule SuperCache.Api do
     if pos < tuple_size(data) do
       elem(data, pos)
     else
-     raise Api, message: "tuple size is lower than key pos"
+     raise Config, message: "tuple size is lower than key pos"
     end
   end
 
@@ -38,7 +38,7 @@ defmodule SuperCache.Api do
     if pos < tuple_size(data) do
       elem(data, pos)
     else
-      raise Api, message: "tuple size is lower than partition pos"
+      raise Config, message: "tuple size is lower than partition pos"
     end
   end
 

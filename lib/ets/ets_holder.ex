@@ -4,11 +4,11 @@ defmodule SuperCache.EtsHolder do
   use GenServer, restart: :temporary
   require Logger
 
-  alias SuperCache.Api
+  alias SuperCache.Config
 
   @spec start_link(any) :: :ignore | {:error, any} | {:ok, pid}
   @doc """
-  Starts the GenServer owner Ets table.
+  Starts the GenServer owner Ets table. The process start then go to hibernate.
   """
   def start_link(name) do
     GenServer.start_link(__MODULE__, name, name: name)
@@ -33,11 +33,11 @@ defmodule SuperCache.EtsHolder do
   ### Callbacks ###
 
   @impl true
-  @spec init(atom) :: {:ok, atom}
+  @spec init(atom) :: {:ok, atom, :hibernate}
   def init(table_name) do
     Logger.info("start process own ets cache table for #{inspect table_name}")
-    key_pos = Api.get_config(:key_pos) + 1 # key order of ets start from 1
-    table_type = Api.get_config(:table_type)
+    key_pos = Config.get_config(:key_pos) + 1 # key order of ets start from 1
+    table_type = Config.get_config(:table_type)
 
     ^table_name = :ets.new(table_name, [
       table_type,
@@ -50,7 +50,7 @@ defmodule SuperCache.EtsHolder do
     ])
     Logger.info("table #{inspect table_name} is created")
 
-    {:ok, table_name}
+    {:ok, table_name, :hibernate}
   end
 
   @impl true

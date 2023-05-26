@@ -19,7 +19,7 @@ defmodule SuperCache do
 
   require Logger
 
-  alias SuperCache.{Partition, Api, Storage}
+  alias SuperCache.{Partition, Config, Storage}
   alias Partition.{Common}
 
   ## API interface ##
@@ -37,7 +37,7 @@ defmodule SuperCache do
   """
   @spec start!() :: :ok
   def start!() do
-    opts = [key_pos: 0, partition_pos: 0]
+    opts = [key_pos: 0, partition_pos: 0, cluster: :local, table_type: :set]
     start!(opts)
   end
 
@@ -63,27 +63,27 @@ defmodule SuperCache do
       raise  ArgumentError, "missed partition_pos"
     end
 
-    Api.clear_config()
+    Config.clear_config()
     Enum.each(opts, fn ({key, value}) ->
       Logger.debug("add config, key: #{inspect key}, value: #{inspect value}")
-      Api.set_config(key, value)
+      Config.set_config(key, value)
     end)
 
     num_part =
-      case Api.get_config(:num_partition, :not_found) do
+      case Config.get_config(:num_partition, :not_found) do
         :not_found ->
           # set default number of partittion
           n = Common.get_schedulers()
-          Api.set_config(:num_partition, n)
+          Config.set_config(:num_partition, n)
           n
         n ->
           n
       end
 
-    case Api.get_config(:table_type, :not_found) do
+    case Config.get_config(:table_type, :not_found) do
       :not_found ->
         # set default table type
-        Api.set_config(:table_type, :set)
+        Config.set_config(:table_type, :set)
       type when type in [:set, :ordered_set, :bag, :duplicate_bag] ->
         :ok
       unsupport ->
@@ -96,7 +96,7 @@ defmodule SuperCache do
     # start to create number of partitions
     Storage.start(num_part)
 
-    Api.set_config(:started, true)
+    Config.set_config(:started, true)
   end
 
 
@@ -105,7 +105,7 @@ defmodule SuperCache do
   """
   @spec started? :: boolean()
   def started?() do
-    Api.get_config(:started, false)
+    Config.get_config(:started, false)
   end
 
   @doc """
@@ -145,7 +145,7 @@ defmodule SuperCache do
   """
   @spec stop() :: :ok
   def stop() do
-    case Api.get_config(:num_partition) do
+    case Config.get_config(:num_partition) do
       nil ->
         Logger.warn("something wrong, cannot shutdown success")
       n when is_integer(n) ->
@@ -153,7 +153,7 @@ defmodule SuperCache do
     end
 
     Partition.stop()
-    Api.set_config(:started, false)
+    Config.set_config(:started, false)
   end
 
   @doc """
@@ -167,9 +167,9 @@ defmodule SuperCache do
   """
   @spec put!(tuple()) :: true
   def put!(data) when is_tuple(data) do
-    part_data = Api.get_partition!(data)
+    part_data = Config.get_partition!(data)
     part = Partition.get_partition(part_data)
-    Logger.debug("store data (key: #{inspect Api.get_key!(data)}) to partition: #{inspect part}")
+    Logger.debug("store data (key: #{inspect Config.get_key!(data)}) to partition: #{inspect part}")
     Storage.put(data, part)
   end
 
@@ -194,8 +194,8 @@ defmodule SuperCache do
   """
   @spec get!(tuple) :: [tuple]
   def get!(data) when is_tuple(data) do
-    key = Api.get_key!(data)
-    part_data = Api.get_partition!(data)
+    key = Config.get_key!(data)
+    part_data = Config.get_partition!(data)
     part = Partition.get_partition(part_data)
     Logger.debug("store data (key: #{inspect key}) to partition: #{inspect part}")
     Storage.get(key, part)
@@ -326,8 +326,8 @@ defmodule SuperCache do
   """
   @spec delete!(tuple) :: true
   def delete!(data) when is_tuple(data) do
-    key = Api.get_key!(data)
-    part_data = Api.get_partition!(data)
+    key = Config.get_key!(data)
+    part_data = Config.get_partition!(data)
     Logger.debug("data used for get partition #{inspect part_data}")
     part = Partition.get_partition(part_data)
     Logger.debug("store data (key: #{inspect key}) to partition: #{inspect part}")

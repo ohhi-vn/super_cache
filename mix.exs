@@ -4,7 +4,7 @@ defmodule SuperCache.MixProject do
   def project do
     [
       app: :super_cache,
-      version: "0.3.1",
+      version: "0.4.0-dev",
       elixir: "~> 1.14",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -13,10 +13,7 @@ defmodule SuperCache.MixProject do
       name: "SuperCache",
       source_url: "https://github.com/ohhi-vn/super_cache",
       homepage_url: "https://ohhi.vn",
-      docs: [
-        main: "SuperCache",
-        extras: ["README.md"]
-      ],
+      docs: docs(),
       description: description(),
       package: package()
     ]
@@ -49,5 +46,35 @@ defmodule SuperCache.MixProject do
       licenses: ["MIT"],
       links: %{"GitHub" => "https://github.com/ohhi-vn/super_cache", "About us" => "https://ohhi.vn/team"}
     ]
+  end
+
+  defp docs do
+    [
+      main: "README.md",
+      extras: extras()
+    ]
+  end
+
+  defp extras do
+    "guide/**/*.md"
+    |> Path.wildcard()
+    |> Enum.map(fn path ->
+      title =
+        path
+        |> Path.basename(".md")
+        |> String.split(~r|[-_]|)
+        |> Enum.map_join(" ", &String.capitalize/1)
+        |> case do
+          "F A Q" ->"FAQ"
+          no_change -> no_change
+        end
+
+      {String.to_atom(path),
+        [
+          title: title,
+          default: title == "Guide"
+        ]
+      }
+    end)
   end
 end
