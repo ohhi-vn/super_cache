@@ -20,7 +20,6 @@ defmodule SuperCache do
   require Logger
 
   alias SuperCache.{Partition, Config, Storage}
-  alias Partition.{Common}
 
   ## API interface ##
 
@@ -37,7 +36,7 @@ defmodule SuperCache do
   """
   @spec start!() :: :ok
   def start!() do
-    opts = [key_pos: 0, partition_pos: 0, cluster: :local, table_type: :set]
+    opts = [key_pos: 0, partition_pos: 0, cluster: :local, table_type: :bag]
     start!(opts)
   end
 

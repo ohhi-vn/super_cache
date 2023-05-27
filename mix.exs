@@ -4,7 +4,7 @@ defmodule SuperCache.MixProject do
   def project do
     [
       app: :super_cache,
-      version: "0.4.0-dev",
+      version: "0.4.0-dev2",
       elixir: "~> 1.14",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -52,14 +52,19 @@ defmodule SuperCache.MixProject do
 
   defp docs do
     [
-      main: "README.md",
+      main: "readme",
       extras: extras()
     ]
   end
 
   defp extras do
-    "guide/**/*.md"
-    |> Path.wildcard()
+    list =
+      "guides/**/*.md"
+      |> Path.wildcard()
+
+    list = list ++ ["README.md"]
+
+    list
     |> Enum.map(fn path ->
       title =
         path
