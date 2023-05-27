@@ -64,16 +64,16 @@ defmodule SuperCache do
     end
 
     Config.clear_config()
-    Enum.each(opts, fn ({key, value}) ->
+    for {key, value} <- opts do
       Logger.debug("add config, key: #{inspect key}, value: #{inspect value}")
       Config.set_config(key, value)
-    end)
+    end
 
     num_part =
       case Config.get_config(:num_partition, :not_found) do
         :not_found ->
           # set default number of partittion
-          n = Common.get_schedulers()
+          n = Partition.get_schedulers()
           Config.set_config(:num_partition, n)
           n
         n ->
@@ -88,6 +88,13 @@ defmodule SuperCache do
         :ok
       unsupport ->
         raise ArgumentError, "unsupport table type, #{inspect unsupport}"
+    end
+
+    case Config.get_config(:table_prefix, :not_found) do
+      :not_found ->
+        Config.set_config(:table_prefix, "SuperCache.Storage.Ets")
+      _ ->
+        :ok
     end
 
     # start partition handle
@@ -324,7 +331,7 @@ defmodule SuperCache do
   @doc """
   Detele data in cache with key & partition store same as `put!` function
   """
-  @spec delete!(tuple) :: true
+  @spec delete!(tuple) :: :ok
   def delete!(data) when is_tuple(data) do
     key = Config.get_key!(data)
     part_data = Config.get_partition!(data)
@@ -332,17 +339,19 @@ defmodule SuperCache do
     part = Partition.get_partition(part_data)
     Logger.debug("store data (key: #{inspect key}) to partition: #{inspect part}")
     Storage.delete(key, part)
+    :ok
   end
 
   @doc """
   Detele all data in cache.
   """
-  @spec delete_all() :: any
+  @spec delete_all() :: :ok
   def delete_all() do
     partitions = List.flatten(Partition.get_all_partition())
-    Enum.each(partitions, fn el ->
-      Storage.delete_all(el)
-    end)
+    for p <- partitions do
+      Storage.delete_all(p)
+    end
+    :ok
   end
 
   @doc """
@@ -358,9 +367,9 @@ defmodule SuperCache do
           [Partition.get_partition(data)]
       end
     Logger.debug("get_by_match_object, list of partition for pattern (#{inspect pattern}): #{inspect partitions})")
-    Enum.each(partitions, fn el ->
-      Storage.delete_match(pattern, el)
-    end)
+    for p <- partitions do
+      Storage.delete_match(pattern, p)
+    end
   end
 
   @doc """

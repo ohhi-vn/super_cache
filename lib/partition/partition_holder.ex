@@ -5,6 +5,7 @@ defmodule SuperCache.Partition.Holder do
 
   require Logger
 
+  alias SuperCache.Config
   alias :ets, as: Ets
 
   ## APIs ##
@@ -59,6 +60,10 @@ defmodule SuperCache.Partition.Holder do
     List.flatten(Ets.match(__MODULE__, {:_, :"$1"}))
   end
 
+  def set_num_partition(num) do
+    GenServer.call(__MODULE__, {:set_num_partition, num})
+  end
+
   ## Callbacks ##
 
   @impl true
@@ -85,18 +90,24 @@ defmodule SuperCache.Partition.Holder do
     {:stop, :ok, state}
   end
 
-  @impl true
   def handle_call(:clean, _from, state) do
     %{table_name: table_name} = state
     {:reply,  clean_up(table_name), state}
   end
 
-  @impl true
-  def handle_call( {:set_partition, order}, _from, state) do
-    %{table_name: table_name} = state
-    partition = String.to_atom("supercache_partition_#{order}")
+  def handle_call({:set_num_partition, num}, _from, %{table_name: table_name} = state) do
+    Logger.debug("update num of partitions, #{inspect num}")
+    Ets.insert(table_name, {:num_partition, num})
+
+    {:reply, :ok, state}
+  end
+
+  def handle_call( {:set_partition, order} , _from, %{table_name: table_name} = state) do
+    prefix = Config.get_config(:table_prefix)
+    partition = String.to_atom("#{prefix}_#{order}")
     Logger.debug("add partition #{inspect partition} for order #{order}")
     Ets.insert(table_name, {order, partition})
+
     {:reply,  :ok, state}
   end
 

@@ -11,13 +11,13 @@ defmodule SuperCache.Sup do
     DynamicSupervisor.start_link(__MODULE__, init_arg, name: __MODULE__)
   end
 
-  @spec start_worker(any) :: :ok
+  @spec start_worker(any) :: any
   def start_worker(workers) do
-    Enum.each(workers, fn spec ->
+    for spec <- workers do
       # TO-DO: Add code handle pid.
       r = DynamicSupervisor.start_child(__MODULE__, spec)
       Logger.debug("result for start child (#{inspect spec}): #{inspect r}")
-    end)
+  end
   end
 
   ## Callback ##

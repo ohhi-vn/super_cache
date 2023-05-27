@@ -3,36 +3,34 @@ defmodule SuperCache.Storage do
 
   require Logger
 
-  alias  SuperCache.{Sup, EtsHolder}
+  alias  SuperCache.{EtsHolder, Config}
   alias :ets, as: Ets
 
   @doc """
-  Starts number of GenServer which hold data.
+  Create all Ets tables.
   """
-  @spec start(pos_integer) :: :ok
+  @spec start(pos_integer) :: any
   def start(num) when is_integer(num) and (num > 0) do
-    workers =
-      Enum.reduce(0..num-1, [], fn (el, result) ->
-        name = String.to_atom("supercache_partition_#{el}")
-        [{EtsHolder, name} | result]
-      end )
-    Logger.debug("start storage workers: #{inspect workers}")
-
-    Sup.start_worker(workers)
+      for order <- 0..num-1 do
+        prefix = Config.get_config(:table_prefix)
+        name = String.to_atom("#{prefix}_#{order}")
+        EtsHolder.new_table(EtsHolder, name)
+      end
   end
 
   @doc """
-  Stops GenServer hold data.
+  Delete all Ets tables.
   """
-  @spec stop(pos_integer) :: :ok
+  @spec stop(pos_integer) :: any
   def stop(num) when is_integer(num) and (num > 0) do
     Logger.debug("stop storage workers (#{num})")
 
-    Enum.each(0..num-1, fn (el) ->
-      name = String.to_atom("supercache_partition_#{el}")
-      Logger.debug("stop storage workers #{inspect name}")
-      EtsHolder.stop(name)
-    end )
+    for order <- 0..num-1 do
+      prefix = Config.get_config(:table_prefix)
+      name = String.to_atom("#{prefix}_#{order}")
+      Logger.debug("remove storage #{inspect name}")
+      EtsHolder.delete_table(EtsHolder, name)
+    end
   end
 
   @doc """

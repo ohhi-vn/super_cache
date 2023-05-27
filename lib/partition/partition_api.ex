@@ -3,14 +3,16 @@ defmodule SuperCache.Partition do
 
   require Logger
 
-  alias SuperCache.Partition.{Common, Holder}
+  alias SuperCache.Partition.Holder
+
+  alias :ets, as: Ets
 
   @doc """
   Gets partition from data.
   """
   @spec get_partition(any) :: atom
   def get_partition(data) do
-    order = Common.get_pattition_order(data)
+    order = get_pattition_order(data)
     Holder.get(order)
   end
 
@@ -25,12 +27,12 @@ defmodule SuperCache.Partition do
   @doc """
   Generates all partitions and store it with order is key of partition.
   """
-  @spec start(pos_integer) :: :ok
+  @spec start(pos_integer) :: any
   def start(num_partition) when is_integer(num_partition) do
-    Common.set_num_partition(num_partition)
-    Enum.each(0..num_partition - 1, fn order ->
+    Holder.set_num_partition(num_partition)
+    for order <- 0..num_partition - 1 do
       Holder.set(order)
-    end)
+    end
   end
 
   @doc """
@@ -40,5 +42,40 @@ defmodule SuperCache.Partition do
   def stop() do
     Holder.clean()
     :ok
+  end
+
+
+  @doc """
+  Gets number of partition in cache.
+  """
+  @spec get_num_partition :: pos_integer
+  def get_num_partition() do
+    [{_, num}] = Ets.lookup(Holder, :num_partition)
+    num
+  end
+
+  @doc """
+  Gets number of online scheduler of VM.
+  """
+  @spec get_schedulers :: pos_integer
+  def get_schedulers() do
+    System.schedulers_online()
+  end
+
+  @doc """
+  Gets hash for data.
+  """
+  @spec get_hash(any) :: non_neg_integer
+  def get_hash(term) do
+    :erlang.phash2(term)
+  end
+
+  @doc """
+  Gets order of partition from data.
+  """
+  @spec get_pattition_order(any) :: non_neg_integer
+  def get_pattition_order(term) do
+    num = get_num_partition()
+    :erlang.phash2(term, num)
   end
 end

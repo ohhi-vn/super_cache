@@ -91,6 +91,14 @@ defmodule SuperCache.Config do
         Map.put(result, key, value)
       end)
 
+    state =
+      if Map.has_key?(state, :table_prefix) do
+        state
+      else
+        Logger.debug("using default prefix for table")
+        Map.put(state, :table_prefix, "SuperCache.Storage.Ets")
+      end
+
     {:ok, state}
   end
 

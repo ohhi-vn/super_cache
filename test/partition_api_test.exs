@@ -14,7 +14,7 @@ defmodule SuperCache.PartitionTest do
 
   test "get partition" do
     order = Partition.Common.get_pattition_order(@data)
-    assert  String.to_atom("supercache_partition_#{order}") == Partition.get_partition(@data)
+    assert  String.to_atom("SuperCache.Storage.Ets_#{order}") == Partition.get_partition(@data)
   end
 
   test "get all partitions" do

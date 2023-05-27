@@ -74,6 +74,8 @@ Client(Client) --> Api(Api)
 
 ## Installation
 
+Requiremnt: Erlang/OTP version 25 or later.
+
 Library can be installed
 by adding `super_cache` to your list of dependencies in `mix.exs`:
 
