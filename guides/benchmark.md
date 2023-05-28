@@ -12,6 +12,16 @@ worker process: 16
 
 ## Script test
 
+Ets table config for both:
+
+```elixir
+  ...
+  {:write_concurrency, true},
+  {:read_concurrency, true},
+  {:decentralized_counters, true}
+  ...
+```
+
 Script is available at tools folder
 
 ## Result
@@ -19,15 +29,16 @@ Script is available at tools folder
 SuperCache:
 
 ```
-write 8000000 records need 11.74s, 681647.69
-read 8000000 records need 1.92s, 4157133.41
-mix read/write 8000000 records need 2.89s, 2770390.07
+lazy write     32_000_000 records need 8.93s, 3_582_236.85 req/s
+write          32_000_000 records need 83.5s, 383_226.81 req/s
+read           32_000_000 records need 8.66s, 3_693_853.43 req/s
+mix read/write 32_000_000 records need 10.88s, 2_942_312.02 req/s
 ```
 
 Read/write direct on one Ets table:
 
 ```
-write 8000000 records need 2.05s, 3905079.24
-read 8000000 records need 1.33s, 5993941.62
-mix read/write  8000000 records need 2.06s, 3884690.73
+write          32_000_000 records need 8.71s, 3_673_013.63 req/s
+read           32_000_000 records need 6.05s, 5_291_856.64 req/s
+mix read/write 32_000_000 records need 9.76s, 3_277_055.37 req/s
 ```

@@ -1,9 +1,16 @@
 defmodule SuperCache.EtsHolderTest do
   use ExUnit.Case
 
+  alias SuperCache.EtsHolder
+
   setup_all do
-    {:ok, _} = SuperCache.EtsHolder.start_link(__MODULE__)
+    {:ok, _} = EtsHolder.start_link(__MODULE__)
+    EtsHolder.new_table(__MODULE__, __MODULE__)
     :ok
+  end
+
+  setup do
+    EtsHolder.clean_all(__MODULE__)
   end
 
   test "insert & get data" do
@@ -13,7 +20,7 @@ defmodule SuperCache.EtsHolderTest do
 
   test "test clean data" do
     :ets.insert(__MODULE__, {:key, "test insert data"})
-    SuperCache.EtsHolder.clean(__MODULE__)
+    SuperCache.EtsHolder.clean(__MODULE__, __MODULE__)
     assert([] == :ets.lookup(__MODULE__, :key))
   end
 end

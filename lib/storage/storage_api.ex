@@ -99,4 +99,12 @@ defmodule SuperCache.Storage do
     Logger.debug("storage, pattern for match: #{inspect pattern}, partition: #{partition}")
     Ets.match_delete(partition, pattern)
   end
+
+  @doc """
+  Get size in partition.
+  """
+  def stats(partition) do
+    counter = Ets.info(partition, :size)
+    {partition, counter}
+  end
 end

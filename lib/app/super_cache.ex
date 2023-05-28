@@ -7,15 +7,10 @@ defmodule SuperCache do
 
   Note: This version doesn't support for cluster.
 
-  ## Examples
-
-      iex> opts = [key_pos: 0, partition_pos: 0, table_type: :bag, num_partition: 3]
-      iex> SuperCache.start(opts)
-      iex> SuperCache.put({:hello, :world, "hello world!"})
-      iex> SuperCache.get_by_key_partition!(:hello, :world)
-      iex> SuperCache.delete_by_key_partition!(:hello, :world)
-
   """
+
+  # fix number of lazy stream for faster request. 8 is common number cores of modern cpu.
+  @num_lazy_worker 8
 
   require Logger
 
@@ -72,7 +67,7 @@ defmodule SuperCache do
       case Config.get_config(:num_partition, :not_found) do
         :not_found ->
           # set default number of partittion
-          n = Partition.get_schedulers()
+          n =  Partition.get_schedulers()
           Config.set_config(:num_partition, n)
           n
         n ->
@@ -114,7 +109,7 @@ defmodule SuperCache do
       Logger.debug("end stream #{inspect name}")
     end
 
-    for id <- 1..10 do
+    for id <- 1..@num_lazy_worker do
       spawn( fn ->
         stream_fun.(id)
       end)
@@ -218,7 +213,7 @@ defmodule SuperCache do
   """
   @spec lazy_put(tuple) :: any
   def lazy_put(data) when is_tuple(data) do
-    id = Enum.random(1..10)
+    id = Enum.random(1..@num_lazy_worker)
     name = String.to_atom("SuperCache.Buffer_#{id}")
     Queue.add(name, data)
   end
@@ -424,5 +419,18 @@ defmodule SuperCache do
   @spec delete_same_key_partition!(any) :: true
   def delete_same_key_partition!(key) do
     delete_by_key_partition!(key, key)
+  end
+
+  @doc """
+  Get stats in all tables
+  """
+  def stats() do
+    partitions = List.flatten(Partition.get_all_partition())
+    list =
+      for p <- partitions do
+        Storage.stats(p)
+      end
+    total = Enum.reduce(list, 0, fn {_, size}, acc -> acc + size end)
+    list ++ [total: total]
   end
 end

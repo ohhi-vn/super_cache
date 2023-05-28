@@ -2,7 +2,7 @@
 alias :ets, as: Ets
 
 SuperCache.start()
-num = 1_000_000
+num = 2_000_000
 worker = 16
 table_name = :test_direct
 

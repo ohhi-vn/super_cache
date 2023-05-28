@@ -17,7 +17,7 @@ defmodule SuperCache.Partition.HolderTest do
 
   test "set & get partition order" do
     Holder.set(0)
-    assert :supercache_partition_0 == Holder.get(0)
+    assert  :"SuperCache.Storage.Ets_0" == Holder.get(0)
   end
 
   test "get all partitions" do

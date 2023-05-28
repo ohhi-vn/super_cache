@@ -1,10 +1,9 @@
 SuperCache.start()
-num = 1_000_000
+num = 100_000
 worker = 16
-table_name = :test_direct
 
 fun_write = fn start, stop ->
-  for i <- start..stop, do: SuperCache.put({i, :a})
+  for i <- start..stop, do: SuperCache.lazy_put({i, :a})
 end
 
 :eprof.start_profiling([self()])
@@ -22,4 +21,4 @@ end)
 :eprof.stop_profiling()
 :eprof.analyze()
 
-IO.puts "SuperCache write #{num * worker} records need #{inspect Float.round(write_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/write_time, 2)}"
+IO.puts "SuperCache write #{num * worker} records need #{inspect Float.round(write_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/write_time, 2)} req/s"

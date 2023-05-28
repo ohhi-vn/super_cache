@@ -1,10 +1,10 @@
 defmodule SuperCache.StorageTest do
   use ExUnit.Case
 
-  @partition :supercache_partition_0
-  @data  {:a, 1, "hello"}
-
   alias SuperCache.Storage
+
+  @data  {:a, 1, "hello"}
+  @partition :"SuperCache.Storage.Ets_0"
 
   setup_all do
     unless SuperCache.started?() do
