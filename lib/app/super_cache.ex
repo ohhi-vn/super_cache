@@ -19,7 +19,7 @@ defmodule SuperCache do
 
   require Logger
 
-  alias SuperCache.{Partition, Config, Storage}
+  alias SuperCache.{Partition, Config, Storage, Queue}
 
   ## API interface ##
 
@@ -101,6 +101,24 @@ defmodule SuperCache do
 
     # start to create number of partitions
     Storage.start(num_part)
+
+    # make stream for lazy write.
+    stream_fun = fn id ->
+      name = String.to_atom("SuperCache.Buffer_#{id}")
+      Logger.debug("starting stream #{inspect name}")
+      q = Queue.start(name)
+
+      SuperCache.Stream.create(q)
+      |> SuperCache.Stream.make_stream_pipe()
+
+      Logger.debug("end stream #{inspect name}")
+    end
+
+    for id <- 1..10 do
+      spawn( fn ->
+        stream_fun.(id)
+      end)
+    end
 
     Config.set_config(:started, true)
   end
@@ -192,6 +210,17 @@ defmodule SuperCache do
         Logger.error(Exception.format(:error, err, __STACKTRACE__))
         {:error, err}
     end
+  end
+
+  @doc """
+  Data is push to buffer before it was written to cache.
+  If you don't need read data immediately this will help improve performance.
+  """
+  @spec lazy_put(tuple) :: any
+  def lazy_put(data) when is_tuple(data) do
+    id = Enum.random(1..10)
+    name = String.to_atom("SuperCache.Buffer_#{id}")
+    Queue.add(name, data)
   end
 
   @doc """

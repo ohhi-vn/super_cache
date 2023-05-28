@@ -2,7 +2,7 @@
 alias :ets, as: Ets
 
 SuperCache.start()
-num = 500_000
+num = 1_000_000
 worker = 16
 table_name = :test_direct
 
@@ -36,6 +36,10 @@ end
 
 fun_write = fn start, stop ->
   for i <- start..stop, do: SuperCache.put({i, :a})
+end
+
+fun_lazy_write = fn start, stop ->
+  for i <- start..stop, do: SuperCache.lazy_put({i, :a})
 end
 
 fun_read = fn start, stop ->
@@ -75,7 +79,7 @@ Ets.delete_all_objects(table_name)
   Task.await_many(list, 120_000)
 end)
 
-IO.puts "Direct write ets #{num * worker} records need #{inspect Float.round(direct_write_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/direct_write_time, 2)}"
+IO.puts "Direct write ets #{num * worker} records need #{inspect Float.round(direct_write_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/direct_write_time, 2)} req/s"
 
 {direct_read_time, _} = :timer.tc(fn ->
   list =
@@ -87,7 +91,7 @@ IO.puts "Direct write ets #{num * worker} records need #{inspect Float.round(dir
   Task.await_many(list, 120_000)
 end)
 
-IO.puts "Direct read ets #{num * worker} records need #{inspect Float.round(direct_read_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/direct_read_time, 2)}"
+IO.puts "Direct read ets #{num * worker} records need #{inspect Float.round(direct_read_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/direct_read_time, 2)} req/s"
 
 {direct_mix_time, _} = :timer.tc(fn ->
   Ets.delete_all_objects(table_name)
@@ -100,10 +104,25 @@ IO.puts "Direct read ets #{num * worker} records need #{inspect Float.round(dire
   Task.await_many(list, 120_000)
 end)
 
-IO.puts "Direct mix read/write ets #{num * worker} records need #{inspect Float.round(direct_mix_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/direct_mix_time, 2)}"
-
+IO.puts "Direct mix read/write ets #{num * worker} records need #{inspect Float.round(direct_mix_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/direct_mix_time, 2)} req/s"
+IO.puts ""
 
 Ets.delete_all_objects(table_name)
+
+{write_time, _} = :timer.tc(fn ->
+  list =
+    for i <- 1..worker do
+      Task.async( fn ->
+        fun_lazy_write.(i * num, (i + 1) * num)
+      end)
+    end
+  Task.await_many(list, 120_000)
+end)
+
+IO.puts "SuperCache lazy write #{num * worker} records need #{inspect Float.round(write_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/write_time, 2)} req/s"
+
+
+SuperCache.delete_all()
 
 {write_time, _} = :timer.tc(fn ->
   list =
@@ -115,7 +134,7 @@ Ets.delete_all_objects(table_name)
   Task.await_many(list, 120_000)
 end)
 
-IO.puts "SuperCache write #{num * worker} records need #{inspect Float.round(write_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/write_time, 2)}"
+IO.puts "SuperCache write #{num * worker} records need #{inspect Float.round(write_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/write_time, 2)} req/s"
 
 {read_time, _} = :timer.tc(fn ->
   list =
@@ -127,7 +146,7 @@ IO.puts "SuperCache write #{num * worker} records need #{inspect Float.round(wri
   Task.await_many(list, 120_000)
 end)
 
-IO.puts "SuperCache read #{num * worker} records need #{inspect Float.round(read_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/read_time, 2)}"
+IO.puts "SuperCache read #{num * worker} records need #{inspect Float.round(read_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/read_time, 2)} req/s"
 
 {mix_time, _} = :timer.tc(fn ->
   SuperCache.delete_all()
@@ -140,7 +159,8 @@ IO.puts "SuperCache read #{num * worker} records need #{inspect Float.round(read
   Task.await_many(list, 120_000)
 end)
 
-IO.puts "SuperCache mix read/write #{num * worker} records need #{inspect Float.round(mix_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/mix_time, 2)}"
+IO.puts "SuperCache mix read/write #{num * worker} records need #{inspect Float.round(mix_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/mix_time, 2)} req/s"
+IO.puts ""
 
 SuperCache.delete_all()
 

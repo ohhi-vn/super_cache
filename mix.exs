@@ -4,7 +4,7 @@ defmodule SuperCache.MixProject do
   def project do
     [
       app: :super_cache,
-      version: "0.4.1",
+      version: "0.5.1-dev",
       elixir: "~> 1.14",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

@@ -24,7 +24,7 @@ read 8000000 records need 1.92s, 4157133.41
 mix read/write 8000000 records need 2.89s, 2770390.07
 ```
 
-Read/write direct on ETS:
+Read/write direct on one Ets table:
 
 ```
 write 8000000 records need 2.05s, 3905079.24
