@@ -50,7 +50,7 @@ defmodule SuperCache.Partition do
   """
   @spec get_num_partition :: pos_integer
   def get_num_partition() do
-    [{_, num}] = Ets.lookup(Holder, :num_partition)
+    [{_, _, num}] = Ets.lookup(Holder, :num_partition)
     num
   end
 

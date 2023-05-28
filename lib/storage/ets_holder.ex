@@ -117,7 +117,6 @@ defmodule SuperCache.EtsHolder do
       {:decentralized_counters, true}
     ])
     Logger.info("table #{inspect table_name} is created")
-
-    {:ok, table_name, :hibernate}
+    :ok
   end
 end

@@ -77,7 +77,8 @@ defmodule SuperCache.Partition.Holder do
       :set,
       :protected,
       :named_table,
-      {:read_concurrency, true}
+      {:read_concurrency, true},
+      {:decentralized_counters, true}
       ])
 
     Logger.info("table #{inspect table_name} is created")
@@ -97,7 +98,7 @@ defmodule SuperCache.Partition.Holder do
 
   def handle_call({:set_num_partition, num}, _from, %{table_name: table_name} = state) do
     Logger.debug("update num of partitions, #{inspect num}")
-    Ets.insert(table_name, {:num_partition, num})
+    Ets.insert(table_name, {:num_partition, :config, num})
 
     {:reply, :ok, state}
   end

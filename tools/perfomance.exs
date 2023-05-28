@@ -2,7 +2,7 @@
 alias :ets, as: Ets
 
 SuperCache.start()
-num = 1_000_000
+num = 500_000
 worker = 16
 table_name = :test_direct
 
@@ -60,7 +60,7 @@ end
         fun_direct_write.(i * num, (i + 1) * num)
       end)
     end
-  Task.await_many(list, 60_000)
+  Task.await_many(list, 120_000)
 end)
 
 Ets.delete_all_objects(table_name)
@@ -69,10 +69,10 @@ Ets.delete_all_objects(table_name)
   list =
     for i <- 1..worker do
       Task.async( fn ->
-        fun_direct_read.(i * num, (i + 1) * num)
+        fun_direct_write.(i * num, (i + 1) * num)
       end)
     end
-  Task.await_many(list, 60_000)
+  Task.await_many(list, 120_000)
 end)
 
 IO.puts "Direct write ets #{num * worker} records need #{inspect Float.round(direct_write_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/direct_write_time, 2)}"
@@ -84,19 +84,20 @@ IO.puts "Direct write ets #{num * worker} records need #{inspect Float.round(dir
         fun_direct_read.(i * num, (i + 1) * num)
       end)
     end
-  Task.await_many(list, 60_000)
+  Task.await_many(list, 120_000)
 end)
 
 IO.puts "Direct read ets #{num * worker} records need #{inspect Float.round(direct_read_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/direct_read_time, 2)}"
 
 {direct_mix_time, _} = :timer.tc(fn ->
+  Ets.delete_all_objects(table_name)
   list =
     for i <- 1..worker do
       Task.async( fn ->
-        fun_direct_read.(i * num, (i + 1) * num)
+        fun_direct_mix.(i * num, (i + 1) * num)
       end)
     end
-  Task.await_many(list, 60_000)
+  Task.await_many(list, 120_000)
 end)
 
 IO.puts "Direct mix read/write ets #{num * worker} records need #{inspect Float.round(direct_mix_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/direct_mix_time, 2)}"
@@ -111,7 +112,7 @@ Ets.delete_all_objects(table_name)
         fun_write.(i * num, (i + 1) * num)
       end)
     end
-  Task.await_many(list, 60_000)
+  Task.await_many(list, 120_000)
 end)
 
 IO.puts "SuperCache write #{num * worker} records need #{inspect Float.round(write_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/write_time, 2)}"
@@ -123,19 +124,20 @@ IO.puts "SuperCache write #{num * worker} records need #{inspect Float.round(wri
         fun_read.(i * num, (i + 1) * num)
       end)
     end
-  Task.await_many(list, 60_000)
+  Task.await_many(list, 120_000)
 end)
 
 IO.puts "SuperCache read #{num * worker} records need #{inspect Float.round(read_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/read_time, 2)}"
 
 {mix_time, _} = :timer.tc(fn ->
+  SuperCache.delete_all()
   list =
     for i <- 1..worker do
       Task.async( fn ->
-        fun_read.(i * num, (i + 1) * num)
+        fun_mix.(i * num, (i + 1) * num)
       end)
     end
-  Task.await_many(list, 60_000)
+  Task.await_many(list, 120_000)
 end)
 
 IO.puts "SuperCache mix read/write #{num * worker} records need #{inspect Float.round(mix_time/1_000_000, 2)}s, #{inspect Float.round(1_000_000 * num * worker/mix_time, 2)}"
@@ -143,7 +145,7 @@ IO.puts "SuperCache mix read/write #{num * worker} records need #{inspect Float.
 SuperCache.delete_all()
 
 # break for test req/s only
-#raise "stop"
+raise "stop"
 
 ##  test with Benchee
 
@@ -159,7 +161,7 @@ end, order: false, max_concurrent: 5)
 
 read_10p = Task.async_stream(list, fn index ->
   {:ok,  SuperCache.get_same_key_partition!(index)}
-end, order: false, max_concurrent: 100)
+end, order: false, max_concurrent: 10)
 
 write_1p = Task.async_stream(list, fn index ->
   {:ok, SuperCache.put({index, :a})}
@@ -171,7 +173,7 @@ end, order: false, max_concurrent: 5)
 
 write_10p = Task.async_stream(list, fn index ->
   {:ok,  SuperCache.put({index, :a})}
-end, order: false, max_concurrent: 100)
+end, order: false, max_concurrent: 10)
 
 Benchee.run(%{
   "write 1 process" => fn -> Enum.to_list(write_1p) end,

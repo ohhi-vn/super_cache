@@ -19,15 +19,15 @@ Script is available at tools folder
 SuperCache:
 
 ```
-write          16000000 records need 24.28s, 658985.21 req/s
-read           16000000 records need 4.23s, 3785034.64 req/s
-mix read/write 16000000 records need 4.37s, 3661480.56 req/s
+write 8000000 records need 11.74s, 681647.69
+read 8000000 records need 1.92s, 4157133.41
+mix read/write 8000000 records need 2.89s, 2770390.07
 ```
 
 Read/write direct on ETS:
 
 ```
-write              16000000 records need 1.33s, 12060980.32 req/s
-read               16000000 records need 1.21s, 13196790.54 req/s
-mix read/write ets 16000000 records need 1.1s, 14547067.95 req/s
+write 8000000 records need 2.05s, 3905079.24
+read 8000000 records need 1.33s, 5993941.62
+mix read/write  8000000 records need 2.06s, 3884690.73
 ```
