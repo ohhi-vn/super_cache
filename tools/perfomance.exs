@@ -2,8 +2,8 @@
 alias :ets, as: Ets
 
 SuperCache.start()
-num = 2_000_000
-worker = 16
+num = 500_000
+worker = 30
 table_name = :test_direct
 
 Ets.new(table_name, [
@@ -61,7 +61,7 @@ end
   list =
     for i <- 1..worker do
       Task.async( fn ->
-        fun_direct_write.(i * num, (i + 1) * num)
+        fun_direct_write.(i * num, div((i + 1) * num, 2))
       end)
     end
   Task.await_many(list, 120_000)

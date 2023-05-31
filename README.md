@@ -82,7 +82,7 @@ by adding `super_cache` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:super_cache, "~> 0.3.0"}
+    {:super_cache, "~> 0.5.2"}
   ]
 end
 ```
@@ -130,4 +130,4 @@ SuperCache.get_by_key_partition!(:hello, :world)
 SuperCache.delete_by_key_partition!(:hello, :world)
 ```
 
-Other APIs please go to document on hexdocs.pm
+Other APIs please go to document on [hexdocs.pm](https://hexdocs.pm/super_cache/readme.html)

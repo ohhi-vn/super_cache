@@ -8,8 +8,6 @@ CPU AMD 3700x (8C/16T)
 
 RAM 64GB 2600
 
-worker process: 16
-
 ## Script test
 
 Ets table config for both:
@@ -25,6 +23,10 @@ Ets table config for both:
 Script is available at tools folder
 
 ## Result
+
+### 16 worker processes
+
+16 processes are send requests to target.
 
 SuperCache:
 
@@ -42,3 +44,5 @@ write          32_000_000 records need 8.71s, 3_673_013.63 req/s
 read           32_000_000 records need 6.05s, 5_291_856.64 req/s
 mix read/write 32_000_000 records need 9.76s, 3_277_055.37 req/s
 ```
+
+### 40 worker processes
