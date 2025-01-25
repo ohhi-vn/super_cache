@@ -26,3 +26,5 @@ super_cache-*.tar
 /tmp/
 
 mix.lock
+
+.DS_Store

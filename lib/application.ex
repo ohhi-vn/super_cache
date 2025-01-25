@@ -10,7 +10,8 @@ defmodule SuperCache.Application do
   @impl true
   @spec start(any, any) :: {:error, any} | {:ok, pid}
   def start(_type, _args) do
-    Logger.info("startting SuperCache app...")
+    Logger.info("super_cache, application, startting SuperCache app...")
+
     children = [
       {SuperCache.Config, [key_pos: 0, partition_pos: 0]},
       {SuperCache.Sup, []},
@@ -18,10 +19,11 @@ defmodule SuperCache.Application do
       {SuperCache.EtsHolder, SuperCache.EtsHolder}
     ]
 
-    Logger.info("startting SuperCache with workers: #{inspect children}")
+    Logger.info("super_cache, application, starting with workers: #{inspect children}")
     # See https://hexdocs.pm/elixir/Supervisor.html
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: Api.Supervisor]
+
     Supervisor.start_link(children, opts)
   end
 end

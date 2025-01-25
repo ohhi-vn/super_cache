@@ -3,14 +3,13 @@ defmodule SuperCache do
   @moduledoc """
   SeperCache is a library support for caching data in memory. The library is based on Ets table.
   SuperCache support auto scale based on number of cpu cores and easy to use.
-  type of data is supported is tuple, other type of data can put in a tuple an storage in SuperCache.
-
-  Note: This version doesn't support for cluster.
+  Type of data is supported is tuple, other type of data can put in a tuple an storage in SuperCache.
+  Support replicate data to multi nodes in Elixir cluster.
 
   """
 
-  # fix number of lazy stream for faster request. 8 is common number cores of modern cpu.
-  @num_lazy_worker 8
+  # fix number of lazy stream for faster request. 8-24 is common number cores of modern cpu.
+  @num_lazy_worker 10
 
   require Logger
 
@@ -19,7 +18,7 @@ defmodule SuperCache do
   ## API interface ##
 
   @doc """
-  Start SuperCache service. This function will use default config.
+  Start SuperCache service (use default config).
 
   If function is failed, it will raise a error.
 
@@ -40,11 +39,11 @@ defmodule SuperCache do
 
   Config is in Keyword list
 
-  If key_pos or parition_pos is missed, start SuperCache will fail.
+  If key_pos or parition_pos is missed, start SuperCache will raise an error.
   """
   @spec start!(list(tuple())) :: :ok
   def start!(opts) do
-    Logger.info("start SuperCache with options: #{inspect opts}")
+    Logger.info("super_cache, api, start SuperCache with options: #{inspect opts}")
     unless Keyword.keyword?(opts) do
       raise ArgumentError, "incorrect options"
     end
@@ -59,7 +58,7 @@ defmodule SuperCache do
 
     Config.clear_config()
     for {key, value} <- opts do
-      Logger.debug("add config, key: #{inspect key}, value: #{inspect value}")
+      Logger.debug("super_cache, api, add config, key: #{inspect key}, value: #{inspect value}")
       Config.set_config(key, value)
     end
 
@@ -100,7 +99,7 @@ defmodule SuperCache do
     # make stream for lazy write.
     stream_fun = fn id ->
       name = String.to_atom("SuperCache.Buffer_#{id}")
-      Logger.debug("starting stream #{inspect name}")
+      Logger.debug("super_cache, api, starting stream #{inspect name}")
       q = Queue.start(name)
 
       SuperCache.Stream.create(q)
@@ -166,7 +165,7 @@ defmodule SuperCache do
   def stop() do
     case Config.get_config(:num_partition) do
       nil ->
-        Logger.warn("something wrong, cannot shutdown success")
+        Logger.warning("super_cache, api, something wrong, cannot shutdown success")
       n when is_integer(n) ->
         Storage.stop(n)
     end
@@ -188,7 +187,7 @@ defmodule SuperCache do
   def put!(data) when is_tuple(data) do
     part_data = Config.get_partition!(data)
     part = Partition.get_partition(part_data)
-    Logger.debug("store data (key: #{inspect Config.get_key!(data)}) to partition: #{inspect part}")
+    Logger.debug("super_cache, api, store data (key: #{inspect Config.get_key!(data)}) to partition: #{inspect part}")
     Storage.put(data, part)
   end
 
@@ -227,7 +226,7 @@ defmodule SuperCache do
     key = Config.get_key!(data)
     part_data = Config.get_partition!(data)
     part = Partition.get_partition(part_data)
-    Logger.debug("store data (key: #{inspect key}) to partition: #{inspect part}")
+    Logger.debug("super_cache, api, store data (key: #{inspect key}) to partition: #{inspect part}")
     Storage.get(key, part)
   end
 
@@ -252,7 +251,7 @@ defmodule SuperCache do
   @spec get_by_key_partition!(any, any) :: [tuple]
   def get_by_key_partition!(key, partition) do
     part = Partition.get_partition(partition)
-    Logger.debug("get data (key: #{inspect key}) from partition #{inspect part}")
+    Logger.debug("super_cache, api, get data (key: #{inspect key}) from partition #{inspect part}")
     Storage.get(key, part)
   end
 
@@ -281,7 +280,7 @@ defmodule SuperCache do
         data -> # scan one partition
           [Partition.get_partition(data)]
       end
-    Logger.debug("get_by_match, list of partition for pattern (#{inspect pattern}): #{inspect partitions})")
+    Logger.debug("super_cache, api, get_by_match, list of partition for pattern (#{inspect pattern}): #{inspect partitions})")
     Enum.reduce(partitions, [], fn el, result ->
       Storage.get_by_match(pattern, el) ++ result
     end)
@@ -310,7 +309,7 @@ defmodule SuperCache do
         data -> # scan one partition
           [Partition.get_partition(data)]
       end
-    Logger.debug("get_by_match_object, list of partition for pattern (#{inspect pattern}): #{inspect partitions})")
+    Logger.debug("super_cache, api, get_by_match_object, list of partition for pattern (#{inspect pattern}): #{inspect partitions})")
     Enum.reduce(partitions, [], fn el, result ->
       Storage.get_by_match_object(pattern, el) ++ result
     end)
@@ -337,7 +336,7 @@ defmodule SuperCache do
         data -> # scan one partition
           [Partition.get_partition(data)]
       end
-    Logger.debug("fold, list of partition: #{inspect partitions})")
+    Logger.debug("super_cache, api, scan, list of partition: #{inspect partitions})")
     Enum.reduce(partitions, acc, fn el, result ->
       Storage.scan(fun, result, el)
     end)
@@ -358,9 +357,9 @@ defmodule SuperCache do
   def delete!(data) when is_tuple(data) do
     key = Config.get_key!(data)
     part_data = Config.get_partition!(data)
-    Logger.debug("data used for get partition #{inspect part_data}")
+    Logger.debug("super_cache, api, data used for get partition #{inspect part_data}")
     part = Partition.get_partition(part_data)
-    Logger.debug("store data (key: #{inspect key}) to partition: #{inspect part}")
+    Logger.debug("super_cache, api, store data (key: #{inspect key}) to partition: #{inspect part}")
     Storage.delete(key, part)
     :ok
   end
@@ -389,7 +388,7 @@ defmodule SuperCache do
         data -> # scan one partition
           [Partition.get_partition(data)]
       end
-    Logger.debug("get_by_match_object, list of partition for pattern (#{inspect pattern}): #{inspect partitions})")
+    Logger.debug("super_cache, api, get_by_match_object, list of partition for pattern (#{inspect pattern}): #{inspect partitions})")
     for p <- partitions do
       Storage.delete_match(pattern, p)
     end
@@ -409,7 +408,7 @@ defmodule SuperCache do
   @spec delete_by_key_partition!(any, any) :: true
   def delete_by_key_partition!(key, partition_data) do
     part = Partition.get_partition(partition_data)
-    Logger.debug("get data (key: #{inspect key}) from partition #{inspect part}")
+    Logger.debug("super_cache, api, get data (key: #{inspect key}) from partition #{inspect part}")
     Storage.delete(key, part)
   end
 
@@ -432,5 +431,210 @@ defmodule SuperCache do
       end
     total = Enum.reduce(list, 0, fn {_, size}, acc -> acc + size end)
     list ++ [total: total]
+  end
+
+  @doc """
+  Add key-value to cache. Key is used to get target partition to store data.
+  Use can use multiple kv cache by using different kv_name.
+  """
+  @spec kv_add(atom, any, any) :: true
+  def kv_add(kv_name, key, value) when is_atom(kv_name) do
+    part = Partition.get_partition(key)
+    Logger.debug("super_cache, kv, name: #{inspect kv_name} store key: #{inspect key} to partition: #{inspect part}")
+    Storage.put({{:kv, kv_name, key}, value}, part)
+  end
+
+  @doc """
+  Get value by key.
+  Key is belong wit kv_name.
+  """
+  @spec kv_get(any, any, any) :: any
+  def kv_get(kv_name, key, default \\ nil) do
+    part = Partition.get_partition(key)
+    Logger.debug("super_cache, kv, name: #{inspect kv_name } get value of key: #{inspect key} from partition: #{inspect part}")
+    case Storage.get({:kv, kv_name, key}, part) do
+      [] -> default
+      [{_, value}] -> value
+    end
+  end
+
+  @doc """
+  Get all keys in kv_name cache.
+  """
+  @spec kv_keys(any) :: [any]
+  def kv_keys(kv_name) do
+    get_by_match_object!({{:kv, kv_name, :_}, :_})
+    |>  Enum.map(fn {{:kv, ^kv_name, key}, _} -> key end)
+  end
+
+  @doc """
+  Get all values in kv_name cache.
+  """
+  @spec kv_values(any) :: [any]
+  def kv_values(kv_name) do
+    get_by_match_object!({{:kv, kv_name, :_}, :_})
+    |>  Enum.map(fn {{:kv, ^kv_name, _}, value} -> value end)
+  end
+
+  @doc """
+  Add value to stack has name is stack_name.
+  If stack_name is not existed, it will be created.
+  """
+  @spec stack_push(any, any) :: true
+  def stack_push(stack_name, value) do
+    part = Partition.get_partition(stack_name)
+
+    stack_push(part, stack_name, value)
+  end
+
+  @doc """
+  Pop value from stack with name is stack_name.
+  If stack_name is not existed or no data, it will return default value.
+  """
+  @spec stack_pop(any, any) :: any
+  def stack_pop(stack_name, default \\nil) do
+    part = Partition.get_partition(stack_name)
+    stack_pop(part, stack_name, default)
+  end
+
+
+  @doc """
+  Add value to queue with name is queue_name.
+  Queue is a FIFO data structure. If queue_name is not existed, it will be created.
+  """
+  @spec queue_in(any, any) :: true
+  def queue_in(queue_name, value) do
+    part = Partition.get_partition(queue_name)
+
+    queue_in(part, queue_name, value)
+  end
+
+  @doc """
+  Pop value from queue with name is queue_name.
+  If queue_name is not existed or no data, it will return default value.
+  """
+  def queue_out(queue_name, default \\ nil) do
+    part = Partition.get_partition(queue_name)
+    queue_out(part, queue_name, default)
+  end
+
+
+  ## private functions ##
+
+  defp stack_push(partition, stack_name, value) do
+    case Storage.take({:stack, :counter, stack_name}, partition) do
+      [] -> # stack is not initialized
+        case Storage.get({{:stack, :updating, stack_name}, :_}, partition) do
+          [] -> # stack is not initialized
+            stack_init(stack_name)
+            stack_push(partition, stack_name, value)
+          [{_, true}] -> # stack is updating
+            Process.sleep(0) # wait for stack is ready
+            stack_push(partition, stack_name, value)
+          [{_, false}] -> # stack is ready to app
+            stack_push(partition, stack_name, value)
+        end
+      [{_, counter}] ->
+        next_counter = counter + 1
+        Storage.put({{:stack, :updating, stack_name}, true}, partition)
+        Storage.put({{:stack, :counter, stack_name}, next_counter}, partition)
+        Storage.put({{:stack, stack_name, next_counter}, value}, partition)
+        Storage.put({{:stack, :updating, stack_name}, false}, partition)
+        Logger.debug("super_cache, stack, push value: #{inspect value} to stack: #{inspect stack_name}")
+        true
+    end
+  end
+
+  defp stack_pop(partition, stack_name, default) do
+    case Storage.take({:stack, :counter, stack_name}, partition) do
+      [] -> # stack is not initialized
+        case Storage.get({{:stack, :updating, stack_name}, :_}, partition) do
+          [] -> # stack is not initialized
+            default
+          [{_, true}] -> # stack is updating
+            Process.sleep(0) # wait for stack is ready
+            stack_pop(partition, stack_name, default)
+          [{_, false}] -> # stack is ready to app
+            stack_pop(partition, stack_name, default)
+        end
+      [{_, counter}] when counter > 0 ->
+        next_counter = counter - 1
+        Storage.put({{:stack, :updating, stack_name}, true}, partition)
+        Storage.put({{:stack, :counter, stack_name}, next_counter}, partition)
+        [{_, value}] = Storage.take({:stack, stack_name, counter}, partition)
+        Storage.put({{:stack, :updating, stack_name}, false}, partition)
+        Logger.debug("super_cache, stack, push value: #{inspect value} to stack: #{inspect stack_name}")
+
+        value
+      [{_, 0}]  ->
+        default
+    end
+  end
+
+  defp stack_init(stack_name) do
+    Logger.debug("super_cache, stack, init stack: #{inspect stack_name}")
+    part = Partition.get_partition(stack_name)
+    # {{:stack, stack_name}, counter} is key of stack
+    Storage.put({{:stack, :counter, stack_name}, 0}, part)
+    Storage.put({{:stack, :updating, stack_name}, false}, part)
+  end
+
+  defp queue_in(partition, queue_name, value) do
+    case Storage.take({:queue, :tail, queue_name}, partition) do
+      [] -> # stack is not initialized
+        case Storage.get({{:queue, :updating, queue_name}, :_}, partition) do
+          [] -> # stack is not initialized
+            queue_init(queue_name)
+            queue_in(partition, queue_name, value)
+          [{_, true}] -> # queue is updating
+            Process.sleep(0) # wait for stack is ready
+            queue_in(partition, queue_name, value)
+          [{_, false}] -> # queue is ready to app
+            queue_in(partition, queue_name, value)
+        end
+      [{_, counter}] ->
+        next_counter = counter + 1
+        Storage.put({{:queue, :updating, queue_name}, true}, partition)
+        Storage.put({{:queue, queue_name, next_counter}, value}, partition)
+        Storage.put({{:queue, :tail, queue_name}, next_counter}, partition)
+        Storage.put({{:queue, :updating, queue_name}, false}, partition)
+
+        Logger.debug("super_cache, queue, push value: #{inspect value} to queue #{inspect queue_name}")
+        true
+    end
+  end
+
+
+  defp queue_out(partition, queue_name, default) do
+    case Storage.take({:queue, :head, queue_name}, partition) do
+      [] -> # stack is not initialized
+        case Storage.get({:queue, :updating, queue_name}, partition) do
+          [] -> # stack is not initialized
+            default
+          [{_, true}] -> # queue is updating
+            Process.sleep(0) # wait for stack is ready
+            queue_out(partition, queue_name, default)
+          [{_, false}] -> # queue is ready to app
+            queue_out(partition, queue_name, default)
+        end
+      [{_, counter}] ->
+        next_counter = counter + 1
+        Storage.put({{:queue, :updating, queue_name}, true}, partition)
+        [{_, value}] = Storage.take({:queue, queue_name, counter}, partition)
+        Storage.put({{:queue, :head, queue_name}, next_counter}, partition)
+        Storage.put({{:queue, :updating, queue_name}, false}, partition)
+
+        Logger.debug("super_cache, queue, push value: #{inspect value} to queue #{inspect queue_name}")
+        value
+    end
+  end
+
+  defp queue_init(queue_name) do
+    Logger.debug("super_cache, stack, init stack: #{inspect queue_name}")
+    part = Partition.get_partition(queue_name)
+    # {{:queue, queue_name}, counter} is key of stack
+    Storage.put({{:queue, :updating, queue_name}, false}, part)
+    Storage.put({{:queue, :head, queue_name}, 0}, part)
+    Storage.put({{:queue, :tail, queue_name}, 0}, part)
   end
 end

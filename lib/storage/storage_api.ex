@@ -23,12 +23,12 @@ defmodule SuperCache.Storage do
   """
   @spec stop(pos_integer) :: any
   def stop(num) when is_integer(num) and (num > 0) do
-    Logger.debug("stop storage workers (#{num})")
+    Logger.debug("super_cache, storage, stop storage workers (#{num})")
 
     for order <- 0..num-1 do
       prefix = Config.get_config(:table_prefix)
       name = String.to_atom("#{prefix}_#{order}")
-      Logger.debug("remove storage #{inspect name}")
+      Logger.debug("super_cache, storage, remove storage #{inspect name}")
       EtsHolder.delete_table(EtsHolder, name)
     end
   end
@@ -54,7 +54,7 @@ defmodule SuperCache.Storage do
   """
   @spec get_by_match(atom | tuple, atom | :ets.tid()) :: [list]
   def get_by_match(pattern, partition) do
-    Logger.debug("storage, pattern for match: #{inspect pattern}, partition: #{partition}")
+    Logger.debug("super_cache, storage, pattern for match: #{inspect pattern}, partition: #{partition}")
     Ets.match(partition, pattern)
   end
 
@@ -63,7 +63,7 @@ defmodule SuperCache.Storage do
   """
   @spec get_by_match_object(atom | tuple, atom | :ets.tid()) :: [tuple]
   def get_by_match_object(pattern, partition) do
-    Logger.debug("storage, pattern for match: #{inspect pattern}, partition: #{partition}")
+    Logger.debug("super_cache, storage, pattern for match: #{inspect pattern}, partition: #{partition}")
     Ets.match_object(partition, pattern)
   end
 
@@ -96,8 +96,17 @@ defmodule SuperCache.Storage do
   """
   @spec delete_match(atom | tuple, atom | :ets.tid()) :: true
   def delete_match(pattern, partition) do
-    Logger.debug("storage, pattern for match: #{inspect pattern}, partition: #{partition}")
+    Logger.debug("super_cache, storage, pattern for match: #{inspect pattern}, partition: #{partition}")
     Ets.match_delete(partition, pattern)
+  end
+
+  @doc """
+  Takes data in a partition.
+  Data is removed after taking.
+  """
+  @spec take(any, atom | :ets.tid()) :: [tuple]
+  def take(partition, key) do
+    Ets.take(partition, key)
   end
 
   @doc """

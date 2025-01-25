@@ -29,7 +29,8 @@ defmodule SuperCache.ClusterMan do
   end
 
   @impl true
-  def handle_call({:add_nodes, nodes}, _from, state) do
+  def handle_call({:add_nodes, _nodes}, _from, state) do
 
+    {:reply, {:error, "unimplemented"}, state}
   end
 end

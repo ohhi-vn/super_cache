@@ -1,6 +1,6 @@
 defmodule SuperCache.Partition.HolderTest do
   use ExUnit.Case
-\
+
   alias SuperCache.Partition.Holder
 
   setup_all do

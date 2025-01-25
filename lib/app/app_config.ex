@@ -2,6 +2,7 @@ defmodule SuperCache.Config do
   @moduledoc false
 
   use GenServer, restart: :permanent, shutdown: 5_000
+
   require Logger
 
   defexception message: "incorrect config"
@@ -85,7 +86,7 @@ defmodule SuperCache.Config do
   @impl true
   @spec init(list(tuple)) :: {:ok, map}
   def init(opts) do
-    Logger.info("start api process with default config #{inspect opts}")
+    Logger.debug("super_cache, init, start api process with default config #{inspect opts}")
     state =
       Enum.reduce(opts, %{}, fn ({key, value}, result) ->
         Map.put(result, key, value)
@@ -95,7 +96,7 @@ defmodule SuperCache.Config do
       if Map.has_key?(state, :table_prefix) do
         state
       else
-        Logger.debug("using default prefix for table")
+        Logger.debug("super_cache, init, using default prefix for table")
         Map.put(state, :table_prefix, "SuperCache.Storage.Ets")
       end
 
