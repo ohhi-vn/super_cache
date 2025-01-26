@@ -1,4 +1,4 @@
-## Guide
+# Guide
 
 SuperCache is similar to Ets for easy to use.
 Current version, it's support limited function from Ets, ex: insert, lookup, delete, match_object, scan object.
@@ -8,7 +8,8 @@ Start SuperCache with default config:
 ```elixir
 SuperCache.start!()
 ```
-*(key_pos = partition_pos = 0, table_type = :set, num_partition = on_line schedulers of Erlang VM)*
+
+*default config: [key_pos = partition_pos = 0, table_type = :set, num_partition = online schedulers of Erlang VM]*
 
 Start with config:
 
@@ -25,10 +26,11 @@ Note:
 
 3. table_type: Type of Ets table.
 
-4. num_partition: Number of partitions (= number of Ets table).
+4. num_partition: Number of partitions (= number of Ets table) on a node.
 
 In almost case `key_pos` and `partition_pos` is same.
 If you need to organize data for fast access you can choose right data to calculate partition.
+Each partition have one or more replicated partition for local access & backup.
 
 Basic usage:
 

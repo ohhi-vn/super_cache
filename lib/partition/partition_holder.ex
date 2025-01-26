@@ -70,7 +70,7 @@ defmodule SuperCache.Partition.Holder do
   @spec init(any) :: {:ok, %{table_name: SuperCache.Partition.Holder}}
   def init(_opts) do
     table_name = __MODULE__
-    Logger.info("start process own ets cache table for #{inspect table_name}")
+    Logger.info("super_cache, partition holder, start process own ets cache table for #{inspect table_name}")
     state = %{table_name: table_name}
 
     ^table_name = Ets.new(table_name, [
@@ -81,7 +81,7 @@ defmodule SuperCache.Partition.Holder do
       {:decentralized_counters, true}
       ])
 
-    Logger.info("table #{inspect table_name} is created")
+    Logger.info("super_cache, partition holder, table #{inspect table_name} is created")
 
     {:ok, state}
   end
@@ -97,7 +97,7 @@ defmodule SuperCache.Partition.Holder do
   end
 
   def handle_call({:set_num_partition, num}, _from, %{table_name: table_name} = state) do
-    Logger.debug("update num of partitions, #{inspect num}")
+    Logger.debug("super_cache, partition holder, update num of partitions, #{inspect num}")
     Ets.insert(table_name, {:num_partition, :config, num})
 
     {:reply, :ok, state}
@@ -106,7 +106,7 @@ defmodule SuperCache.Partition.Holder do
   def handle_call( {:set_partition, order} , _from, %{table_name: table_name} = state) do
     prefix = Config.get_config(:table_prefix)
     partition = String.to_atom("#{prefix}_#{order}")
-    Logger.debug("add partition #{inspect partition} for order #{order}")
+    Logger.debug("super_cache, partition holder, add partition #{inspect partition} for order #{order}")
     Ets.insert(table_name, {order, partition})
 
     {:reply,  :ok, state}

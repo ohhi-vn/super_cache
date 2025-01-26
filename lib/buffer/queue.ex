@@ -1,4 +1,4 @@
-defmodule SuperCache.Queue do
+defmodule SuperCache.Internal.Queue do
 
   require Logger
 

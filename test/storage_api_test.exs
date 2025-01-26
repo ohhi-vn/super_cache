@@ -7,9 +7,12 @@ defmodule SuperCache.StorageTest do
   @partition :"SuperCache.Storage.Ets_0"
 
   setup_all do
-    unless SuperCache.started?() do
-      SuperCache.start!()
+    if SuperCache.started?() do
+      SuperCache.stop()
+      Process.sleep(100)
     end
+
+    SuperCache.start!()
     :ok
   end
 

@@ -24,12 +24,12 @@ defmodule SuperCache.EtsHolder do
   end
 
   def new_table(name, table_name) do
-    Logger.debug("new Ets table: #{inspect table_name}")
+    Logger.debug("super_cache, ets holder, new Ets table: #{inspect table_name}")
     GenServer.call(name, {:new, table_name})
   end
 
   def delete_table(name, table_name) do
-    Logger.debug("delete Ets table: #{inspect table_name}")
+    Logger.debug("super_cache, ets holder, delete Ets table: #{inspect table_name}")
     GenServer.call(name, {:delete, table_name})
   end
 
@@ -38,7 +38,7 @@ defmodule SuperCache.EtsHolder do
   """
 
   def clean(name, table_name) do
-    Logger.debug("clean Ets table: #{inspect table_name}")
+    Logger.debug("super_cache, ets holder, clean Ets table: #{inspect table_name}")
     GenServer.call(name, {:clean, table_name})
   end
 
@@ -86,7 +86,7 @@ defmodule SuperCache.EtsHolder do
 
   @impl true
   def terminate(reason, %{my_name: name} = state) do
-    Logger.debug("#{inspect name} shutdown with reason #{inspect reason}")
+    Logger.debug("super_cache, ets holder, #{inspect name} shutdown with reason #{inspect reason}")
     tables = Map.get(state, :table_list)
 
     for table <- tables do
@@ -103,7 +103,7 @@ defmodule SuperCache.EtsHolder do
   end
 
   defp create_table(table_name) do
-    Logger.info("create cache table for #{inspect table_name}")
+    Logger.info("super_cache, ets holder, create cache table for #{inspect table_name}")
     key_pos = Config.get_config(:key_pos) + 1 # key order of ets start from 1
     table_type = Config.get_config(:table_type)
 
@@ -116,7 +116,7 @@ defmodule SuperCache.EtsHolder do
       {:read_concurrency, true},
       {:decentralized_counters, true}
     ])
-    Logger.info("table #{inspect table_name} is created")
+    Logger.info("super_cache, ets holder, table #{inspect table_name} is created")
     :ok
   end
 end

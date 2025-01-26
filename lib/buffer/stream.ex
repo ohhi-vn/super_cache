@@ -1,8 +1,8 @@
-defmodule SuperCache.Stream do
+defmodule SuperCache.Internal.Stream do
 
   require Logger
 
-  alias SuperCache.Queue
+  alias SuperCache.Internal.Queue
 
   def create(q) do
     Stream.resource(

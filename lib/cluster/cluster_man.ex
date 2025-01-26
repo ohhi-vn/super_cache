@@ -4,7 +4,7 @@ defmodule SuperCache.ClusterMan do
   use GenServer, restart: :permanent, shutdown: 5_000
   require Logger
 
-  alias __MODULE__
+  # alias __MODULE__
 
   ## APIs ##
 
@@ -29,7 +29,8 @@ defmodule SuperCache.ClusterMan do
   end
 
   @impl true
-  def handle_call({:add_nodes, nodes}, _from, state) do
+  def handle_call({:add_nodes, _nodes}, _from, state) do
 
+    {:reply, {:error, "unimplemented"}, state}
   end
 end

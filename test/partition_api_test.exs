@@ -6,9 +6,12 @@ defmodule SuperCache.PartitionTest do
   @data {:a, "hello"}
 
   setup_all do
-    unless SuperCache.started?() do
-      SuperCache.start!()
+    if SuperCache.started?() do
+      SuperCache.stop()
+      Process.sleep(100)
     end
+
+    SuperCache.start!()
     :ok
   end
 

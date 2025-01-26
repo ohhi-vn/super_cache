@@ -1,25 +1,23 @@
 defmodule SuperCache do
 
   @moduledoc """
-  SeperCache is a library support for caching data in memory. The library is based on Ets table.
+  SeperCache is a library support for caching data in memory.
+  The library is based on Ets table and use some function from :ets for making it easy & friendly to use.
   SuperCache support auto scale based on number of cpu cores and easy to use.
-  type of data is supported is tuple, other type of data can put in a tuple an storage in SuperCache.
-
-  Note: This version doesn't support for cluster.
-
+  Type of data is supported is tuple, other type of data can put in a tuple an storage in SuperCache.
+  Current version is not support for replicating data to multi nodes in Elixir cluster.
   """
-
-  # fix number of lazy stream for faster request. 8 is common number cores of modern cpu.
-  @num_lazy_worker 8
 
   require Logger
 
-  alias SuperCache.{Partition, Config, Storage, Queue}
+  alias SuperCache.{Partition, Config, Storage}
+  alias SuperCache.Internal.Queue, as: LibQueue
+  alias SuperCache.Internal.Stream, as: LibStream
 
   ## API interface ##
 
   @doc """
-  Start SuperCache service. This function will use default config.
+  Start SuperCache service (use default config).
 
   If function is failed, it will raise a error.
 
@@ -40,11 +38,11 @@ defmodule SuperCache do
 
   Config is in Keyword list
 
-  If key_pos or parition_pos is missed, start SuperCache will fail.
+  If key_pos or parition_pos is missed, start SuperCache will raise an error.
   """
   @spec start!(list(tuple())) :: :ok
   def start!(opts) do
-    Logger.info("start SuperCache with options: #{inspect opts}")
+    Logger.info("super_cache, api, start SuperCache with options: #{inspect opts}")
     unless Keyword.keyword?(opts) do
       raise ArgumentError, "incorrect options"
     end
@@ -59,7 +57,7 @@ defmodule SuperCache do
 
     Config.clear_config()
     for {key, value} <- opts do
-      Logger.debug("add config, key: #{inspect key}, value: #{inspect value}")
+      Logger.debug("super_cache, api, add config, key: #{inspect key}, value: #{inspect value}")
       Config.set_config(key, value)
     end
 
@@ -100,16 +98,17 @@ defmodule SuperCache do
     # make stream for lazy write.
     stream_fun = fn id ->
       name = String.to_atom("SuperCache.Buffer_#{id}")
-      Logger.debug("starting stream #{inspect name}")
-      q = Queue.start(name)
+      Logger.debug("super_cache, api, starting stream #{inspect name}")
 
-      SuperCache.Stream.create(q)
-      |> SuperCache.Stream.make_stream_pipe()
+      name
+      |> LibQueue.start()
+      |> LibStream.create()
+      |> LibStream.make_stream_pipe()
 
       Logger.debug("end stream #{inspect name}")
     end
 
-    for id <- 1..@num_lazy_worker do
+    for id <- 1..Partition.get_schedulers() do
       spawn( fn ->
         stream_fun.(id)
       end)
@@ -117,7 +116,6 @@ defmodule SuperCache do
 
     Config.set_config(:started, true)
   end
-
 
   @doc """
   Check library is started or not.
@@ -166,7 +164,7 @@ defmodule SuperCache do
   def stop() do
     case Config.get_config(:num_partition) do
       nil ->
-        Logger.warn("something wrong, cannot shutdown success")
+        Logger.warning("super_cache, api, something wrong, cannot shutdown success")
       n when is_integer(n) ->
         Storage.stop(n)
     end
@@ -188,7 +186,7 @@ defmodule SuperCache do
   def put!(data) when is_tuple(data) do
     part_data = Config.get_partition!(data)
     part = Partition.get_partition(part_data)
-    Logger.debug("store data (key: #{inspect Config.get_key!(data)}) to partition: #{inspect part}")
+    Logger.debug("super_cache, api, store data (key: #{inspect Config.get_key!(data)}) to partition: #{inspect part}")
     Storage.put(data, part)
   end
 
@@ -213,9 +211,9 @@ defmodule SuperCache do
   """
   @spec lazy_put(tuple) :: any
   def lazy_put(data) when is_tuple(data) do
-    id = Enum.random(1..@num_lazy_worker)
+    id = Enum.random(1..Partition.get_schedulers())
     name = String.to_atom("SuperCache.Buffer_#{id}")
-    Queue.add(name, data)
+    LibQueue.add(name, data)
   end
 
   @doc """
@@ -227,7 +225,7 @@ defmodule SuperCache do
     key = Config.get_key!(data)
     part_data = Config.get_partition!(data)
     part = Partition.get_partition(part_data)
-    Logger.debug("store data (key: #{inspect key}) to partition: #{inspect part}")
+    Logger.debug("super_cache, api, store data (key: #{inspect key}) to partition: #{inspect part}")
     Storage.get(key, part)
   end
 
@@ -252,7 +250,7 @@ defmodule SuperCache do
   @spec get_by_key_partition!(any, any) :: [tuple]
   def get_by_key_partition!(key, partition) do
     part = Partition.get_partition(partition)
-    Logger.debug("get data (key: #{inspect key}) from partition #{inspect part}")
+    Logger.debug("super_cache, api, get data (key: #{inspect key}) from partition #{inspect part}")
     Storage.get(key, part)
   end
 
@@ -281,7 +279,7 @@ defmodule SuperCache do
         data -> # scan one partition
           [Partition.get_partition(data)]
       end
-    Logger.debug("get_by_match, list of partition for pattern (#{inspect pattern}): #{inspect partitions})")
+    Logger.debug("super_cache, api, get_by_match, list of partition for pattern (#{inspect pattern}): #{inspect partitions})")
     Enum.reduce(partitions, [], fn el, result ->
       Storage.get_by_match(pattern, el) ++ result
     end)
@@ -310,7 +308,7 @@ defmodule SuperCache do
         data -> # scan one partition
           [Partition.get_partition(data)]
       end
-    Logger.debug("get_by_match_object, list of partition for pattern (#{inspect pattern}): #{inspect partitions})")
+    Logger.debug("super_cache, api, get_by_match_object, list of partition for pattern (#{inspect pattern}): #{inspect partitions})")
     Enum.reduce(partitions, [], fn el, result ->
       Storage.get_by_match_object(pattern, el) ++ result
     end)
@@ -337,7 +335,7 @@ defmodule SuperCache do
         data -> # scan one partition
           [Partition.get_partition(data)]
       end
-    Logger.debug("fold, list of partition: #{inspect partitions})")
+    Logger.debug("super_cache, api, scan, list of partition: #{inspect partitions})")
     Enum.reduce(partitions, acc, fn el, result ->
       Storage.scan(fun, result, el)
     end)
@@ -358,9 +356,9 @@ defmodule SuperCache do
   def delete!(data) when is_tuple(data) do
     key = Config.get_key!(data)
     part_data = Config.get_partition!(data)
-    Logger.debug("data used for get partition #{inspect part_data}")
+    Logger.debug("super_cache, api, data used for get partition #{inspect part_data}")
     part = Partition.get_partition(part_data)
-    Logger.debug("store data (key: #{inspect key}) to partition: #{inspect part}")
+    Logger.debug("super_cache, api, store data (key: #{inspect key}) to partition: #{inspect part}")
     Storage.delete(key, part)
     :ok
   end
@@ -389,7 +387,7 @@ defmodule SuperCache do
         data -> # scan one partition
           [Partition.get_partition(data)]
       end
-    Logger.debug("get_by_match_object, list of partition for pattern (#{inspect pattern}): #{inspect partitions})")
+    Logger.debug("super_cache, api, get_by_match_object, list of partition for pattern (#{inspect pattern}): #{inspect partitions})")
     for p <- partitions do
       Storage.delete_match(pattern, p)
     end
@@ -409,7 +407,7 @@ defmodule SuperCache do
   @spec delete_by_key_partition!(any, any) :: true
   def delete_by_key_partition!(key, partition_data) do
     part = Partition.get_partition(partition_data)
-    Logger.debug("get data (key: #{inspect key}) from partition #{inspect part}")
+    Logger.debug("super_cache, api, get data (key: #{inspect key}) from partition #{inspect part}")
     Storage.delete(key, part)
   end
 

@@ -4,7 +4,9 @@ defmodule SuperCache.MixProject do
   def project do
     [
       app: :super_cache,
-      version: "0.5.2",
+
+      version: "0.6.0",
+
       elixir: "~> 1.14",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -22,19 +24,25 @@ defmodule SuperCache.MixProject do
 
   # Run "mix help compile.app" to learn about applications.
   def application do
+    dev_app =
+      if Mix.env() == :dev do
+        [:observer, :wx]
+      else
+        []
+      end
+
     [
       mod: {SuperCache.Application, []},
-      extra_applications: [:logger]
+      extra_applications: [:logger] ++ dev_app
     ]
   end
 
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      # {:dep_from_hexpm, "~> 0.3.0"},
-      # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"}
-      {:ex_doc, "~> 0.2", only: :dev, runtime: false},
-      {:benchee, "~> 1.1", only: :dev},
+     # {:swarm, "~> 3.4"},
+      {:ex_doc, "~> 0.36", only: :dev, runtime: false},
+      {:benchee, "~> 1.3", only: :dev},
     ]
   end
 

@@ -4,6 +4,12 @@ defmodule SuperCache.EtsHolderTest do
   alias SuperCache.EtsHolder
 
   setup_all do
+    if SuperCache.started?() do
+      SuperCache.stop()
+      Process.sleep(100)
+    end
+
+
     {:ok, _} = EtsHolder.start_link(__MODULE__)
     EtsHolder.new_table(__MODULE__, __MODULE__)
     :ok

@@ -16,7 +16,7 @@ defmodule SuperCache.Sup do
     for spec <- workers do
       # TO-DO: Add code handle pid.
       r = DynamicSupervisor.start_child(__MODULE__, spec)
-      Logger.debug("result for start child (#{inspect spec}): #{inspect r}")
+      Logger.debug("super_cache, supervisor, result for start child (#{inspect spec}): #{inspect r}")
   end
   end
 
