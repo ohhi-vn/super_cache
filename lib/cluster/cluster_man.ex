@@ -4,7 +4,7 @@ defmodule SuperCache.ClusterMan do
   use GenServer, restart: :permanent, shutdown: 5_000
   require Logger
 
-  alias __MODULE__
+  # alias __MODULE__
 
   ## APIs ##
 

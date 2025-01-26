@@ -50,6 +50,44 @@ defmodule SuperCache.Storage do
   end
 
   @doc """
+  Update data in a partition.
+  element_spec is a tuple with 2 elements {pos_integer, any} or list of 2 element tuple.
+  If key is not existed, default value will be used.
+  Update element just works with set/ordered_set type.
+  """
+  def update_element(key, partition, element_spec, default) do
+    Ets.update_element(partition, key, element_spec, default)
+  end
+
+  @doc """
+  Update data in a partition.
+  element_spec is a tuple with 2 elements {pos_integer, any} or list of 2 element tuple.
+  Update element just works with set/ordered_set type.
+  """
+  def update_element(key, partition, element_spec) do
+    Ets.update_element(partition, key, element_spec)
+  end
+
+  @doc """
+  Update counter in a partition.
+  counter_spec is a tuple {pos, increment} or {pos, increment, threshold, setvalue}.
+  Update counter just works with set/ordered_set type.
+  """
+  def update_counter(key, partition, counter_spec) do
+    Ets.update_counter(partition, key, counter_spec)
+  end
+
+  @doc """
+  Update counter in a partition.
+  counter_spec is a tuple {pos, increment} or {pos, increment, threshold, setvalue}.
+  If key is not existed, default value will be used.
+  Update counter just works with set/ordered_set type.
+  """
+  def update_counter(key, partition, counter_spec, default) do
+    Ets.update_counter(partition, key, counter_spec, default)
+  end
+
+  @doc """
   Gets data by pattern matching in a partition.
   """
   @spec get_by_match(atom | tuple, atom | :ets.tid()) :: [list]
@@ -105,7 +143,7 @@ defmodule SuperCache.Storage do
   Data is removed after taking.
   """
   @spec take(any, atom | :ets.tid()) :: [tuple]
-  def take(partition, key) do
+  def take(key, partition) do
     Ets.take(partition, key)
   end
 

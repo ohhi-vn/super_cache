@@ -10,7 +10,7 @@ defmodule SuperCache.Application do
   @impl true
   @spec start(any, any) :: {:error, any} | {:ok, pid}
   def start(_type, _args) do
-    Logger.info("super_cache, application, startting SuperCache app...")
+    Logger.info("super_cache, application, starting SuperCache app...")
 
     children = [
       {SuperCache.Config, [key_pos: 0, partition_pos: 0]},

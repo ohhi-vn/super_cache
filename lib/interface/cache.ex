@@ -1,19 +1,18 @@
 defmodule SuperCache do
 
   @moduledoc """
-  SeperCache is a library support for caching data in memory. The library is based on Ets table.
+  SeperCache is a library support for caching data in memory.
+  The library is based on Ets table and use some function from :ets for making it easy & friendly to use.
   SuperCache support auto scale based on number of cpu cores and easy to use.
   Type of data is supported is tuple, other type of data can put in a tuple an storage in SuperCache.
-  Support replicate data to multi nodes in Elixir cluster.
-
+  Current version is not support for replicating data to multi nodes in Elixir cluster.
   """
-
-  # fix number of lazy stream for faster request. 8-24 is common number cores of modern cpu.
-  @num_lazy_worker 10
 
   require Logger
 
-  alias SuperCache.{Partition, Config, Storage, Queue}
+  alias SuperCache.{Partition, Config, Storage}
+  alias SuperCache.Internal.Queue, as: LibQueue
+  alias SuperCache.Internal.Stream, as: LibStream
 
   ## API interface ##
 
@@ -100,15 +99,16 @@ defmodule SuperCache do
     stream_fun = fn id ->
       name = String.to_atom("SuperCache.Buffer_#{id}")
       Logger.debug("super_cache, api, starting stream #{inspect name}")
-      q = Queue.start(name)
 
-      SuperCache.Stream.create(q)
-      |> SuperCache.Stream.make_stream_pipe()
+      name
+      |> LibQueue.start()
+      |> LibStream.create()
+      |> LibStream.make_stream_pipe()
 
       Logger.debug("end stream #{inspect name}")
     end
 
-    for id <- 1..@num_lazy_worker do
+    for id <- 1..Partition.get_schedulers() do
       spawn( fn ->
         stream_fun.(id)
       end)
@@ -116,7 +116,6 @@ defmodule SuperCache do
 
     Config.set_config(:started, true)
   end
-
 
   @doc """
   Check library is started or not.
@@ -212,9 +211,9 @@ defmodule SuperCache do
   """
   @spec lazy_put(tuple) :: any
   def lazy_put(data) when is_tuple(data) do
-    id = Enum.random(1..@num_lazy_worker)
+    id = Enum.random(1..Partition.get_schedulers())
     name = String.to_atom("SuperCache.Buffer_#{id}")
-    Queue.add(name, data)
+    LibQueue.add(name, data)
   end
 
   @doc """
@@ -431,210 +430,5 @@ defmodule SuperCache do
       end
     total = Enum.reduce(list, 0, fn {_, size}, acc -> acc + size end)
     list ++ [total: total]
-  end
-
-  @doc """
-  Add key-value to cache. Key is used to get target partition to store data.
-  Use can use multiple kv cache by using different kv_name.
-  """
-  @spec kv_add(atom, any, any) :: true
-  def kv_add(kv_name, key, value) when is_atom(kv_name) do
-    part = Partition.get_partition(key)
-    Logger.debug("super_cache, kv, name: #{inspect kv_name} store key: #{inspect key} to partition: #{inspect part}")
-    Storage.put({{:kv, kv_name, key}, value}, part)
-  end
-
-  @doc """
-  Get value by key.
-  Key is belong wit kv_name.
-  """
-  @spec kv_get(any, any, any) :: any
-  def kv_get(kv_name, key, default \\ nil) do
-    part = Partition.get_partition(key)
-    Logger.debug("super_cache, kv, name: #{inspect kv_name } get value of key: #{inspect key} from partition: #{inspect part}")
-    case Storage.get({:kv, kv_name, key}, part) do
-      [] -> default
-      [{_, value}] -> value
-    end
-  end
-
-  @doc """
-  Get all keys in kv_name cache.
-  """
-  @spec kv_keys(any) :: [any]
-  def kv_keys(kv_name) do
-    get_by_match_object!({{:kv, kv_name, :_}, :_})
-    |>  Enum.map(fn {{:kv, ^kv_name, key}, _} -> key end)
-  end
-
-  @doc """
-  Get all values in kv_name cache.
-  """
-  @spec kv_values(any) :: [any]
-  def kv_values(kv_name) do
-    get_by_match_object!({{:kv, kv_name, :_}, :_})
-    |>  Enum.map(fn {{:kv, ^kv_name, _}, value} -> value end)
-  end
-
-  @doc """
-  Add value to stack has name is stack_name.
-  If stack_name is not existed, it will be created.
-  """
-  @spec stack_push(any, any) :: true
-  def stack_push(stack_name, value) do
-    part = Partition.get_partition(stack_name)
-
-    stack_push(part, stack_name, value)
-  end
-
-  @doc """
-  Pop value from stack with name is stack_name.
-  If stack_name is not existed or no data, it will return default value.
-  """
-  @spec stack_pop(any, any) :: any
-  def stack_pop(stack_name, default \\nil) do
-    part = Partition.get_partition(stack_name)
-    stack_pop(part, stack_name, default)
-  end
-
-
-  @doc """
-  Add value to queue with name is queue_name.
-  Queue is a FIFO data structure. If queue_name is not existed, it will be created.
-  """
-  @spec queue_in(any, any) :: true
-  def queue_in(queue_name, value) do
-    part = Partition.get_partition(queue_name)
-
-    queue_in(part, queue_name, value)
-  end
-
-  @doc """
-  Pop value from queue with name is queue_name.
-  If queue_name is not existed or no data, it will return default value.
-  """
-  def queue_out(queue_name, default \\ nil) do
-    part = Partition.get_partition(queue_name)
-    queue_out(part, queue_name, default)
-  end
-
-
-  ## private functions ##
-
-  defp stack_push(partition, stack_name, value) do
-    case Storage.take({:stack, :counter, stack_name}, partition) do
-      [] -> # stack is not initialized
-        case Storage.get({{:stack, :updating, stack_name}, :_}, partition) do
-          [] -> # stack is not initialized
-            stack_init(stack_name)
-            stack_push(partition, stack_name, value)
-          [{_, true}] -> # stack is updating
-            Process.sleep(0) # wait for stack is ready
-            stack_push(partition, stack_name, value)
-          [{_, false}] -> # stack is ready to app
-            stack_push(partition, stack_name, value)
-        end
-      [{_, counter}] ->
-        next_counter = counter + 1
-        Storage.put({{:stack, :updating, stack_name}, true}, partition)
-        Storage.put({{:stack, :counter, stack_name}, next_counter}, partition)
-        Storage.put({{:stack, stack_name, next_counter}, value}, partition)
-        Storage.put({{:stack, :updating, stack_name}, false}, partition)
-        Logger.debug("super_cache, stack, push value: #{inspect value} to stack: #{inspect stack_name}")
-        true
-    end
-  end
-
-  defp stack_pop(partition, stack_name, default) do
-    case Storage.take({:stack, :counter, stack_name}, partition) do
-      [] -> # stack is not initialized
-        case Storage.get({{:stack, :updating, stack_name}, :_}, partition) do
-          [] -> # stack is not initialized
-            default
-          [{_, true}] -> # stack is updating
-            Process.sleep(0) # wait for stack is ready
-            stack_pop(partition, stack_name, default)
-          [{_, false}] -> # stack is ready to app
-            stack_pop(partition, stack_name, default)
-        end
-      [{_, counter}] when counter > 0 ->
-        next_counter = counter - 1
-        Storage.put({{:stack, :updating, stack_name}, true}, partition)
-        Storage.put({{:stack, :counter, stack_name}, next_counter}, partition)
-        [{_, value}] = Storage.take({:stack, stack_name, counter}, partition)
-        Storage.put({{:stack, :updating, stack_name}, false}, partition)
-        Logger.debug("super_cache, stack, push value: #{inspect value} to stack: #{inspect stack_name}")
-
-        value
-      [{_, 0}]  ->
-        default
-    end
-  end
-
-  defp stack_init(stack_name) do
-    Logger.debug("super_cache, stack, init stack: #{inspect stack_name}")
-    part = Partition.get_partition(stack_name)
-    # {{:stack, stack_name}, counter} is key of stack
-    Storage.put({{:stack, :counter, stack_name}, 0}, part)
-    Storage.put({{:stack, :updating, stack_name}, false}, part)
-  end
-
-  defp queue_in(partition, queue_name, value) do
-    case Storage.take({:queue, :tail, queue_name}, partition) do
-      [] -> # stack is not initialized
-        case Storage.get({{:queue, :updating, queue_name}, :_}, partition) do
-          [] -> # stack is not initialized
-            queue_init(queue_name)
-            queue_in(partition, queue_name, value)
-          [{_, true}] -> # queue is updating
-            Process.sleep(0) # wait for stack is ready
-            queue_in(partition, queue_name, value)
-          [{_, false}] -> # queue is ready to app
-            queue_in(partition, queue_name, value)
-        end
-      [{_, counter}] ->
-        next_counter = counter + 1
-        Storage.put({{:queue, :updating, queue_name}, true}, partition)
-        Storage.put({{:queue, queue_name, next_counter}, value}, partition)
-        Storage.put({{:queue, :tail, queue_name}, next_counter}, partition)
-        Storage.put({{:queue, :updating, queue_name}, false}, partition)
-
-        Logger.debug("super_cache, queue, push value: #{inspect value} to queue #{inspect queue_name}")
-        true
-    end
-  end
-
-
-  defp queue_out(partition, queue_name, default) do
-    case Storage.take({:queue, :head, queue_name}, partition) do
-      [] -> # stack is not initialized
-        case Storage.get({:queue, :updating, queue_name}, partition) do
-          [] -> # stack is not initialized
-            default
-          [{_, true}] -> # queue is updating
-            Process.sleep(0) # wait for stack is ready
-            queue_out(partition, queue_name, default)
-          [{_, false}] -> # queue is ready to app
-            queue_out(partition, queue_name, default)
-        end
-      [{_, counter}] ->
-        next_counter = counter + 1
-        Storage.put({{:queue, :updating, queue_name}, true}, partition)
-        [{_, value}] = Storage.take({:queue, queue_name, counter}, partition)
-        Storage.put({{:queue, :head, queue_name}, next_counter}, partition)
-        Storage.put({{:queue, :updating, queue_name}, false}, partition)
-
-        Logger.debug("super_cache, queue, push value: #{inspect value} to queue #{inspect queue_name}")
-        value
-    end
-  end
-
-  defp queue_init(queue_name) do
-    Logger.debug("super_cache, stack, init stack: #{inspect queue_name}")
-    part = Partition.get_partition(queue_name)
-    # {{:queue, queue_name}, counter} is key of stack
-    Storage.put({{:queue, :updating, queue_name}, false}, part)
-    Storage.put({{:queue, :head, queue_name}, 0}, part)
-    Storage.put({{:queue, :tail, queue_name}, 0}, part)
   end
 end

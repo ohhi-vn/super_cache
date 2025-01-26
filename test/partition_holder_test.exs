@@ -4,9 +4,12 @@ defmodule SuperCache.Partition.HolderTest do
   alias SuperCache.Partition.Holder
 
   setup_all do
-    unless SuperCache.started?() do
-      SuperCache.start!()
+    if SuperCache.started?() do
+      SuperCache.stop()
+      Process.sleep(100)
     end
+
+    SuperCache.start!()
     :ok
   end
 

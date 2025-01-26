@@ -5,10 +5,12 @@ defmodule SuperCacheTest do
   @data {:a, :b, :c, 1, "Hello"}
 
   setup_all do
-    unless SuperCache.started?() do
-      SuperCache.start!()
+    if SuperCache.started?() do
+      SuperCache.stop()
+      Process.sleep(100)
     end
 
+    SuperCache.start!()
     :ok
   end
 

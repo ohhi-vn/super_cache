@@ -22,18 +22,25 @@ defmodule SuperCache.MixProject do
 
   # Run "mix help compile.app" to learn about applications.
   def application do
+    dev_app =
+      if Mix.env() == :dev do
+        [:observer, :wx]
+      else
+        []
+      end
+
     [
       mod: {SuperCache.Application, []},
-      extra_applications: [:logger]
+      extra_applications: [:logger] ++ dev_app
     ]
   end
 
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:swarm, "~> 3.4"},
-      {:ex_doc, "~> 0.2", only: :dev, runtime: false},
-      {:benchee, "~> 1.1", only: :dev},
+     # {:swarm, "~> 3.4"},
+      {:ex_doc, "~> 0.36", only: :dev, runtime: false},
+      {:benchee, "~> 1.3", only: :dev},
     ]
   end
 
