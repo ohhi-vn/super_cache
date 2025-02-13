@@ -79,4 +79,51 @@ defmodule SuperCache.StackTest do
 
     assert true == result
   end
+
+  test "get all items" do
+    list = Enum.to_list(1..10)
+    Enum.each(list, fn x -> Stack.push("my_stack", x) end)
+    result = Stack.get_all("my_stack")
+    assert Enum.count(result) == 10
+  end
+
+  test "count item" do
+    Enum.each(1..10, fn i -> Stack.push("my_stack", i) end)
+    result = Stack.count("my_stack")
+    assert 10 == result
+  end
+
+  test "get all itmes in empty stack" do
+    result = Stack.get_all("my_stack")
+    assert Enum.count(result) == 0
+  end
+
+  test "mix operations in stack" do
+    Stack.push("my_stack", 1)
+    Stack.push("my_stack", 2)
+    Stack.push("my_stack", 3)
+    result = Stack.pop("my_stack")
+    assert result == 3
+
+    Stack.push("my_stack", 3)
+    Stack.push("my_stack", 4)
+    result = Stack.pop("my_stack")
+    assert result == 4
+
+    Stack.push("my_stack", 4)
+    Stack.push("my_stack", 5)
+    result = Stack.count("my_stack")
+    assert result == 5
+
+
+    result = Stack.get_all("my_stack")
+    assert Enum.count(result) == 5
+    assert 0 == Stack.count("my_stack")
+
+    Enum.each(1..10, fn i -> Stack.push("my_stack", i) end)
+    result = Stack.get_all("my_stack")
+    assert Enum.count(result) == 10
+
+
+  end
 end
