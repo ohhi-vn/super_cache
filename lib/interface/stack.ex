@@ -5,6 +5,15 @@ defmodule SuperCache.Stack do
   This is global stack, any process can access to stack data.
   Can handle multiple stack with different name.
   Need to start SuperCache.start!/1 before using this module.
+
+  Ex:
+  ```
+  alias SuperCache.Stack
+  SuperCache.start!()
+  Stack.push("my_stack", "Hello")
+  Stack.pop("my_stack")
+    # => "Hello"
+  ```
   """
 
   alias SuperCache.Storage
@@ -34,6 +43,19 @@ defmodule SuperCache.Stack do
   def pop(stack_name, default \\nil) do
     part = Partition.get_partition(stack_name)
     stack_pop(part, stack_name, default)
+  end
+
+  def count(stack_name) do
+    part = Partition.get_partition(stack_name)
+    case Storage.get({:stack, :counter, stack_name}, part) do
+      [] -> 0
+      [{_, counter}] -> counter
+    end
+  end
+
+  def get_all(stack_name) do
+    part = Partition.get_partition(stack_name)
+    to_list(part, stack_name)
   end
 
   ## private functions ##
@@ -106,6 +128,40 @@ defmodule SuperCache.Stack do
     partition = Partition.get_partition(stack_name)
 
     Storage.put({{:stack, :counter, stack_name}, 0}, partition)
+  end
+
+  defp to_list(partition, stack_name) do
+    case Storage.take({:stack, :counter, stack_name}, partition) do
+      [] -> # stack is not initialized
+        case Storage.get({{:stack, :updating, stack_name}, :_}, partition) do
+          [] -> # stack is not initialized
+            []
+          _ -> # stack is updating
+            Process.sleep(0) # wait for stack is ready
+            to_list(partition, stack_name)
+        end
+
+      [{_, 0}]  ->
+          []
+
+      [{_, counter}] ->
+        Storage.put({{:stack, :updating, stack_name}, true}, partition)
+
+        value =
+          Enum.reduce(counter..1//-1, [], fn x, acc ->
+            case Storage.take({:stack, stack_name, x}, partition) do
+              [] -> acc
+              [{_, value}] -> [value | acc]
+            end
+          end)
+          Storage.put({{:stack, :counter, stack_name}, 0}, partition)
+        Storage.delete({:stack, :updating, stack_name}, partition)
+        Logger.debug("super_cache, stack, push value: #{inspect value} to stack: #{inspect stack_name}")
+
+        value
+
+    end
+
   end
 
 end

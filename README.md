@@ -133,4 +133,50 @@ SuperCache.get_by_key_partition!(:hello, :world)
 SuperCache.delete_by_key_partition!(:hello, :world)
 ```
 
+KeyValue usage:
+
+```elixir
+  alias SuperCache.KeyValue
+
+  # Start cache
+  SuperCache.start!()
+
+  KeyValue.add("my_kv", :key, "Hello")
+  KeyValue.get("my_kv", :key)
+    # => "Hello"
+
+  KeyValue.remove("my_kv", :key)
+  KeyValue.get("my_kv", :key)
+    # => nil
+
+  KeyValue.add("my_kv", :key, "Hello")
+  KeyValue.remove_all("my_kv")
+```
+
+Queue usage:
+
+```elixir
+alias SuperCache.Queue
+
+# Start cache
+SuperCache.start!()
+
+Queue.add("my_queue", "Hello")
+Queue.out("my_queue")
+  # => "Hello"
+```
+
+Stack usage:
+
+```elixir
+alias SuperCache.Stack
+
+# Start cache
+SuperCache.start!()
+
+Stack.push("my_stack", "Hello")
+Stack.pop("my_stack")
+  # => "Hello"
+```
+
 Other APIs please go to document on [hexdocs.pm](https://hexdocs.pm/super_cache/readme.html)
