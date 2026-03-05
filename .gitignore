@@ -28,3 +28,8 @@ super_cache-*.tar
 mix.lock
 
 .DS_Store
+
+AGENTS.md
+.expert
+.elixir_ls
+mise.toml

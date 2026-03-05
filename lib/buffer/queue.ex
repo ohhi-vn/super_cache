@@ -1,4 +1,5 @@
 defmodule SuperCache.Internal.Queue do
+  @moduledoc false
 
   require Logger
 
@@ -9,7 +10,7 @@ defmodule SuperCache.Internal.Queue do
       Process.register(self(), name)
       loop([], [], :run, name)
     end)
-   end
+  end
 
   @spec add(atom | pid | port | reference | {atom, atom}, any) :: any
   @doc """
@@ -33,29 +34,35 @@ defmodule SuperCache.Internal.Queue do
     receive do
       data when is_tuple(data) ->
         [data]
+
       list ->
         list
     end
   end
 
-  defp loop([pid|wait], [_|_] = data_list, status, name) do
-    Logger.debug("send #{inspect data_list} for #{inspect pid}")
+  defp loop([pid | wait], [_ | _] = data_list, status, name) do
+    Logger.debug("send #{inspect(data_list)} for #{inspect(pid)}")
     send(pid, data_list)
     loop(wait, [], status, name)
   end
-  defp loop([_|_] = pids, [], :stop, name) do
+
+  defp loop([_ | _] = pids, [], :stop, name) do
     for pid <- pids do
-      Logger.debug("send stop for #{inspect pid}")
+      Logger.debug("send stop for #{inspect(pid)}")
       send(pid, :stop)
     end
-    Logger.debug("queue #{inspect name} is stopped")
+
+    Logger.debug("queue #{inspect(name)} is stopped")
   end
+
   defp loop(wait_list, data_list, status, name) do
     receive do
       {:add, data} ->
-        loop(wait_list, [data|data_list], status, name)
+        loop(wait_list, [data | data_list], status, name)
+
       {:get, from} ->
-        loop([from|wait_list], data_list, status, name)
+        loop([from | wait_list], data_list, status, name)
+
       :stop ->
         loop(wait_list, data_list, :stop, name)
     end

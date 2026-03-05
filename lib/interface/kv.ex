@@ -1,5 +1,4 @@
-
- defmodule SuperCache.KeyValue do
+defmodule SuperCache.KeyValue do
   @moduledoc """
   Key-Value(KV) database in memory. Each KV name is store in a partition.
   Can use multiple KV cache by using different KV name.
@@ -7,7 +6,8 @@
   The KV is store in with cache.
   Need to start SuperCache.start!/1 before using this module.
   Ex:
-  ```
+
+  ```elixir
   alias SuperCache.KeyValue
   SuperCache.start!()
   KeyValue.add("my_kv", :key, "Hello")
@@ -20,6 +20,8 @@
 
   KeyValue.add("my_kv", :key, "Hello")
   KeyValue.remove_all("my_kv")
+  KeyValue.get("my_kv", :key)
+    # => nil
   ```
   """
 
@@ -28,7 +30,7 @@
 
   require Logger
 
- @doc """
+  @doc """
   Add key-value to cache. kv_name is used to get target partition to store data.
   Use can use multiple kv cache by using different kv_name.
   You can use any type of kv_name, key & value.
@@ -38,7 +40,11 @@
   @spec add(any, any, any) :: true
   def add(kv_name, key, value) do
     part = Partition.get_partition(kv_name)
-    Logger.debug("super_cache, kv, name: #{inspect kv_name} store key: #{inspect key} to partition: #{inspect part}")
+
+    Logger.debug(
+      "super_cache, kv, name: #{inspect(kv_name)} store key: #{inspect(key)} to partition: #{inspect(part)}"
+    )
+
     # always delete old value before put new value.
     # TO-DO: Don't need to delete in set/ordered_set type.
     Storage.delete({:kv, kv_name, key}, part)
@@ -47,12 +53,16 @@
 
   @doc """
   Get value by key.
-  Key is belong wit kv_name.
+  Key is belong with kv_name.
   """
   @spec get(any, any, any) :: any
   def get(kv_name, key, default \\ nil) do
     part = Partition.get_partition(kv_name)
-    Logger.debug("super_cache, kv, name: #{inspect kv_name } get value of key: #{inspect key} from partition: #{inspect part}")
+
+    Logger.debug(
+      "super_cache, kv, name: #{inspect(kv_name)} get value of key: #{inspect(key)} from partition: #{inspect(part)}"
+    )
+
     case Storage.get({:kv, kv_name, key}, part) do
       [] -> default
       [{_, value}] -> value
@@ -65,7 +75,7 @@
   @spec keys(any) :: [any]
   def keys(kv_name) do
     SuperCache.get_by_match_object!(kv_name, {{:kv, kv_name, :_}, :_})
-    |>  Enum.map(fn {{:kv, ^kv_name, key}, _} -> key end)
+    |> Enum.map(fn {{:kv, ^kv_name, key}, _} -> key end)
   end
 
   @doc """
@@ -74,7 +84,7 @@
   @spec values(any) :: [any]
   def values(kv_name) do
     SuperCache.get_by_match_object!(kv_name, {{:kv, kv_name, :_}, :_})
-    |>  Enum.map(fn {{:kv, ^kv_name, _}, value} -> value end)
+    |> Enum.map(fn {{:kv, ^kv_name, _}, value} -> value end)
   end
 
   @doc """
@@ -86,14 +96,17 @@
     |> Enum.count()
   end
 
-
   @doc """
   Remove key-value in kv_name cache. This operaton is always success.
   """
   @spec remove(any, any) :: :ok
   def remove(kv_name, key) do
     part = Partition.get_partition(kv_name)
-    Logger.debug("super_cache, kv, name: #{inspect kv_name } remove value of key: #{inspect key} from partition: #{inspect part}")
+
+    Logger.debug(
+      "super_cache, kv, name: #{inspect(kv_name)} remove value of key: #{inspect(key)} from partition: #{inspect(part)}"
+    )
+
     Storage.delete({:kv, kv_name, key}, part)
     :ok
   end
@@ -113,6 +126,6 @@
   @spec to_list(any) :: [{any, any}]
   def to_list(kv_name) do
     SuperCache.get_by_match_object!(kv_name, {{:kv, kv_name, :_}, :_})
-    |>  Enum.map(fn {{:kv, ^kv_name, key}, value} -> {key, value} end)
+    |> Enum.map(fn {{:kv, ^kv_name, key}, value} -> {key, value} end)
   end
 end

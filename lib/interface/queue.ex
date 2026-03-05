@@ -1,4 +1,3 @@
-
 defmodule SuperCache.Queue do
   @moduledoc """
   A queue based on cache.
@@ -8,7 +7,8 @@ defmodule SuperCache.Queue do
   This is global data, any process can access to queue data.
   Need to start SuperCache.start!/1 before using this module.
   Ex:
-  ```
+
+  ```elixir
   alias SuperCache.Queue
   SuperCache.start!()
   Queue.add("my_queue", "Hello")
@@ -73,12 +73,14 @@ defmodule SuperCache.Queue do
   @spec count(any()) :: number()
   def count(queue_name) do
     partition = Partition.get_partition(queue_name)
+
     case Storage.get({:queue, :tail, queue_name}, partition) do
-      [] -> # stack is not initialized
+      # stack is not initialized
+      [] ->
         0
+
       [{_, tail}] ->
-        case Storage.get({:queue, :head, queue_name}, partition)
-        do
+        case Storage.get({:queue, :head, queue_name}, partition) do
           # in updating state
           [] -> count(queue_name)
           [{_, head}] -> tail - head + 1
@@ -90,13 +92,18 @@ defmodule SuperCache.Queue do
 
   defp queue_in(partition, queue_name, value) do
     case Storage.take({:queue, :tail, queue_name}, partition) do
-      [] -> # stack is not initialized
+      # stack is not initialized
+      [] ->
         case Storage.get({{:queue, :updating, queue_name}, :_}, partition) do
-          [] -> # stack is not initialized
+          # stack is not initialized
+          [] ->
             queue_init(queue_name)
             queue_in(partition, queue_name, value)
-          _ -> # queue is updating
-            Process.sleep(0) # wait for stack is ready
+
+          # queue is updating
+          _ ->
+            # wait for stack is ready
+            Process.sleep(0)
             queue_in(partition, queue_name, value)
         end
 
@@ -110,8 +117,13 @@ defmodule SuperCache.Queue do
         Storage.put({{:queue, :tail, queue_name}, 1}, partition)
 
         Storage.delete({:queue, :updating, queue_name}, partition)
-        Logger.debug("super_cache, queue, push value: #{inspect value} to queue #{inspect queue_name}")
+
+        Logger.debug(
+          "super_cache, queue, push value: #{inspect(value)} to queue #{inspect(queue_name)}"
+        )
+
         true
+
       [{_, counter}] ->
         next_counter = counter + 1
         Storage.put({{:queue, :updating, queue_name}, true}, partition)
@@ -121,25 +133,35 @@ defmodule SuperCache.Queue do
         Storage.put({{:queue, :tail, queue_name}, next_counter}, partition)
 
         Storage.delete({:queue, :updating, queue_name}, partition)
-        Logger.debug("super_cache, queue, push value: #{inspect value} to queue #{inspect queue_name}")
+
+        Logger.debug(
+          "super_cache, queue, push value: #{inspect(value)} to queue #{inspect(queue_name)}"
+        )
+
         true
     end
   end
 
   defp queue_out(partition, queue_name, default) do
     case Storage.take({:queue, :head, queue_name}, partition) do
-      [] -> # maybe stack is not initialized/updating process
+      # maybe stack is not initialized/updating process
+      [] ->
         case Storage.get({:queue, :updating, queue_name}, partition) do
-          [] -> # stack is not initialized
+          # stack is not initialized
+          [] ->
             default
-          _ -> # queue is updating
-            Process.sleep(0) # wait for stack is ready
+
+          # queue is updating
+          _ ->
+            # wait for stack is ready
+            Process.sleep(0)
             queue_out(partition, queue_name, default)
-
         end
-      [{_, 0}] -> # queue is empty
 
+      # queue is empty
+      [{_, 0}] ->
         default
+
       [{_, counter}] ->
         next_counter = counter + 1
         Storage.put({{:queue, :updating, queue_name}, true}, partition)
@@ -153,6 +175,7 @@ defmodule SuperCache.Queue do
               Storage.put({{:queue, :head, queue_name}, 0}, partition)
               Storage.put({{:queue, :tail, queue_name}, 0}, partition)
               default
+
             [{_, value}] ->
               Storage.delete({:queue, :head, queue_name}, partition)
               Storage.put({{:queue, :head, queue_name}, next_counter}, partition)
@@ -160,7 +183,10 @@ defmodule SuperCache.Queue do
           end
 
         Storage.delete({:queue, :updating, queue_name}, partition)
-        Logger.debug("super_cache, queue, get value: #{inspect value} from queue #{inspect queue_name}")
+
+        Logger.debug(
+          "super_cache, queue, get value: #{inspect(value)} from queue #{inspect(queue_name)}"
+        )
 
         value
     end
@@ -168,30 +194,37 @@ defmodule SuperCache.Queue do
 
   defp queue_peak(partition, queue_name, default) do
     case Storage.get({:queue, :head, queue_name}, partition) do
-      [] -> # stack is not initialized
+      # stack is not initialized
+      [] ->
         case Storage.get({:queue, :updating, queue_name}, partition) do
-          [] -> # stack is not initialized
+          # stack is not initialized
+          [] ->
             default
-          _ -> # queue is updating
-            Process.sleep(0) # wait for stack is ready
+
+          # queue is updating
+          _ ->
+            # wait for stack is ready
+            Process.sleep(0)
             queue_peak(partition, queue_name, default)
         end
-      [{_, 0}] -> # queue is empty
 
+      # queue is empty
+      [{_, 0}] ->
         default
+
       [{_, counter}] ->
         case Storage.get({:queue, queue_name, counter}, partition) do
           [] ->
             default
-          [{_, value}] ->
 
+          [{_, value}] ->
             value
         end
     end
   end
 
   defp queue_init(queue_name) do
-    Logger.debug("super_cache, stack, init stack: #{inspect queue_name}")
+    Logger.debug("super_cache, stack, init stack: #{inspect(queue_name)}")
     partition = Partition.get_partition(queue_name)
     Storage.put({{:queue, :updating, queue_name}, true}, partition)
     Storage.put({{:queue, :head, queue_name}, 0}, partition)
@@ -201,29 +234,36 @@ defmodule SuperCache.Queue do
 
   defp to_list(partition, queue_name) do
     case Storage.take({:queue, :head, queue_name}, partition) do
-      [] -> # stack is not initialized
+      # stack is not initialized
+      [] ->
         case Storage.get({:queue, :updating, queue_name}, partition) do
-          [] -> # stack is not initialized
+          # stack is not initialized
+          [] ->
             []
-          _ -> # queue is updating
-            Process.sleep(0) # wait for stack is ready
+
+          # queue is updating
+          _ ->
+            # wait for stack is ready
+            Process.sleep(0)
             to_list(partition, queue_name)
-
         end
-      [{_, 0}] -> # queue is empty
 
+      # queue is empty
+      [{_, 0}] ->
         []
+
       [{_, first}] ->
         Storage.put({{:queue, :updating, queue_name}, true}, partition)
 
         [{_, last}] = Storage.take({:queue, :tail, queue_name}, partition)
 
-        value = Enum.reduce(first..last, [], fn i, acc ->
-          case Storage.take({:queue, queue_name, i}, partition) do
-            [] -> acc
-            [{_, value}] -> [value | acc]
-          end
-        end)
+        value =
+          Enum.reduce(first..last, [], fn i, acc ->
+            case Storage.take({:queue, queue_name, i}, partition) do
+              [] -> acc
+              [{_, value}] -> [value | acc]
+            end
+          end)
 
         # reset queue
         Storage.put({{:queue, :head, queue_name}, 0}, partition)
@@ -231,7 +271,9 @@ defmodule SuperCache.Queue do
 
         Storage.delete({:queue, :updating, queue_name}, partition)
 
-        Logger.debug("super_cache, queue, get all length: #{inspect length(value)} from queue #{inspect queue_name}")
+        Logger.debug(
+          "super_cache, queue, get all length: #{inspect(length(value))} from queue #{inspect(queue_name)}"
+        )
 
         Enum.reverse(value)
     end

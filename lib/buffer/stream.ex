@@ -1,4 +1,5 @@
 defmodule SuperCache.Internal.Stream do
+  @moduledoc false
 
   require Logger
 
@@ -7,7 +8,7 @@ defmodule SuperCache.Internal.Stream do
   def create(q) do
     Stream.resource(
       fn ->
-       q
+        q
       end,
       fn queue ->
         Logger.debug("get data from queue")
@@ -22,11 +23,11 @@ defmodule SuperCache.Internal.Stream do
   def make_stream_pipe(enumable) do
     enumable
     |> Stream.each(&push/1)
-    |> Stream.run
+    |> Stream.run()
   end
 
   def push(data) do
     SuperCache.put(data)
-    Logger.debug("pushed #{inspect data} to cache")
+    Logger.debug("pushed #{inspect(data)} to cache")
   end
 end

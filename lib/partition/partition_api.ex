@@ -1,8 +1,6 @@
 defmodule SuperCache.Partition do
   @moduledoc false
 
-  require Logger
-
   alias SuperCache.Partition.Holder
 
   alias :ets, as: Ets
@@ -30,7 +28,8 @@ defmodule SuperCache.Partition do
   @spec start(pos_integer) :: any
   def start(num_partition) when is_integer(num_partition) do
     Holder.set_num_partition(num_partition)
-    for order <- 0..num_partition - 1 do
+
+    for order <- 0..(num_partition - 1) do
       Holder.set(order)
     end
   end
@@ -43,7 +42,6 @@ defmodule SuperCache.Partition do
     Holder.clean()
     :ok
   end
-
 
   @doc """
   Gets number of partition in cache.

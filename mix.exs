@@ -4,8 +4,8 @@ defmodule SuperCache.MixProject do
   def project do
     [
       app: :super_cache,
-      version: "0.6.1",
-      elixir: "~> 1.14",
+      version: "0.7.0",
+      elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       config_path: "config/config.exs",
@@ -16,7 +16,12 @@ defmodule SuperCache.MixProject do
       homepage_url: "https://ohhi.vn",
       docs: docs(),
       description: description(),
-      package: package()
+      package: package(),
+      aliases: [
+        tidewave:
+          "run --no-halt -e 'Agent.start(fn -> Bandit.start_link(plug: Tidewave, port: 4000) end)'"
+      ],
+      usage_rules: usage_rules()
     ]
   end
 
@@ -38,21 +43,28 @@ defmodule SuperCache.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-     # {:swarm, "~> 3.4"},
-      {:ex_doc, "~> 0.36", only: :dev, runtime: false},
-      {:benchee, "~> 1.3", only: :dev},
+      {:ex_doc, "~> 0.40", only: :dev, runtime: false},
+      {:benchee, "~> 1.5", only: :dev},
+
+      # support AI in dev env.
+      {:tidewave, "~> 0.5", only: [:dev]},
+      {:usage_rules, "~> 1.2", only: [:dev]},
+      {:bandit, "~> 1.10", only: :dev}
     ]
   end
 
   defp description() do
-    "A library for cache data in memory. The library uses partition storage for a can cache service a mount of request. We are still developing please don't use for product."
+    "A library for cache data in memory. The library uses partition storage for a can cache service a mount of requests. Support common ways like: tuple, struct, key/value, queue & stack"
   end
 
   defp package() do
     [
       maintainers: ["Manh Van Vu", "Tam Nhat Ly"],
       licenses: ["MIT"],
-      links: %{"GitHub" => "https://github.com/ohhi-vn/super_cache", "About us" => "https://ohhi.vn/team"}
+      links: %{
+        "GitHub" => "https://github.com/ohhi-vn/super_cache",
+        "About us" => "https://ohhi.vn/team"
+      }
     ]
   end
 
@@ -78,16 +90,22 @@ defmodule SuperCache.MixProject do
         |> String.split(~r|[-_]|)
         |> Enum.map_join(" ", &String.capitalize/1)
         |> case do
-          "F A Q" ->"FAQ"
+          "F A Q" -> "FAQ"
           no_change -> no_change
         end
 
       {String.to_atom(path),
-        [
-          title: title,
-          default: title == "Guide"
-        ]
-      }
+       [
+         title: title,
+         default: title == "Guide"
+       ]}
     end)
+  end
+
+  defp usage_rules do
+    [
+      file: "AGENTS.md",
+      usage_rules: :all
+    ]
   end
 end

@@ -5,29 +5,30 @@
 
 ## Introduce
 
-This is a auto scale & distributed (in the future) cache library for Elixir. The library use Ets table for storage data.
+This is a auto scale & distributed (in the future) cache library for Elixir.
+The library use Ets table for storage data.
 
 ## Design
 
-
-```
 Client -> API -> Partition -> Storage
-```
 
 Current version, library has three main part:
 1. API interface & config holder.
 2. Partition holder.
 3. Storage partition.
-    
+
 ### API interface:
 
-Client interacts with library throw qua api interface. All config after start will be hold in this part.
+Client interacts with library throw qua api interface.
+All config after start will be hold in this part.
 
 ### Partition
 
 Support api get right storage part for data. 
 
-Partition based on Erlang phash2/2. Piece data after extract with config's info will get order of partition. Order is used get target partition.
+Partition based on Erlang phash2/2.
+Piece data after extract with config's info will get order of partition.
+Order is used get target partition.
 
 All partitions will be calculated after client call start/n start!/n function.
 
@@ -177,6 +178,26 @@ SuperCache.start!()
 Stack.push("my_stack", "Hello")
 Stack.pop("my_stack")
   # => "Hello"
+```
+
+Struct storage usage:
+
+```elixir
+alias SuperCache.Struct
+
+# Start cache
+SuperCache.start!()
+
+# Init key storage for struct.
+Struct.init(%MyStruct{}, :id)
+
+a = %MyStruct{id: 1, data: :a}
+
+Struct.add(a)
+
+# get struct
+{:ok, result} = Struct.get(%MyStruct{id: 1})
+  # =>  %MyStruct{id: 1, data: :a}
 ```
 
 Other APIs please go to document on [hexdocs.pm](https://hexdocs.pm/super_cache/readme.html)
