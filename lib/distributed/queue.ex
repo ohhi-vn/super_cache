@@ -18,7 +18,6 @@ defmodule SuperCache.Distributed.Queue do
       Queue.count("jobs")   # => 0
   """
 
-  alias SuperCache.Cluster.DistributedStore, as: DS
   alias SuperCache.{Storage, Partition}
   require Logger
 

@@ -9,7 +9,7 @@ defmodule SuperCache.Cluster.Replicator do
   """
   require Logger
 
-  alias SuperCache.{Storage, Partition, Config}
+  alias SuperCache.{Storage, Partition}
   alias SuperCache.Cluster.Manager
 
   @batch_size 500

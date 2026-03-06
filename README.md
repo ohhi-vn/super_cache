@@ -203,4 +203,59 @@ Struct.add(a)
   # =>  %MyStruct{id: 1, data: :a}
 ```
 
+## Distributed Cache
+
+Can use config or manual start.
+Remember number of partition in each node must be same.
+
+config:
+
+```elixir
+
+# for start with application
+config :super_cache,
+  auto_start:         true,
+  key_pos:            0,
+  partition_pos:      0,
+  cluster:            :distributed,
+  replication_factor: 2,       # primary + 1 replica
+  table_type:         :set,
+  num_partition:      3        # fix this so all nodes agree
+
+config :super_cache,
+  cluster_peers: [
+    :"node1@127.0.0.1",
+    :"node2@127.0.0.1",
+    :"node3@127.0.0.1"
+  ]
+```
+
+manual start cache
+
+```elixir
+SuperCache.Cluster.Bootstrap.start!(
+  key_pos: 0,
+  partition_pos: 0,
+  cluster: :distributed,
+  replication_factor: 2,
+  num_partition: 3   
+)
+```
+
+in a node can add data like:
+
+```elixir
+SuperCache.Distributed.put!({:hello, "world"})
+```
+
+access from other node:
+
+```elixir
+SuperCache.Distributed.get!({:hello, nil})
+#=> [{:hello, "world"}]           ← replicated from node1
+```
+
+Distributed mode has same api like standalone.
+Check docs in `SuperCache.Distributed.{Stack, Queue, KeyValue, Struct}` module for more details.
+
 Other APIs please go to document on [hexdocs.pm](https://hexdocs.pm/super_cache)
