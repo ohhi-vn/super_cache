@@ -64,7 +64,7 @@ defmodule SuperCache.Config do
   """
   @spec set_config(any, any) :: :ok
   def set_config(key, value) do
-    GenServer.cast(__MODULE__, {:set, key, value})
+    GenServer.call(__MODULE__, {:set, key, value})
   end
 
   @doc """
@@ -86,7 +86,7 @@ defmodule SuperCache.Config do
   @impl true
   @spec init(list(tuple)) :: {:ok, map}
   def init(opts) do
-    Logger.debug("super_cache, init, start api process with default config #{inspect opts}")
+    Logger.debug(fn -> "super_cache, init, start api process with default config #{inspect opts}" end)
     state =
       Enum.reduce(opts, %{}, fn ({key, value}, result) ->
         Map.put(result, key, value)
@@ -96,7 +96,7 @@ defmodule SuperCache.Config do
       if Map.has_key?(state, :table_prefix) do
         state
       else
-        Logger.debug("super_cache, init, using default prefix for table")
+        Logger.debug(fn -> "super_cache, init, using default prefix for table" end)
         Map.put(state, :table_prefix, "SuperCache.Storage.Ets")
       end
 
@@ -109,15 +109,13 @@ defmodule SuperCache.Config do
     {:reply, result, state}
   end
 
-  @impl true
   def handle_call({:has_config, key}, _from, state) do
     result = Map.has_key?(state, key)
     {:reply, result, state}
   end
 
-  @impl true
-  def handle_cast({:set, key, value}, state) do
-    {:noreply,  Map.put(state, key, value)}
+  def handle_call({:set, key, value}, _from, state) do
+    {:reply, :ok,  Map.put(state, key, value)}
   end
 
   @impl true
@@ -125,7 +123,6 @@ defmodule SuperCache.Config do
     {:noreply,  Map.delete(state, key)}
   end
 
-  @impl true
   def handle_cast(:clear, _state) do
     {:noreply,  %{}}
   end

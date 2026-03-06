@@ -41,9 +41,9 @@ defmodule SuperCache.KeyValue do
   def add(kv_name, key, value) do
     part = Partition.get_partition(kv_name)
 
-    Logger.debug(
+    Logger.debug( fn ->
       "super_cache, kv, name: #{inspect(kv_name)} store key: #{inspect(key)} to partition: #{inspect(part)}"
-    )
+    end)
 
     # always delete old value before put new value.
     # TO-DO: Don't need to delete in set/ordered_set type.
@@ -59,9 +59,9 @@ defmodule SuperCache.KeyValue do
   def get(kv_name, key, default \\ nil) do
     part = Partition.get_partition(kv_name)
 
-    Logger.debug(
+    Logger.debug(fn ->
       "super_cache, kv, name: #{inspect(kv_name)} get value of key: #{inspect(key)} from partition: #{inspect(part)}"
-    )
+    end)
 
     case Storage.get({:kv, kv_name, key}, part) do
       [] -> default
@@ -103,9 +103,9 @@ defmodule SuperCache.KeyValue do
   def remove(kv_name, key) do
     part = Partition.get_partition(kv_name)
 
-    Logger.debug(
+    Logger.debug(fn ->
       "super_cache, kv, name: #{inspect(kv_name)} remove value of key: #{inspect(key)} from partition: #{inspect(part)}"
-    )
+    end)
 
     Storage.delete({:kv, kv_name, key}, part)
     :ok

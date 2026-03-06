@@ -11,7 +11,7 @@ defmodule SuperCache.Internal.Stream do
         q
       end,
       fn queue ->
-        Logger.debug("get data from queue")
+        Logger.debug(fn -> "get data from queue" end)
         {Queue.get(queue), queue}
       end,
       fn _queue ->
@@ -28,6 +28,6 @@ defmodule SuperCache.Internal.Stream do
 
   def push(data) do
     SuperCache.put(data)
-    Logger.debug("pushed #{inspect(data)} to cache")
+    Logger.debug(fn -> "pushed #{inspect(data)} to cache" end)
   end
 end

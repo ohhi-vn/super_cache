@@ -11,40 +11,25 @@ defmodule SuperCache.Partition.Holder do
   ## APIs ##
 
   @spec start_link(any) :: :ignore | {:error, any} | {:ok, pid}
-  @doc """
-  Starts the server.
-  """
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  @doc """
-  Stops GenServer (in case shutdown library).
-  """
   @spec stop :: :ok
   def stop() do
    GenServer.call(__MODULE__, :stop)
   end
 
-  @doc """
-  Clears all partitions' info.
-  """
   @spec clean :: any
   def clean() do
     GenServer.call(__MODULE__, :clean)
   end
 
-  @doc """
-  Sets key/value for partition.
-  """
   @spec set(non_neg_integer) :: any
   def set(order) when is_integer(order) and (order >= 0) do
     GenServer.call(__MODULE__, {:set_partition, order})
   end
 
-  @doc """
-  Gets partition belong with key.
-  """
   @spec get(any) :: atom
   def get(order) do
     # get direct from ets table
@@ -52,12 +37,11 @@ defmodule SuperCache.Partition.Holder do
     partition
   end
 
-  @doc """
-  Gets all partitions.
-  """
   @spec get_all :: [atom]
   def get_all() do
-    List.flatten(Ets.match(__MODULE__, {:_, :"$1"}))
+    Ets.match(__MODULE__, {:"$1", :"$2"})
+    |> Enum.filter(fn [k, _] -> is_integer(k) end)
+    |> Enum.map(fn [_k, v] -> v end)
   end
 
   def set_num_partition(num) do
@@ -106,7 +90,7 @@ defmodule SuperCache.Partition.Holder do
   def handle_call( {:set_partition, order} , _from, %{table_name: table_name} = state) do
     prefix = Config.get_config(:table_prefix)
     partition = String.to_atom("#{prefix}_#{order}")
-    Logger.debug("super_cache, partition holder, add partition #{inspect partition} for order #{order}")
+    Logger.debug(fn -> "super_cache, partition holder, add partition #{inspect partition} for order #{order}" end)
     Ets.insert(table_name, {order, partition})
 
     {:reply,  :ok, state}

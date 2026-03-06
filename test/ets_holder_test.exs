@@ -9,6 +9,7 @@ defmodule SuperCache.EtsHolderTest do
       Process.sleep(100)
     end
 
+    SuperCache.start()
 
     {:ok, _} = EtsHolder.start_link(__MODULE__)
     EtsHolder.new_table(__MODULE__, __MODULE__)

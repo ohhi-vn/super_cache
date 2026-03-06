@@ -24,12 +24,12 @@ defmodule SuperCache.EtsHolder do
   end
 
   def new_table(name, table_name) do
-    Logger.debug("super_cache, ets holder, new Ets table: #{inspect table_name}")
+    Logger.debug(fn -> "super_cache, ets holder, new Ets table: #{inspect table_name}" end)
     GenServer.call(name, {:new, table_name})
   end
 
   def delete_table(name, table_name) do
-    Logger.debug("super_cache, ets holder, delete Ets table: #{inspect table_name}")
+    Logger.debug(fn -> "super_cache, ets holder, delete Ets table: #{inspect table_name}" end)
     GenServer.call(name, {:delete, table_name})
   end
 
@@ -38,7 +38,7 @@ defmodule SuperCache.EtsHolder do
   """
 
   def clean(name, table_name) do
-    Logger.debug("super_cache, ets holder, clean Ets table: #{inspect table_name}")
+    Logger.debug(fn -> "super_cache, ets holder, clean Ets table: #{inspect table_name}" end)
     GenServer.call(name, {:clean, table_name})
   end
 
@@ -81,12 +81,12 @@ defmodule SuperCache.EtsHolder do
   def handle_call({:delete, table_name}, _from, state) do
     Ets.delete(table_name)
 
-    {:reply, :ok,  Map.update!(state, :table_list, &([table_name | &1]))}
+    {:reply, :ok, Map.update!(state, :table_list, &List.delete(&1, table_name))}
   end
 
   @impl true
   def terminate(reason, %{my_name: name} = state) do
-    Logger.debug("super_cache, ets holder, #{inspect name} shutdown with reason #{inspect reason}")
+    Logger.debug(fn -> "super_cache, ets holder, #{inspect name} shutdown with reason #{inspect reason}" end)
     tables = Map.get(state, :table_list)
 
     for table <- tables do
@@ -103,7 +103,7 @@ defmodule SuperCache.EtsHolder do
   end
 
   defp create_table(table_name) do
-    Logger.info("super_cache, ets holder, create cache table for #{inspect table_name}")
+    Logger.debug(fn -> "super_cache, ets holder, create cache table for #{inspect table_name}" end)
     key_pos = Config.get_config(:key_pos) + 1 # key order of ets start from 1
     table_type = Config.get_config(:table_type)
 

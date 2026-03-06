@@ -48,9 +48,9 @@ defmodule SuperCache.Struct do
   """
   @spec init(map(), atom()) :: true
   def init(struct = %{__struct__: struct_name}, key \\ :id) when is_atom(key) do
-    Logger.debug(
+    Logger.debug(fn ->
       "super_cache, struct, init storage for struct: #{inspect(struct_name)}, key attribute: #{inspect(key)}"
-    )
+    end)
 
     with true <- Map.has_key?(struct, key),
          {:error, :key_not_found} <-
@@ -72,9 +72,9 @@ defmodule SuperCache.Struct do
     with {:ok, key} <- get_key_field(struct) do
       key_data = Map.get(struct, key)
 
-      Logger.debug(
+      Logger.debug(fn ->
         "super_cache, struct, store struct: #{inspect(struct_name)}, key: #{inspect(key_data)} to partition: #{inspect(partition)}"
-      )
+      end)
 
       Storage.delete({{:struct_storage, :struct, struct_name}, key_data}, partition)
 
@@ -171,9 +171,9 @@ defmodule SuperCache.Struct do
         [{_key, result}] ->
           key_data = Map.get(struct, key)
 
-          Logger.debug(
+          Logger.debug(fn ->
             "super_cache, struct, remove #{inspect(struct_name)} with key: #{inspect(key_data)} from partition: #{inspect(partition)}"
-          )
+          end)
 
           Storage.delete(
             {{:struct_storage, :struct, struct_name}, key_data},
@@ -200,9 +200,9 @@ defmodule SuperCache.Struct do
     with {:ok, _key} <- get_key_field(struct) do
       partition = get_partition(struct)
 
-      Logger.debug(
+      Logger.debug(fn ->
         "super_cache, struct, remove all structs #{inspect(struct_name)} from partition: #{inspect(partition)}"
-      )
+      end)
 
       Storage.delete_match({{{:struct_storage, :struct, struct_name}, :_}, :_}, partition)
       {:ok, :removed}

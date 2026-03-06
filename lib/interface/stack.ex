@@ -64,7 +64,7 @@ defmodule SuperCache.Stack do
     case Storage.take({:stack, :counter, stack_name}, partition) do
       # stack is not initialized
       [] ->
-        case Storage.get({{:stack, :updating, stack_name}, :_}, partition) do
+        case Storage.get({:stack, :updating, stack_name}, partition) do
           # stack is not initialized
           [] ->
             stack_init(stack_name)
@@ -73,7 +73,7 @@ defmodule SuperCache.Stack do
           # stack is updating
           _ ->
             # wait for stack is ready
-            Process.sleep(0)
+            :erlang.yield()
             stack_push(partition, stack_name, value)
         end
 
@@ -86,9 +86,9 @@ defmodule SuperCache.Stack do
 
         Storage.delete({:stack, :updating, stack_name}, partition)
 
-        Logger.debug(
+        Logger.debug(fn ->
           "super_cache, stack, push value: #{inspect(value)} to stack: #{inspect(stack_name)}"
-        )
+        end)
 
         true
     end
@@ -106,7 +106,7 @@ defmodule SuperCache.Stack do
           # stack is updating
           _ ->
             # wait for stack is ready
-            Process.sleep(0)
+            :erlang.yield()
             stack_pop(partition, stack_name, default)
         end
 
@@ -132,9 +132,9 @@ defmodule SuperCache.Stack do
 
         Storage.delete({:stack, :updating, stack_name}, partition)
 
-        Logger.debug(
+        Logger.debug(fn ->
           "super_cache, stack, push value: #{inspect(value)} to stack: #{inspect(stack_name)}"
-        )
+        end)
 
         value
     end
@@ -159,7 +159,7 @@ defmodule SuperCache.Stack do
           # stack is updating
           _ ->
             # wait for stack is ready
-            Process.sleep(0)
+            :erlang.yield()
             to_list(partition, stack_name)
         end
 
@@ -180,9 +180,9 @@ defmodule SuperCache.Stack do
         Storage.put({{:stack, :counter, stack_name}, 0}, partition)
         Storage.delete({:stack, :updating, stack_name}, partition)
 
-        Logger.debug(
+        Logger.debug(fn ->
           "super_cache, stack, push value: #{inspect(value)} to stack: #{inspect(stack_name)}"
-        )
+        end)
 
         value
     end

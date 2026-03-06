@@ -1,7 +1,7 @@
 defmodule SuperCache do
 
   @moduledoc """
-  SeperCache is a library support for caching data in memory.
+  SuperCache is a library support for caching data in memory.
   The library is based on Ets table and use some function from :ets for making it easy & friendly to use.
   SuperCache support auto scale based on number of cpu cores and easy to use.
   Type of data is supported is tuple, other type of data can put in a tuple an storage in SuperCache.
@@ -29,7 +29,7 @@ defmodule SuperCache do
   """
   @spec start!() :: :ok
   def start!() do
-    opts = [key_pos: 0, partition_pos: 0, cluster: :local, table_type: :bag]
+    opts = [key_pos: 0, partition_pos: 0, cluster: :local, table_type: :set]
     start!(opts)
   end
 
@@ -57,7 +57,7 @@ defmodule SuperCache do
 
     Config.clear_config()
     for {key, value} <- opts do
-      Logger.debug("super_cache, api, add config, key: #{inspect key}, value: #{inspect value}")
+      Logger.debug(fn -> "super_cache, api, add config, key: #{inspect key}, value: #{inspect value}" end)
       Config.set_config(key, value)
     end
 
@@ -98,14 +98,14 @@ defmodule SuperCache do
     # make stream for lazy write.
     stream_fun = fn id ->
       name = String.to_atom("SuperCache.Buffer_#{id}")
-      Logger.debug("super_cache, api, starting stream #{inspect name}")
+      Logger.debug(fn -> "super_cache, api, starting stream #{inspect name}" end)
 
       name
       |> LibQueue.start()
       |> LibStream.create()
       |> LibStream.make_stream_pipe()
 
-      Logger.debug("end stream #{inspect name}")
+      Logger.debug(fn -> "end stream #{inspect name}" end)
     end
 
     for id <- 1..Partition.get_schedulers() do
@@ -184,10 +184,13 @@ defmodule SuperCache do
   """
   @spec put!(tuple()) :: true
   def put!(data) when is_tuple(data) do
-    part_data = Config.get_partition!(data)
-    part = Partition.get_partition(part_data)
-    Logger.debug("super_cache, api, store data (key: #{inspect Config.get_key!(data)}) to partition: #{inspect part}")
-    Storage.put(data, part)
+    partition =
+      data
+      |> Config.get_partition!()
+      |> Partition.get_partition()
+
+    Logger.debug(fn -> "super_cache, api, store data (key: #{inspect Config.get_key!(data)}) to partition: #{inspect partition}" end)
+    Storage.put(data, partition)
   end
 
   @doc """
@@ -223,10 +226,13 @@ defmodule SuperCache do
   @spec get!(tuple) :: [tuple]
   def get!(data) when is_tuple(data) do
     key = Config.get_key!(data)
-    part_data = Config.get_partition!(data)
-    part = Partition.get_partition(part_data)
-    Logger.debug("super_cache, api, store data (key: #{inspect key}) to partition: #{inspect part}")
-    Storage.get(key, part)
+    partition =
+      data
+      |> Config.get_partition!()
+      |> Partition.get_partition()
+
+    Logger.debug(fn -> "super_cache, api, get data (key: #{inspect key}) to partition: #{inspect partition}" end)
+    Storage.get(key, partition)
   end
 
   @doc """
@@ -250,7 +256,7 @@ defmodule SuperCache do
   @spec get_by_key_partition!(any, any) :: [tuple]
   def get_by_key_partition!(key, partition) do
     part = Partition.get_partition(partition)
-    Logger.debug("super_cache, api, get data (key: #{inspect key}) from partition #{inspect part}")
+    Logger.debug(fn -> "super_cache, api, get data (key: #{inspect key}) from partition #{inspect part}" end)
     Storage.get(key, part)
   end
 
@@ -279,7 +285,7 @@ defmodule SuperCache do
         data -> # scan one partition
           [Partition.get_partition(data)]
       end
-    Logger.debug("super_cache, api, get_by_match, list of partition for pattern (#{inspect pattern}): #{inspect partitions})")
+    Logger.debug(fn -> "super_cache, api, get_by_match, list of partition for pattern (#{inspect pattern}): #{inspect partitions})" end)
     Enum.reduce(partitions, [], fn el, result ->
       Storage.get_by_match(pattern, el) ++ result
     end)
@@ -308,7 +314,7 @@ defmodule SuperCache do
         data -> # scan one partition
           [Partition.get_partition(data)]
       end
-    Logger.debug("super_cache, api, get_by_match_object, list of partition for pattern (#{inspect pattern}): #{inspect partitions})")
+    Logger.debug(fn -> "super_cache, api, get_by_match_object, list of partition for pattern (#{inspect pattern}): #{inspect partitions})" end)
     Enum.reduce(partitions, [], fn el, result ->
       Storage.get_by_match_object(pattern, el) ++ result
     end)
@@ -335,7 +341,7 @@ defmodule SuperCache do
         data -> # scan one partition
           [Partition.get_partition(data)]
       end
-    Logger.debug("super_cache, api, scan, list of partition: #{inspect partitions})")
+    Logger.debug(fn -> "super_cache, api, scan, list of partition: #{inspect partitions})" end)
     Enum.reduce(partitions, acc, fn el, result ->
       Storage.scan(fun, result, el)
     end)
@@ -355,11 +361,13 @@ defmodule SuperCache do
   @spec delete!(tuple) :: :ok
   def delete!(data) when is_tuple(data) do
     key = Config.get_key!(data)
-    part_data = Config.get_partition!(data)
-    Logger.debug("super_cache, api, data used for get partition #{inspect part_data}")
-    part = Partition.get_partition(part_data)
-    Logger.debug("super_cache, api, store data (key: #{inspect key}) to partition: #{inspect part}")
-    Storage.delete(key, part)
+    partition =
+      data
+      |> Config.get_partition!()
+      |> Partition.get_partition()
+
+    Logger.debug(fn -> "super_cache, api, store data (key: #{inspect key}) to partition: #{inspect partition}" end)
+    Storage.delete(key, partition)
     :ok
   end
 
@@ -387,7 +395,7 @@ defmodule SuperCache do
         data -> # scan one partition
           [Partition.get_partition(data)]
       end
-    Logger.debug("super_cache, api, get_by_match_object, list of partition for pattern (#{inspect pattern}): #{inspect partitions})")
+    Logger.debug(fn -> "super_cache, api, get_by_match_object, list of partition for pattern (#{inspect pattern}): #{inspect partitions})" end)
     for p <- partitions do
       Storage.delete_match(pattern, p)
     end
@@ -407,7 +415,7 @@ defmodule SuperCache do
   @spec delete_by_key_partition!(any, any) :: true
   def delete_by_key_partition!(key, partition_data) do
     part = Partition.get_partition(partition_data)
-    Logger.debug("super_cache, api, get data (key: #{inspect key}) from partition #{inspect part}")
+    Logger.debug(fn -> "super_cache, api, get data (key: #{inspect key}) from partition #{inspect part}" end)
     Storage.delete(key, part)
   end
 

@@ -94,7 +94,7 @@ defmodule SuperCache.Queue do
     case Storage.take({:queue, :tail, queue_name}, partition) do
       # stack is not initialized
       [] ->
-        case Storage.get({{:queue, :updating, queue_name}, :_}, partition) do
+        case Storage.get({:queue, :updating, queue_name}, partition) do
           # stack is not initialized
           [] ->
             queue_init(queue_name)
@@ -103,7 +103,7 @@ defmodule SuperCache.Queue do
           # queue is updating
           _ ->
             # wait for stack is ready
-            Process.sleep(0)
+            :erlang.yield()
             queue_in(partition, queue_name, value)
         end
 
@@ -154,7 +154,7 @@ defmodule SuperCache.Queue do
           # queue is updating
           _ ->
             # wait for stack is ready
-            Process.sleep(0)
+            :erlang.yield()
             queue_out(partition, queue_name, default)
         end
 
@@ -184,9 +184,9 @@ defmodule SuperCache.Queue do
 
         Storage.delete({:queue, :updating, queue_name}, partition)
 
-        Logger.debug(
+        Logger.debug(fn ->
           "super_cache, queue, get value: #{inspect(value)} from queue #{inspect(queue_name)}"
-        )
+        end)
 
         value
     end
@@ -204,7 +204,7 @@ defmodule SuperCache.Queue do
           # queue is updating
           _ ->
             # wait for stack is ready
-            Process.sleep(0)
+            :erlang.yield()
             queue_peak(partition, queue_name, default)
         end
 
@@ -244,7 +244,7 @@ defmodule SuperCache.Queue do
           # queue is updating
           _ ->
             # wait for stack is ready
-            Process.sleep(0)
+            :erlang.yield()
             to_list(partition, queue_name)
         end
 
@@ -266,14 +266,15 @@ defmodule SuperCache.Queue do
           end)
 
         # reset queue
+        Storage.delete({:queue, :head, queue_name}, partition)
+        Storage.delete({:queue, :tail, queue_name}, partition)
         Storage.put({{:queue, :head, queue_name}, 0}, partition)
         Storage.put({{:queue, :tail, queue_name}, 0}, partition)
-
         Storage.delete({:queue, :updating, queue_name}, partition)
 
-        Logger.debug(
+        Logger.debug(fn ->
           "super_cache, queue, get all length: #{inspect(length(value))} from queue #{inspect(queue_name)}"
-        )
+        end)
 
         Enum.reverse(value)
     end
