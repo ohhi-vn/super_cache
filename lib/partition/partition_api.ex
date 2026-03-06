@@ -2,78 +2,88 @@ defmodule SuperCache.Partition do
   @moduledoc false
 
   alias SuperCache.Partition.Holder
-
   alias :ets, as: Ets
 
+  # ─── Partition resolution ───────────────────────────────────────────────────
+
   @doc """
-  Gets partition from data.
+  Resolve a partition ETS table name from **partition data** (any term).
+  The data is hashed to derive the partition index, then the index is looked
+  up in the Holder ETS table.
+  Used by the public API when the caller has the raw key/partition value.
   """
   @spec get_partition(any) :: atom
   def get_partition(data) do
-    order = get_pattition_order(data)
-    Holder.get(order)
+    data
+    |> get_partition_order()
+    |> get_partition_by_idx()
   end
 
   @doc """
-  List all partitions.
+  Resolve a partition ETS table name directly from a **partition index**.
+  Does NOT re-hash — safe to call from the Replicator and Router where the
+  index is already known.
   """
-  @spec get_all_partition :: [atom]
-  def get_all_partition() do
-    Holder.get_all()
+  @spec get_partition_by_idx(non_neg_integer) :: atom
+  def get_partition_by_idx(idx) when is_integer(idx) and idx >= 0 do
+    Holder.get(idx)
   end
 
-  @doc """
-  Generates all partitions and store it with order is key of partition.
-  """
-  @spec start(pos_integer) :: any
+  # ─── Index helpers ──────────────────────────────────────────────────────────
+
+  @doc "Compute the partition index for any term (hash mod num_partitions)."
+  @spec get_partition_order(any) :: non_neg_integer
+  def get_partition_order(term) do
+    :erlang.phash2(term, get_num_partition())
+  end
+
+  @doc "Compute the partition index for a data tuple using configured partition_pos."
+  @spec get_partition_order_from_data(tuple) :: non_neg_integer
+  def get_partition_order_from_data(data) when is_tuple(data) do
+    data
+    |> SuperCache.Config.get_partition!()
+    |> get_partition_order()
+  end
+
+  # ─── Cluster / management ───────────────────────────────────────────────────
+
+  @doc "List all partition ETS table names."
+  @spec get_all_partition() :: [atom]
+  def get_all_partition(), do: Holder.get_all()
+
+  @doc "Initialise partitions: store the count and register each index → name."
+  @spec start(pos_integer) :: :ok
   def start(num_partition) when is_integer(num_partition) do
     Holder.set_num_partition(num_partition)
-
-    for order <- 0..(num_partition - 1) do
-      Holder.set(order)
-    end
+    for order <- 0..(num_partition - 1), do: Holder.set(order)
+    :ok
   end
 
-  @doc """
-  Clears all paritions.
-  """
-  @spec stop :: :ok
+  @doc "Clear all partition registrations."
+  @spec stop() :: :ok
   def stop() do
     Holder.clean()
     :ok
   end
 
-  @doc """
-  Gets number of partition in cache.
-  """
-  @spec get_num_partition :: pos_integer
+  @doc "Return the configured number of partitions."
+  @spec get_num_partition() :: pos_integer
   def get_num_partition() do
     [{_, _, num}] = Ets.lookup(Holder, :num_partition)
     num
   end
 
-  @doc """
-  Gets number of online scheduler of VM.
-  """
-  @spec get_schedulers :: pos_integer
-  def get_schedulers() do
-    System.schedulers_online()
-  end
+  @doc "Return the number of online schedulers (used as default partition count)."
+  @spec get_schedulers() :: pos_integer
+  def get_schedulers(), do: System.schedulers_online()
 
-  @doc """
-  Gets hash for data.
-  """
+  # kept for backwards compat — prefer get_partition_order/1
+  @doc false
   @spec get_hash(any) :: non_neg_integer
-  def get_hash(term) do
-    :erlang.phash2(term)
-  end
+  def get_hash(term), do: :erlang.phash2(term)
 
-  @doc """
-  Gets order of partition from data.
-  """
+  # kept for backwards compat — prefer get_partition_order/1
+  @doc false
   @spec get_pattition_order(any) :: non_neg_integer
-  def get_pattition_order(term) do
-    num = get_num_partition()
-    :erlang.phash2(term, num)
-  end
+  def get_pattition_order(term), do: get_partition_order(term)
 end

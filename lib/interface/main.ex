@@ -15,12 +15,8 @@ defmodule SuperCache do
   ## Quick start
 
       SuperCache.start!()
-      # Push tuple to cache
       SuperCache.put!({:my_key, "some value"})
-      # Get tuple by tuple style
       SuperCache.get!({:my_key, nil})   # => [{:my_key, "some value"}]
-      # Get tuple by key/partition data.
-      SuperCache.get_by_key_partition!(:my_key)
       SuperCache.stop()
   """
 

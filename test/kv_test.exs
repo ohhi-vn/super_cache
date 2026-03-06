@@ -49,7 +49,7 @@ defmodule SuperCache.KeyValueTest do
     KV.add("my_kv", :key2, data)
     KV.remove_all("my_kv")
     result = KV.count("my_kv")
-    assert data != result
+    assert 0 == result
   end
 
   test "get with default data" do

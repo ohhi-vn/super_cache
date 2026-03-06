@@ -4,7 +4,7 @@ defmodule SuperCache.MixProject do
   def project do
     [
       app: :super_cache,
-      version: "0.8.0",
+      version: "0.9.0",
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -17,10 +17,7 @@ defmodule SuperCache.MixProject do
       docs: docs(),
       description: description(),
       package: package(),
-      aliases: [
-        tidewave:
-          "run --no-halt -e 'Agent.start(fn -> Bandit.start_link(plug: Tidewave, port: 4000) end)'"
-      ],
+      aliases: aliases(),
       usage_rules: usage_rules()
     ]
   end
@@ -54,7 +51,7 @@ defmodule SuperCache.MixProject do
   end
 
   defp description() do
-    "A library for cache data in memory. The library uses partition storage for a can cache service a mount of requests. Support common ways like: tuple, struct, key/value, queue & stack"
+    "A library for cache data in memory. The library uses partition storage for a can cache service a mount of requests. Support distributed cache (experiment)"
   end
 
   defp package() do
@@ -107,5 +104,22 @@ defmodule SuperCache.MixProject do
       file: "AGENTS.md",
       usage_rules: :all
     ]
+  end
+
+  defp aliases() do
+  [
+    tidewave:
+      "run --no-halt -e 'Agent.start(fn -> Bandit.start_link(plug: Tidewave, port: 4000) end)'",
+
+    # Normal unit tests — no distribution required.
+    test: ["test --exclude cluster"],
+
+    # Cluster integration tests — spawns peer nodes via :peer.
+    # VM flags (--name, --cookie) must be passed via --erl to the runtime,
+    # not directly to mix test which does not understand them.
+    "test.cluster": [
+      "cmd elixir --name primary@127.0.0.1 --cookie test_secret -S mix test --only cluster"
+    ]
+  ]
   end
 end

@@ -5,8 +5,10 @@
 
 ## Introduce
 
-This is a auto scale & distributed (in the future) cache library for Elixir.
-The library use Ets table for storage data.
+This is cache library for Elixir based on Ets table.
+Library is to run as standalone or distributed (experiment).
+
+Support to store tuple, struct, key/value, queue & stack for sharing state between processes.
 
 ## Design
 
@@ -24,7 +26,7 @@ All config after start will be hold in this part.
 
 ### Partition
 
-Support api get right storage part for data. 
+Support api get right storage part for data.
 
 Partition based on Erlang phash2/2.
 Piece data after extract with config's info will get order of partition.
@@ -102,6 +104,7 @@ Start SuperCache with default config:
 ```elixir
 SuperCache.start!()
 ```
+
 *(key_pos = partition_pos = 0, table_type = :set, num_partition = on_line schedulers of Erlang VM)*
 
 Start with config:
