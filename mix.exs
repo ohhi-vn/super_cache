@@ -29,7 +29,7 @@ defmodule SuperCache.MixProject do
   def application do
     dev_app =
       if Mix.env() == :dev do
-        [:observer, :wx]
+        [:observer, :wx, :tools, :runtime_tools]
       else
         []
       end
@@ -59,7 +59,7 @@ defmodule SuperCache.MixProject do
 
   defp package() do
     [
-      maintainers: ["Manh Van Vu", "Tam Nhat Ly"],
+      maintainers: ["Manh Van Vu"],
       licenses: ["MIT"],
       links: %{
         "GitHub" => "https://github.com/ohhi-vn/super_cache",

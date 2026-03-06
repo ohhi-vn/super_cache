@@ -33,3 +33,7 @@ defp deps do
   ]
 end
 ```
+
+## Benchmark & Profiling guide
+
+Scripts for benchmark & profiling in `./tools' folder.

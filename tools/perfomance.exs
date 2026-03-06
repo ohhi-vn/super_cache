@@ -3,7 +3,7 @@ alias :ets, as: Ets
 
 SuperCache.start()
 num = 500_000
-worker = 30
+worker = 10
 table_name = :test_direct
 
 Ets.new(table_name, [

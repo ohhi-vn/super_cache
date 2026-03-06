@@ -1,6 +1,6 @@
 SuperCache.start()
-num = 100_000
-worker = 16
+num = 1_000_000
+worker = 10
 
 fun_write = fn start, stop ->
   for i <- start..stop, do: SuperCache.lazy_put({i, :a})
