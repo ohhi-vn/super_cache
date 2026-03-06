@@ -86,7 +86,7 @@ by adding `super_cache` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:super_cache, "~> 0.7"}
+    {:super_cache, "~> 0.8"}
   ]
 end
 ```

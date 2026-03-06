@@ -3,155 +3,119 @@ defmodule SuperCache.Storage do
 
   require Logger
 
-  alias  SuperCache.{EtsHolder, Config}
+  alias SuperCache.{EtsHolder, Config}
   alias :ets, as: Ets
 
-  @doc """
-  Create all Ets tables.
-  """
-  @spec start(pos_integer) :: any
-  def start(num) when is_integer(num) and (num > 0) do
-      for order <- 0..num-1 do
-        prefix = Config.get_config(:table_prefix)
-        name = String.to_atom("#{prefix}_#{order}")
-        EtsHolder.new_table(EtsHolder, name)
-      end
+  ## Lifecycle ##
+
+  @doc "Create all ETS partitions."
+  @spec start(pos_integer) :: :ok
+  def start(num) when is_integer(num) and num > 0 do
+    prefix = Config.get_config(:table_prefix)
+
+    for order <- 0..(num - 1) do
+      name = table_name(prefix, order)
+      EtsHolder.new_table(EtsHolder, name)
+    end
+
+    :ok
   end
 
-  @doc """
-  Delete all Ets tables.
-  """
-  @spec stop(pos_integer) :: any
-  def stop(num) when is_integer(num) and (num > 0) do
-    Logger.debug(fn -> "super_cache, storage, stop storage workers (#{num})" end)
+  @doc "Delete all ETS partitions."
+  @spec stop(pos_integer) :: :ok
+  def stop(num) when is_integer(num) and num > 0 do
+    Logger.debug(fn -> "super_cache, storage, stopping #{num} partition(s)" end)
+    prefix = Config.get_config(:table_prefix)
 
-    for order <- 0..num-1 do
-      prefix = Config.get_config(:table_prefix)
-      name = String.to_atom("#{prefix}_#{order}")
-      Logger.debug(fn -> "super_cache, storage, remove storage #{inspect name}" end)
+    for order <- 0..(num - 1) do
+      name = table_name(prefix, order)
+      Logger.debug(fn -> "super_cache, storage, deleting #{inspect(name)}" end)
       EtsHolder.delete_table(EtsHolder, name)
     end
+
+    :ok
   end
 
-  @doc """
-  Puts data(tuple) to a GenServer which has id is partition.
-  """
+  ## Write ##
+
+  @doc "Insert one or more tuples into a partition."
   @spec put([tuple] | tuple, atom | :ets.tid()) :: true
-  def put(term, partition) do
-    Ets.insert(partition, term)
-  end
+  def put(term, partition), do: Ets.insert(partition, term)
 
   @doc """
-  Gets data from GenServer (identity by partition) with key.
+  Insert a tuple only if no entry with the same key exists.
+  Returns `true` on success, `false` if the key is already present.
+  Works only with `:set` / `:ordered_set` table types.
   """
+  @spec insert_new(tuple, atom | :ets.tid()) :: boolean
+  def insert_new(term, partition), do: Ets.insert_new(partition, term)
+
+  @doc "Update specific element(s) of an existing record.  Optional default for missing keys."
+  def update_element(key, partition, element_spec, default),
+    do: Ets.update_element(partition, key, element_spec, default)
+
+  def update_element(key, partition, element_spec),
+    do: Ets.update_element(partition, key, element_spec)
+
+  @doc "Increment/decrement a counter field.  Optional default for missing keys."
+  def update_counter(key, partition, counter_spec, default),
+    do: Ets.update_counter(partition, key, counter_spec, default)
+
+  def update_counter(key, partition, counter_spec),
+    do: Ets.update_counter(partition, key, counter_spec)
+
+  ## Read ##
+
+  @doc "Look up records by key."
   @spec get(any, atom | :ets.tid()) :: [tuple]
-  def get(key, partition) do
-    Ets.lookup(partition, key)
-  end
+  def get(key, partition), do: Ets.lookup(partition, key)
 
-  @doc """
-  Update data in a partition.
-  element_spec is a tuple with 2 elements {pos_integer, any} or list of 2 element tuple.
-  If key is not existed, default value will be used.
-  Update element just works with set/ordered_set type.
-  """
-  def update_element(key, partition, element_spec, default) do
-    Ets.update_element(partition, key, element_spec, default)
-  end
-
-  @doc """
-  Update data in a partition.
-  element_spec is a tuple with 2 elements {pos_integer, any} or list of 2 element tuple.
-  Update element just works with set/ordered_set type.
-  """
-  def update_element(key, partition, element_spec) do
-    Ets.update_element(partition, key, element_spec)
-  end
-
-  @doc """
-  Update counter in a partition.
-  counter_spec is a tuple {pos, increment} or {pos, increment, threshold, setvalue}.
-  Update counter just works with set/ordered_set type.
-  """
-  def update_counter(key, partition, counter_spec) do
-    Ets.update_counter(partition, key, counter_spec)
-  end
-
-  @doc """
-  Update counter in a partition.
-  counter_spec is a tuple {pos, increment} or {pos, increment, threshold, setvalue}.
-  If key is not existed, default value will be used.
-  Update counter just works with set/ordered_set type.
-  """
-  def update_counter(key, partition, counter_spec, default) do
-    Ets.update_counter(partition, key, counter_spec, default)
-  end
-
-  @doc """
-  Gets data by pattern matching in a partition.
-  """
-  @spec get_by_match(atom | tuple, atom | :ets.tid()) :: [list]
+  @doc "Pattern match — returns list of bound variable lists (`:ets.match/2`)."
+  @spec get_by_match(atom | tuple, atom | :ets.tid()) :: [[any]]
   def get_by_match(pattern, partition) do
-    Logger.debug(fn -> "super_cache, storage, pattern for match: #{inspect pattern}, partition: #{partition}" end)
+    Logger.debug(fn -> "super_cache, storage, match pattern=#{inspect(pattern)} partition=#{partition}" end)
     Ets.match(partition, pattern)
   end
 
-  @doc """
-  Gets data by match object in a partition.
-  """
+  @doc "Pattern match — returns full matching objects (`:ets.match_object/2`)."
   @spec get_by_match_object(atom | tuple, atom | :ets.tid()) :: [tuple]
   def get_by_match_object(pattern, partition) do
-    Logger.debug(fn -> "super_cache, storage, pattern for match: #{inspect pattern}, partition: #{partition}" end)
+    Logger.debug(fn -> "super_cache, storage, match_object pattern=#{inspect(pattern)} partition=#{partition}" end)
     Ets.match_object(partition, pattern)
   end
 
-  @doc """
-  Scans all object in a partition.
-  """
+  @doc "Fold over all records in a partition."
   @spec scan((any, any -> any), any, atom | :ets.tid()) :: any
-  def scan(fun, acc, partition) do
-    Ets.foldl(fun, acc, partition)
-  end
+  def scan(fun, acc, partition), do: Ets.foldl(fun, acc, partition)
 
-  @doc """
-  Deletes data in a partition.
-  """
+  @doc "Remove and return a record by key (atomic take)."
+  @spec take(any, atom | :ets.tid()) :: [tuple]
+  def take(key, partition), do: Ets.take(partition, key)
+
+  ## Delete ##
+
+  @doc "Delete a record by key."
   @spec delete(any, atom | :ets.tid()) :: true
-  def delete(key, partition) do
-    Ets.delete(partition, key)
-  end
+  def delete(key, partition), do: Ets.delete(partition, key)
 
-  @doc """
-  Deletes all data in a partition.
-  """
+  @doc "Delete all records in a partition."
   @spec delete_all(atom | :ets.tid()) :: true
-  def delete_all(partition) do
-    Ets.delete_all_objects(partition)
-  end
+  def delete_all(partition), do: Ets.delete_all_objects(partition)
 
-  @doc """
-  Deletes by pattern in a partition.
-  """
+  @doc "Delete all records matching `pattern`."
   @spec delete_match(atom | tuple, atom | :ets.tid()) :: true
   def delete_match(pattern, partition) do
-    Logger.debug(fn -> "super_cache, storage, pattern for match: #{inspect pattern}, partition: #{partition}" end)
+    Logger.debug(fn -> "super_cache, storage, delete_match pattern=#{inspect(pattern)} partition=#{partition}" end)
     Ets.match_delete(partition, pattern)
   end
 
-  @doc """
-  Takes data in a partition.
-  Data is removed after taking.
-  """
-  @spec take(any, atom | :ets.tid()) :: [tuple]
-  def take(key, partition) do
-    Ets.take(partition, key)
-  end
+  ## Stats ##
 
-  @doc """
-  Get size in partition.
-  """
-  def stats(partition) do
-    counter = Ets.info(partition, :size)
-    {partition, counter}
-  end
+  @doc "Return `{partition, record_count}` for a partition."
+  @spec stats(atom | :ets.tid()) :: {atom | :ets.tid(), non_neg_integer}
+  def stats(partition), do: {partition, Ets.info(partition, :size)}
+
+  ## Private ##
+
+  defp table_name(prefix, order), do: String.to_atom("#{prefix}_#{order}")
 end

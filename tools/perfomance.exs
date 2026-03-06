@@ -1,9 +1,9 @@
 
 alias :ets, as: Ets
 
-SuperCache.start()
-num = 500_000
-worker = 10
+
+num = 1_500_000
+worker = 15
 table_name = :test_direct
 
 Ets.new(table_name, [
@@ -15,6 +15,8 @@ Ets.new(table_name, [
   {:read_concurrency, true},
   {:decentralized_counters, true}
 ])
+
+SuperCache.start()
 
 fun_direct_write = fn start, stop ->
   for i <- start..stop, do: Ets.insert(table_name, {i, :a})
@@ -163,47 +165,3 @@ IO.puts "SuperCache mix read/write #{num * worker} records need #{inspect Float.
 IO.puts ""
 
 SuperCache.delete_all()
-
-# break for test req/s only
-raise "stop"
-
-##  test with Benchee
-
-list = 1..num
-
-read_1p = Task.async_stream(list, fn index ->
-  {:ok,  SuperCache.get_same_key_partition!(index)}
-end, order: false, max_concurrent: 1)
-
-read_5p = Task.async_stream(list, fn index ->
-  {:ok,  SuperCache.get_same_key_partition!(index)}
-end, order: false, max_concurrent: 5)
-
-read_10p = Task.async_stream(list, fn index ->
-  {:ok,  SuperCache.get_same_key_partition!(index)}
-end, order: false, max_concurrent: 10)
-
-write_1p = Task.async_stream(list, fn index ->
-  {:ok, SuperCache.put({index, :a})}
-end, order: false, max_concurrent: 1)
-
-write_5p = Task.async_stream(list, fn index ->
-  {:ok,  SuperCache.put({index, :a})}
-end, order: false, max_concurrent: 5)
-
-write_10p = Task.async_stream(list, fn index ->
-  {:ok,  SuperCache.put({index, :a})}
-end, order: false, max_concurrent: 10)
-
-Benchee.run(%{
-  "write 1 process" => fn -> Enum.to_list(write_1p) end,
-  "write 5 processes" => fn -> Enum.to_list(write_5p) end,
-  "write 10 processes" => fn -> Enum.to_list(write_10p) end
-  })
-
-
-Benchee.run(%{
-  "read 1 process" => fn -> Enum.to_list(read_1p) end,
-  "read 5 processes" => fn -> Enum.to_list(read_5p) end,
-  "read 10 processes" => fn -> Enum.to_list(read_10p) end
-  })

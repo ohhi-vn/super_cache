@@ -1,43 +1,43 @@
 defmodule SuperCache.Queue do
   @moduledoc """
-  A queue based on cache.
-  Data in queue stored in cache.
-  Can handle multiple queue with different name.
-  A queue is a FIFO data structure.
-  This is global data, any process can access to queue data.
-  Need to start SuperCache.start!/1 before using this module.
-  Ex:
+  A named, FIFO queue backed by SuperCache ETS storage.
 
-  ```elixir
-  alias SuperCache.Queue
-  SuperCache.start!()
-  Queue.add("my_queue", "Hello")
-  Queue.out("my_queue")
-    # => "Hello"
-  ```
+  Any process in the VM can read or write any queue by name.
+  Multiple queues with different names can coexist.
+
+  Requires `SuperCache.start!/1` to be called first.
+
+  ## Example
+
+      alias SuperCache.Queue
+
+      SuperCache.start!()
+      Queue.add("jobs", :task_a)
+      Queue.add("jobs", :task_b)
+      Queue.out("jobs")    # => :task_a
+      Queue.count("jobs")  # => 1
+      Queue.get_all("jobs") # => [:task_b]  (non-destructive)
   """
 
-  alias SuperCache.Storage
-  alias SuperCache.Partition
+  alias SuperCache.{Storage, Partition}
 
   require Logger
 
-  ### Api ###
+  ## API ##
 
   @doc """
-  Add value to queue with name is queue_name.
-  Queue is a FIFO data structure. If queue_name is not existed, it will be created.
+  Enqueue `value` into the named queue.
+  Creates the queue if it does not yet exist.
   """
   @spec add(any, any) :: true
   def add(queue_name, value) do
     part = Partition.get_partition(queue_name)
-
     queue_in(part, queue_name, value)
   end
 
   @doc """
-  Pop value from queue with name is queue_name.
-  If queue_name is not existed or no data, it will return default value.
+  Dequeue and return the front value.
+  Returns `default` (default `nil`) when the queue is empty or does not exist.
   """
   @spec out(any, any) :: any
   def out(queue_name, default \\ nil) do
@@ -46,9 +46,8 @@ defmodule SuperCache.Queue do
   end
 
   @doc """
-  Peak value from queue with name is queue_name.
-  Data still in queue after peak.
-  If queue_name is not existed or no data, it will return default value.
+  Return the front value without removing it.
+  Returns `default` (default `nil`) when the queue is empty or does not exist.
   """
   @spec peak(any, any) :: any
   def peak(queue_name, default \\ nil) do
@@ -57,226 +56,217 @@ defmodule SuperCache.Queue do
   end
 
   @doc """
-  Get all items in queue.
-  If queue_name is not existed, it will return []. If queue is empty, it will return [].
+  Return the number of items in the queue.
+  Returns `0` when the queue is empty or does not exist.
   """
-  @spec get_all(any()) :: list()
-  def get_all(queue_name) do
-    partition = Partition.get_partition(queue_name)
-    to_list(partition, queue_name)
-  end
-
-  @doc """
-  Count number of data in queue with name is queue_name.
-  If queue_name is not existed, it will return 0.
-  """
-  @spec count(any()) :: number()
+  @spec count(any) :: non_neg_integer
   def count(queue_name) do
-    partition = Partition.get_partition(queue_name)
+    part = Partition.get_partition(queue_name)
 
-    case Storage.get({:queue, :tail, queue_name}, partition) do
-      # stack is not initialized
+    case Storage.get({:queue, :tail, queue_name}, part) do
       [] ->
         0
 
       [{_, tail}] ->
-        case Storage.get({:queue, :head, queue_name}, partition) do
-          # in updating state
+        case Storage.get({:queue, :head, queue_name}, part) do
+          # Caught mid-update — retry.
           [] -> count(queue_name)
+          [{_, 0}] -> 0
           [{_, head}] -> tail - head + 1
         end
     end
   end
 
-  ### Internal functions ###
+  @doc """
+  Remove and return all items in the queue as a list (oldest first).
+
+  **This operation drains the queue.** After the call the queue is empty.
+  """
+  @spec get_all(any) :: list
+  def get_all(queue_name) do
+    part = Partition.get_partition(queue_name)
+    queue_drain(part, queue_name)
+  end
+
+  ## Private — queue_in ##
 
   defp queue_in(partition, queue_name, value) do
     case Storage.take({:queue, :tail, queue_name}, partition) do
-      # stack is not initialized
+      # Queue does not exist — initialise then retry.
       [] ->
         case Storage.get({:queue, :updating, queue_name}, partition) do
-          # stack is not initialized
           [] ->
+            # Truly uninitialised — we own the init.
             queue_init(queue_name)
             queue_in(partition, queue_name, value)
 
-          # queue is updating
           _ ->
-            # wait for stack is ready
+            # Another process is initialising — wait and retry.
             :erlang.yield()
             queue_in(partition, queue_name, value)
         end
 
+      # Queue exists but is empty — write first element.
       [{_, 0}] ->
-        Storage.put({{:queue, :updating, queue_name}, true}, partition)
-
-        Storage.delete({:queue, :tail, queue_name}, partition)
+        lock(partition, queue_name)
         Storage.delete({:queue, :head, queue_name}, partition)
         Storage.put({{:queue, queue_name, 1}, value}, partition)
         Storage.put({{:queue, :head, queue_name}, 1}, partition)
         Storage.put({{:queue, :tail, queue_name}, 1}, partition)
+        unlock(partition, queue_name)
 
-        Storage.delete({:queue, :updating, queue_name}, partition)
-
-        Logger.debug(
-          "super_cache, queue, push value: #{inspect(value)} to queue #{inspect(queue_name)}"
-        )
-
+        Logger.debug(fn -> "super_cache, queue #{inspect(queue_name)}, in: #{inspect(value)}" end)
         true
 
+      # Queue has existing items — append.
       [{_, counter}] ->
-        next_counter = counter + 1
-        Storage.put({{:queue, :updating, queue_name}, true}, partition)
+        next = counter + 1
+        lock(partition, queue_name)
+        Storage.put({{:queue, queue_name, next}, value}, partition)
+        Storage.put({{:queue, :tail, queue_name}, next}, partition)
+        unlock(partition, queue_name)
 
-        Storage.delete({:queue, :tail, queue_name}, partition)
-        Storage.put({{:queue, queue_name, next_counter}, value}, partition)
-        Storage.put({{:queue, :tail, queue_name}, next_counter}, partition)
-
-        Storage.delete({:queue, :updating, queue_name}, partition)
-
-        Logger.debug(
-          "super_cache, queue, push value: #{inspect(value)} to queue #{inspect(queue_name)}"
-        )
-
+        Logger.debug(fn -> "super_cache, queue #{inspect(queue_name)}, in: #{inspect(value)}" end)
         true
     end
   end
 
+  ## Private — queue_out ##
+
   defp queue_out(partition, queue_name, default) do
     case Storage.take({:queue, :head, queue_name}, partition) do
-      # maybe stack is not initialized/updating process
+      # Queue does not exist.
       [] ->
         case Storage.get({:queue, :updating, queue_name}, partition) do
-          # stack is not initialized
           [] ->
             default
 
-          # queue is updating
           _ ->
-            # wait for stack is ready
             :erlang.yield()
             queue_out(partition, queue_name, default)
         end
 
-      # queue is empty
+      # Queue is empty.
       [{_, 0}] ->
         default
 
       [{_, counter}] ->
-        next_counter = counter + 1
-        Storage.put({{:queue, :updating, queue_name}, true}, partition)
+        lock(partition, queue_name)
 
         value =
           case Storage.take({:queue, queue_name, counter}, partition) do
             [] ->
-              # no more data in queue, reset queue
-              Storage.delete({:queue, :tail, queue_name}, partition)
-              Storage.delete({:queue, :head, queue_name}, partition)
-              Storage.put({{:queue, :head, queue_name}, 0}, partition)
-              Storage.put({{:queue, :tail, queue_name}, 0}, partition)
+              # Ran off the end — reset and return default.
+              reset_queue(partition, queue_name)
               default
 
-            [{_, value}] ->
-              Storage.delete({:queue, :head, queue_name}, partition)
-              Storage.put({{:queue, :head, queue_name}, next_counter}, partition)
-              value
+            [{_, v}] ->
+              next = counter + 1
+
+              case Storage.get({:queue, :tail, queue_name}, partition) do
+                [{_, tail}] when next > tail ->
+                  # Just dequeued the last item — reset to empty.
+                  reset_queue(partition, queue_name)
+
+                _ ->
+                  Storage.put({{:queue, :head, queue_name}, next}, partition)
+              end
+
+              v
           end
 
-        Storage.delete({:queue, :updating, queue_name}, partition)
-
-        Logger.debug(fn ->
-          "super_cache, queue, get value: #{inspect(value)} from queue #{inspect(queue_name)}"
-        end)
-
+        unlock(partition, queue_name)
+        Logger.debug(fn -> "super_cache, queue #{inspect(queue_name)}, out: #{inspect(value)}" end)
         value
     end
   end
 
+  ## Private — queue_peak ##
+
   defp queue_peak(partition, queue_name, default) do
     case Storage.get({:queue, :head, queue_name}, partition) do
-      # stack is not initialized
       [] ->
         case Storage.get({:queue, :updating, queue_name}, partition) do
-          # stack is not initialized
-          [] ->
-            default
-
-          # queue is updating
+          [] -> default
           _ ->
-            # wait for stack is ready
             :erlang.yield()
             queue_peak(partition, queue_name, default)
         end
 
-      # queue is empty
       [{_, 0}] ->
         default
 
       [{_, counter}] ->
         case Storage.get({:queue, queue_name, counter}, partition) do
-          [] ->
-            default
-
-          [{_, value}] ->
-            value
+          [] -> default
+          [{_, v}] -> v
         end
     end
   end
 
-  defp queue_init(queue_name) do
-    Logger.debug("super_cache, stack, init stack: #{inspect(queue_name)}")
-    partition = Partition.get_partition(queue_name)
-    Storage.put({{:queue, :updating, queue_name}, true}, partition)
-    Storage.put({{:queue, :head, queue_name}, 0}, partition)
-    Storage.put({{:queue, :tail, queue_name}, 0}, partition)
-    Storage.delete({:queue, :updating, queue_name}, partition)
-  end
+  ## Private — drain (destructive read) ##
 
-  defp to_list(partition, queue_name) do
+  defp queue_drain(partition, queue_name) do
     case Storage.take({:queue, :head, queue_name}, partition) do
-      # stack is not initialized
       [] ->
         case Storage.get({:queue, :updating, queue_name}, partition) do
-          # stack is not initialized
           [] ->
             []
 
-          # queue is updating
           _ ->
-            # wait for stack is ready
             :erlang.yield()
-            to_list(partition, queue_name)
+            queue_drain(partition, queue_name)
         end
 
-      # queue is empty
       [{_, 0}] ->
         []
 
       [{_, first}] ->
-        Storage.put({{:queue, :updating, queue_name}, true}, partition)
-
+        lock(partition, queue_name)
         [{_, last}] = Storage.take({:queue, :tail, queue_name}, partition)
 
-        value =
+        values =
           Enum.reduce(first..last, [], fn i, acc ->
             case Storage.take({:queue, queue_name, i}, partition) do
               [] -> acc
-              [{_, value}] -> [value | acc]
+              [{_, v}] -> [v | acc]
             end
           end)
+          |> Enum.reverse()
 
-        # reset queue
-        Storage.delete({:queue, :head, queue_name}, partition)
-        Storage.delete({:queue, :tail, queue_name}, partition)
-        Storage.put({{:queue, :head, queue_name}, 0}, partition)
-        Storage.put({{:queue, :tail, queue_name}, 0}, partition)
-        Storage.delete({:queue, :updating, queue_name}, partition)
+        reset_queue(partition, queue_name)
+        unlock(partition, queue_name)
 
-        Logger.debug(fn ->
-          "super_cache, queue, get all length: #{inspect(length(value))} from queue #{inspect(queue_name)}"
-        end)
-
-        Enum.reverse(value)
+        Logger.debug(fn -> "super_cache, queue #{inspect(queue_name)}, drained #{length(values)} item(s)" end)
+        values
     end
+  end
+
+  ## Private — init / lock helpers ##
+
+  defp queue_init(queue_name) do
+    Logger.debug("super_cache, queue, init: #{inspect(queue_name)}")
+    partition = Partition.get_partition(queue_name)
+
+    # insert_new acts as CAS — only the first caller proceeds.
+    if Storage.insert_new({{:queue, :updating, queue_name}, true}, partition) do
+      Storage.put({{:queue, :head, queue_name}, 0}, partition)
+      Storage.put({{:queue, :tail, queue_name}, 0}, partition)
+      Storage.delete({:queue, :updating, queue_name}, partition)
+    end
+  end
+
+  # Soft write lock — set before structural mutations, cleared after.
+  defp lock(partition, queue_name) do
+    Storage.put({{:queue, :updating, queue_name}, true}, partition)
+  end
+
+  defp unlock(partition, queue_name) do
+    Storage.delete({:queue, :updating, queue_name}, partition)
+  end
+
+  defp reset_queue(partition, queue_name) do
+    Storage.put({{:queue, :head, queue_name}, 0}, partition)
+    Storage.put({{:queue, :tail, queue_name}, 0}, partition)
   end
 end
