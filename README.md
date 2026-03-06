@@ -64,7 +64,7 @@ sequenceDiagram
   Api->>Client: Your data
 ```
 
-(If diagram doesn't show, please install mermaid support extension for VS Code)
+(If diagram doesn't show, please install mermaid support extension for IDE)
 
 Simple module flow api:
 
@@ -86,7 +86,7 @@ by adding `super_cache` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:super_cache, "~> 0.5.2"}
+    {:super_cache, "~> 0.7"}
   ]
 end
 ```
@@ -200,4 +200,4 @@ Struct.add(a)
   # =>  %MyStruct{id: 1, data: :a}
 ```
 
-Other APIs please go to document on [hexdocs.pm](https://hexdocs.pm/super_cache/readme.html)
+Other APIs please go to document on [hexdocs.pm](https://hexdocs.pm/super_cache)

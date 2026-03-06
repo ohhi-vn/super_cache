@@ -2,14 +2,17 @@ defmodule SuperCache.KeyValue do
   @moduledoc """
   Key-Value(KV) database in memory. Each KV name is store in a partition.
   Can use multiple KV cache by using different KV name.
-  This is global KV cache any process can access.
-  The KV is store in with cache.
+  This is global cache can access from any process in VM.
   Need to start SuperCache.start!/1 before using this module.
+
   Ex:
 
   ```elixir
   alias SuperCache.KeyValue
+
+  # start cache
   SuperCache.start!()
+
   KeyValue.add("my_kv", :key, "Hello")
   KeyValue.get("my_kv", :key)
     # => "Hello"
