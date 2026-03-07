@@ -1,42 +1,93 @@
+
 defmodule SuperCache.Stack do
   @moduledoc """
-  Stack module helps to easy to use stack data structure.
-  This is global stack, any process can access to stack data.
-  Can handle multiple stack with different name.
-  Need to start SuperCache.start!/1 before using this module.
+  Named LIFO stacks backed by SuperCache ETS partitions.
 
-  Ex:
+  Any number of independent stacks can coexist by using different
+  `stack_name` values.  Any process in the VM can push and pop from the
+  same stack by name.
 
-  ```elixir
-  alias SuperCache.Stack
-  SuperCache.start!()
-  Stack.push("my_stack", "Hello")
-  Stack.pop("my_stack")
-    # => "Hello"
-  ```
+  Requires `SuperCache.start!/1` to be called first.
+
+  ## Concurrency model
+
+  Stack mutations use the same soft write-lock mechanism as `SuperCache.Queue`:
+  a `{:stack, :updating, stack_name}` sentinel record is inserted before a
+  structural change and removed immediately after.  Concurrent callers spin
+  on `:erlang.yield/0` and retry until the lock is cleared.
+
+  ## Storage layout
+
+  | ETS key                              | Value   | Purpose                |
+  |--------------------------------------|---------|------------------------|
+  | `{:stack, :counter, stack_name}`     | integer | Number of items        |
+  | `{:stack, stack_name, index}`        | any     | Item at position index |
+
+  Items are indexed `1..counter` (1-based).  The top of the stack is always
+  at `counter`.
+
+  ## Example
+
+      alias SuperCache.Stack
+
+      SuperCache.start!()
+
+      Stack.push("history", :page_a)
+      Stack.push("history", :page_b)
+      Stack.push("history", :page_c)
+
+      Stack.count("history")      # => 3
+      Stack.pop("history")        # => :page_c
+      Stack.pop("history")        # => :page_b
+
+      Stack.get_all("history")    # => [:page_a]  (drains the stack)
+      Stack.count("history")      # => 0
+
+      Stack.pop("history")        # => nil
+      Stack.pop("history", :done) # => :done
+
+  ## Cluster mode
+
+  For distributed deployments use `SuperCache.Distributed.Stack`.  The API
+  is identical; mutations are routed to the primary node for the stack's
+  partition.
   """
 
-  alias SuperCache.Storage
-  alias SuperCache.Partition
-
+  alias SuperCache.{Storage, Partition}
   require Logger
 
-  ### Api ###
+  ## API ────────────────────────────────────────────────────────────────────────
 
   @doc """
-  Add value to stack has name is stack_name.
-  If stack_name is not existed, it will be created.
+  Push `value` onto `stack_name`.
+
+  Creates the stack if it does not yet exist.  Returns `true`.
+
+  ## Example
+
+      Stack.push("undo", {:insert, "hello"})
+      Stack.push("undo", {:delete, 5..10})
   """
   @spec push(any, any) :: true
   def push(stack_name, value) do
     part = Partition.get_partition(stack_name)
-
     stack_push(part, stack_name, value)
   end
 
   @doc """
-  Pop value from stack with name is stack_name.
-  If stack_name is not existed or no data, it will return default value.
+  Pop and return the top value from `stack_name`.
+
+  Returns `default` (default `nil`) when the stack is empty or does not
+  exist.
+
+  ## Example
+
+      Stack.push("s", :a)
+      Stack.push("s", :b)
+      Stack.pop("s")          # => :b
+      Stack.pop("s")          # => :a
+      Stack.pop("s")          # => nil
+      Stack.pop("s", :empty)  # => :empty
   """
   @spec pop(any, any) :: any
   def pop(stack_name, default \\ nil) do
@@ -44,77 +95,83 @@ defmodule SuperCache.Stack do
     stack_pop(part, stack_name, default)
   end
 
+  @doc """
+  Return the number of items in `stack_name`.
+
+  Returns `0` for an empty or non-existent stack.
+
+  ## Example
+
+      Stack.push("s", 1)
+      Stack.push("s", 2)
+      Stack.count("s")   # => 2
+  """
+  @spec count(any) :: non_neg_integer
   def count(stack_name) do
     part = Partition.get_partition(stack_name)
-
     case Storage.get({:stack, :counter, stack_name}, part) do
-      [] -> 0
+      []             -> 0
       [{_, counter}] -> counter
     end
   end
 
+  @doc """
+  Remove and return **all** items top-first as a list.
+
+  The stack is empty after this call.  Returns `[]` for an empty or
+  non-existent stack.
+
+  ## Example
+
+      Enum.each(1..3, &Stack.push("s", &1))
+      Stack.get_all("s")    # => [3, 2, 1]
+      Stack.count("s")      # => 0
+  """
+  @spec get_all(any) :: list
   def get_all(stack_name) do
     part = Partition.get_partition(stack_name)
     to_list(part, stack_name)
   end
 
-  ## private functions ##
+  ## Private — push ────────────────────────────────────────────────────────────
 
   defp stack_push(partition, stack_name, value) do
     case Storage.take({:stack, :counter, stack_name}, partition) do
-      # stack is not initialized
       [] ->
         case Storage.get({:stack, :updating, stack_name}, partition) do
-          # stack is not initialized
           [] ->
             stack_init(stack_name)
             stack_push(partition, stack_name, value)
-
-          # stack is updating
           _ ->
-            # wait for stack is ready
             :erlang.yield()
             stack_push(partition, stack_name, value)
         end
 
       [{_, counter}] ->
-        next_counter = counter + 1
+        next = counter + 1
         Storage.put({{:stack, :updating, stack_name}, true}, partition)
-
-        Storage.put({{:stack, :counter, stack_name}, next_counter}, partition)
-        Storage.put({{:stack, stack_name, next_counter}, value}, partition)
-
+        Storage.put({{:stack, :counter, stack_name}, next}, partition)
+        Storage.put({{:stack, stack_name, next}, value}, partition)
         Storage.delete({:stack, :updating, stack_name}, partition)
-
-        Logger.debug(fn ->
-          "super_cache, stack, push value: #{inspect(value)} to stack: #{inspect(stack_name)}"
-        end)
-
+        Logger.debug(fn -> "super_cache, stack #{inspect(stack_name)}, push: #{inspect(value)}" end)
         true
     end
   end
 
+  ## Private — pop ─────────────────────────────────────────────────────────────
+
   defp stack_pop(partition, stack_name, default) do
     case Storage.take({:stack, :counter, stack_name}, partition) do
-      # stack is not initialized
       [] ->
         case Storage.get({{:stack, :updating, stack_name}, :_}, partition) do
-          # stack is not initialized
-          [] ->
-            default
-
-          # stack is updating
-          _ ->
-            # wait for stack is ready
-            :erlang.yield()
-            stack_pop(partition, stack_name, default)
+          [] -> default
+          _  -> :erlang.yield(); stack_pop(partition, stack_name, default)
         end
 
-      [{_, 0}] ->
-        default
+      [{_, 0}] -> default
 
       [{_, counter}] ->
-        next_counter = counter - 1
+        next = counter - 1
         Storage.put({{:stack, :updating, stack_name}, true}, partition)
 
         value =
@@ -123,68 +180,53 @@ defmodule SuperCache.Stack do
               Storage.put({{:stack, :counter, stack_name}, 0}, partition)
               default
 
-            [{_, value}] ->
+            [{_, v}] ->
               Storage.delete({:stack, stack_name, counter}, partition)
-              Storage.put({{:stack, :counter, stack_name}, next_counter}, partition)
-
-              value
+              Storage.put({{:stack, :counter, stack_name}, next}, partition)
+              v
           end
 
         Storage.delete({:stack, :updating, stack_name}, partition)
-
-        Logger.debug(fn ->
-          "super_cache, stack, push value: #{inspect(value)} to stack: #{inspect(stack_name)}"
-        end)
-
+        Logger.debug(fn -> "super_cache, stack #{inspect(stack_name)}, pop: #{inspect(value)}" end)
         value
     end
   end
 
-  defp stack_init(stack_name) do
-    Logger.debug("super_cache, stack, init stack: #{inspect(stack_name)}")
-    partition = Partition.get_partition(stack_name)
-
-    Storage.put({{:stack, :counter, stack_name}, 0}, partition)
-  end
+  ## Private — to_list (destructive drain) ─────────────────────────────────────
 
   defp to_list(partition, stack_name) do
     case Storage.take({:stack, :counter, stack_name}, partition) do
-      # stack is not initialized
       [] ->
         case Storage.get({{:stack, :updating, stack_name}, :_}, partition) do
-          # stack is not initialized
-          [] ->
-            []
-
-          # stack is updating
-          _ ->
-            # wait for stack is ready
-            :erlang.yield()
-            to_list(partition, stack_name)
+          [] -> []
+          _  -> :erlang.yield(); to_list(partition, stack_name)
         end
 
-      [{_, 0}] ->
-        []
+      [{_, 0}] -> []
 
       [{_, counter}] ->
         Storage.put({{:stack, :updating, stack_name}, true}, partition)
 
-        value =
+        values =
           Enum.reduce(counter..1//-1, [], fn x, acc ->
             case Storage.take({:stack, stack_name, x}, partition) do
-              [] -> acc
-              [{_, value}] -> [value | acc]
+              []       -> acc
+              [{_, v}] -> [v | acc]
             end
           end)
 
         Storage.put({{:stack, :counter, stack_name}, 0}, partition)
         Storage.delete({:stack, :updating, stack_name}, partition)
-
-        Logger.debug(fn ->
-          "super_cache, stack, push value: #{inspect(value)} to stack: #{inspect(stack_name)}"
-        end)
-
-        value
+        Logger.debug(fn -> "super_cache, stack #{inspect(stack_name)}, drained #{length(values)} item(s)" end)
+        values
     end
+  end
+
+  ## Private — init ────────────────────────────────────────────────────────────
+
+  defp stack_init(stack_name) do
+    Logger.debug("super_cache, stack, init: #{inspect(stack_name)}")
+    partition = Partition.get_partition(stack_name)
+    Storage.put({{:stack, :counter, stack_name}, 0}, partition)
   end
 end

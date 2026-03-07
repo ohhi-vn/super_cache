@@ -60,16 +60,7 @@ defmodule SuperCache.Distributed.Queue do
   @spec count(any) :: non_neg_integer
   def count(queue_name) do
     part = Partition.get_partition(queue_name)
-
-    case Storage.get({:queue, :tail, queue_name}, part) do
-      [] -> 0
-      [{_, tail}] ->
-        case Storage.get({:queue, :head, queue_name}, part) do
-          []         -> count(queue_name)
-          [{_, 0}]   -> 0
-          [{_, head}] -> tail - head + 1
-        end
-    end
+    count_safe(part, queue_name, 50)
   end
 
   @doc "Drain all items (destructive). Routed to primary."
@@ -102,6 +93,34 @@ defmodule SuperCache.Distributed.Queue do
   def local_queue_drain(queue_name) do
     part = Partition.get_partition(queue_name)
     queue_drain(part, queue_name)
+  end
+
+  ## Private — count_safe ──────────────────────────────────────────────────────
+
+  defp count_safe(_part, _queue_name, 0), do: 0
+
+  defp count_safe(part, queue_name, retries) do
+    case Storage.get({:queue, :updating, queue_name}, part) do
+      [_] ->
+        # A mutation is in progress on the primary; yield and retry.
+        :erlang.yield()
+        count_safe(part, queue_name, retries - 1)
+
+      [] ->
+        tail = Storage.get({:queue, :tail, queue_name}, part)
+        head = Storage.get({:queue, :head, queue_name}, part)
+
+        case {head, tail} do
+          {[], []}             -> 0
+          {[{_, 0}], _}        -> 0
+          {_, [{_, 0}]}        -> 0
+          # Torn read between replication of head and tail — retry.
+          {[], _} ->
+            :erlang.yield()
+            count_safe(part, queue_name, retries - 1)
+          {[{_, h}], [{_, t}]} -> max(0, t - h + 1)
+        end
+    end
   end
 
   ## Private — queue_in ────────────────────────────────────────────────────────
@@ -143,41 +162,59 @@ defmodule SuperCache.Distributed.Queue do
   end
 
   ## Private — queue_out ───────────────────────────────────────────────────────
+  #
+  # Lock BEFORE touching head. The original took head destructively before
+  # acquiring the lock, leaving a window where head was absent in ETS with
+  # no lock key present — causing count/1 and peak/2 to spin forever.
 
   defp queue_out(partition, queue_name, default) do
-    case Storage.take({:queue, :head, queue_name}, partition) do
+    case Storage.get({:queue, :updating, queue_name}, partition) do
+      [_] ->
+        :erlang.yield()
+        queue_out(partition, queue_name, default)
+
       [] ->
-        case Storage.get({:queue, :updating, queue_name}, partition) do
-          [] -> default
-          _  -> :erlang.yield(); queue_out(partition, queue_name, default)
-        end
+        case Storage.get({:queue, :head, queue_name}, partition) do
+          [] ->
+            default
 
-      [{_, 0}] -> default
+          [{_, 0}] ->
+            default
 
-      [{_, counter}] ->
-        lock(partition, queue_name)
+          [{_, counter}] ->
+            lock(partition, queue_name)
 
-        value =
-          case Storage.take({:queue, queue_name, counter}, partition) do
-            [] ->
-              reset_queue(partition, queue_name)
-              default
-
-            [{_, v}] ->
-              next = counter + 1
-              case Storage.get({:queue, :tail, queue_name}, partition) do
-                [{_, tail}] when next > tail ->
+            value =
+              case Storage.take({:queue, queue_name, counter}, partition) do
+                [] ->
                   reset_queue(partition, queue_name)
-                _ ->
-                  Storage.put({{:queue, :head, queue_name}, next}, partition)
-                  replicate_put(queue_name, {{:queue, :head, queue_name}, next})
-              end
-              replicate_delete(queue_name, {:queue, queue_name, counter})
-              v
-          end
+                  replicate_put(queue_name, {{:queue, :head, queue_name}, 0})
+                  replicate_put(queue_name, {{:queue, :tail, queue_name}, 0})
+                  default
 
-        unlock(partition, queue_name)
-        value
+                [{_, v}] ->
+                  next = counter + 1
+
+                  case Storage.get({:queue, :tail, queue_name}, partition) do
+                    [{_, tail}] when next > tail ->
+                      reset_queue(partition, queue_name)
+                      replicate_put(queue_name, {{:queue, :head, queue_name}, 0})
+                      replicate_put(queue_name, {{:queue, :tail, queue_name}, 0})
+
+                    _ ->
+                      Storage.delete({:queue, :head, queue_name}, partition)
+                      Storage.put({{:queue, :head, queue_name}, next}, partition)
+                      replicate_put(queue_name, {{:queue, :head, queue_name}, next})
+                  end
+
+                  replicate_delete(queue_name, {:queue, queue_name, counter})
+                  v
+              end
+
+            unlock(partition, queue_name)
+            Logger.debug(fn -> "super_cache, dist.queue #{inspect(queue_name)}, out: #{inspect(value)}" end)
+            value
+        end
     end
   end
 
@@ -190,7 +227,7 @@ defmodule SuperCache.Distributed.Queue do
           [] -> default
           _  -> :erlang.yield(); queue_peak(partition, queue_name, default)
         end
-      [{_, 0}] -> default
+      [{_, 0}]       -> default
       [{_, counter}] ->
         case Storage.get({:queue, queue_name, counter}, partition) do
           []        -> default
@@ -200,41 +237,46 @@ defmodule SuperCache.Distributed.Queue do
   end
 
   ## Private — queue_drain ─────────────────────────────────────────────────────
+  #
+  # Same lock-first discipline as queue_out: check lock, read head non-
+  # destructively, then lock before any mutation.
 
   defp queue_drain(partition, queue_name) do
-    case Storage.take({:queue, :head, queue_name}, partition) do
+    case Storage.get({:queue, :updating, queue_name}, partition) do
+      [_] ->
+        :erlang.yield()
+        queue_drain(partition, queue_name)
+
       [] ->
-        case Storage.get({:queue, :updating, queue_name}, partition) do
-          [] -> []
-          _  -> :erlang.yield(); queue_drain(partition, queue_name)
-        end
+        case Storage.get({:queue, :head, queue_name}, partition) do
+          []       -> []
+          [{_, 0}] -> []
 
-      [{_, 0}] -> []
+          [{_, first}] ->
+            lock(partition, queue_name)
+            [{_, last}] = Storage.get({:queue, :tail, queue_name}, partition)
 
-      [{_, first}] ->
-        lock(partition, queue_name)
-        [{_, last}] = Storage.take({:queue, :tail, queue_name}, partition)
+            values =
+              Enum.reduce(first..last, [], fn i, acc ->
+                case Storage.take({:queue, queue_name, i}, partition) do
+                  []       -> acc
+                  [{_, v}] -> [v | acc]
+                end
+              end)
+              |> Enum.reverse()
 
-        values =
-          Enum.reduce(first..last, [], fn i, acc ->
-            case Storage.take({:queue, queue_name, i}, partition) do
-              []       -> acc
-              [{_, v}] -> [v | acc]
+            reset_queue(partition, queue_name)
+            unlock(partition, queue_name)
+
+            replicate_put(queue_name, {{:queue, :head, queue_name}, 0})
+            replicate_put(queue_name, {{:queue, :tail, queue_name}, 0})
+            for i <- first..last do
+              replicate_delete(queue_name, {:queue, queue_name, i})
             end
-          end)
-          |> Enum.reverse()
 
-        reset_queue(partition, queue_name)
-        unlock(partition, queue_name)
-
-        # Replicate the reset state to all replicas.
-        replicate_put(queue_name, {{:queue, :head, queue_name}, 0})
-        replicate_put(queue_name, {{:queue, :tail, queue_name}, 0})
-        for i <- first..last do
-          replicate_delete(queue_name, {:queue, queue_name, i})
+            Logger.debug(fn -> "super_cache, dist.queue #{inspect(queue_name)}, drained #{length(values)} item(s)" end)
+            values
         end
-
-        values
     end
   end
 
@@ -261,8 +303,6 @@ defmodule SuperCache.Distributed.Queue do
 
   ## Private — replication helpers ─────────────────────────────────────────────
 
-  # Queue data lives in a single partition keyed by queue_name.
-  # We call the Replicator directly with the partition index.
   defp partition_idx(queue_name) do
     Partition.get_partition_order(queue_name)
   end
