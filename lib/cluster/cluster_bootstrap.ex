@@ -67,6 +67,15 @@ defmodule SuperCache.Cluster.Bootstrap do
     :ok
   end
 
+  @spec running?() :: true | false
+  def running?() do
+    if Config.get_config(:cluster) == :distributed do
+        Config.get_config(:started)
+        else
+          false
+    end
+  end
+
   ## Private ##
 
   defp validate!(opts) do

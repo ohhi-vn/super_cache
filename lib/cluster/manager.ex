@@ -26,26 +26,44 @@ defmodule SuperCache.Cluster.Manager do
 
   @impl true
   def init(_opts) do
-    nodes = [node() | Node.list()]
+    {:ok, %{}, {:continue, :init}}
+  end
+
+  @impl true
+  def handle_continue(:init, state) do
+    nodes =
+      [node() | Node.list()]
+      |> Enum.filter(fn node ->
+        node_running?(node)
+      end)
+
     :persistent_term.put(@pt_key, build_partition_map(nodes))
     Logger.info("super_cache, cluster_manager, nodes: #{inspect(nodes)}")
-    {:ok, %{nodes: nodes}}
+    {:noreply, Map.put(:nodes, nodes)}
   end
 
   @impl true
   def handle_cast({:node_up, new_node}, %{nodes: nodes} = state) do
-    updated = Enum.uniq([new_node | nodes])
-    :persistent_term.put(@pt_key, build_partition_map(updated))
-    spawn(fn -> sync_to_node(new_node) end)
-    Logger.info("super_cache, cluster_manager, node up: #{inspect(new_node)}")
-    {:noreply, %{state | nodes: updated}}
+    if node_running?(new_node) do
+      updated = Enum.uniq([new_node | nodes])
+      :persistent_term.put(@pt_key, build_partition_map(updated))
+      spawn(fn -> sync_to_node(new_node) end)
+      Logger.info("super_cache, cluster_manager, node up: #{inspect(new_node)}")
+      {:noreply, %{state | nodes: updated}}
+    else
+      {:noreply, state}
+    end
   end
 
   def handle_cast({:node_down, dead_node}, %{nodes: nodes} = state) do
-    updated = List.delete(nodes, dead_node)
-    :persistent_term.put(@pt_key, build_partition_map(updated))
-    Logger.warning("super_cache, cluster_manager, node down: #{inspect(dead_node)}")
-    {:noreply, %{state | nodes: updated}}
+    if Enum.member?(nodes, dead_node) do
+      updated = List.delete(nodes, dead_node)
+      :persistent_term.put(@pt_key, build_partition_map(updated))
+      Logger.warning("super_cache, cluster_manager, node down: #{inspect(dead_node)}")
+      {:noreply, %{state | nodes: updated}}
+    else
+      {:noreply, state}
+    end
   end
 
   def handle_cast(:full_sync, %{nodes: nodes} = state) do
@@ -93,6 +111,17 @@ defmodule SuperCache.Cluster.Manager do
       if me == primary or me in replicas do
         SuperCache.Cluster.Replicator.push_partition(idx, target)
       end
+    end
+  end
+
+
+  defp node_running?(target_node) do
+    try do
+      :erpc.call(target_node, SuperCache.Cluster.Bootstrap, :running?, [], 5_000)
+    catch
+      kind, reason ->
+        Logger.warning("super_cache, replicator, failed → #{inspect(target_node)}: #{inspect({kind, reason})}")
+        false
     end
   end
 end

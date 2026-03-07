@@ -65,8 +65,8 @@ SuperCache.Cluster.Bootstrap.start!(
 # Verify partition map is built
 SuperCache.Cluster.Manager.live_nodes()
 
-alias SuperCache.Distributed, as: Cache
-Cache.put!({:hello, "world"})
+alias SuperCache.Distributed, as: DCache
+DCache.put!({:hello, "world"})
 
 # Check record counts per partition on each node
 SuperCache.stats()
@@ -83,8 +83,8 @@ SuperCache.Cluster.Bootstrap.start!(
   cluster: :distributed, replication_factor: 2
 )
 
-alias SuperCache.Distributed, as: Cache
-Cache.get!({:hello, nil})
+alias SuperCache.Distributed, as: DCache
+DCache.get!({:hello, nil})
 #=> [{:hello, "world"}]           ← replicated from node1
 
 ```
