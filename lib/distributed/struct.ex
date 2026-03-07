@@ -7,20 +7,14 @@ defmodule SuperCache.Distributed.Struct do
   default to the local node but can be forwarded to the primary or resolved
   via quorum when stronger consistency is needed.
 
-  The API is identical to `SuperCache.Struct` — swap the alias to migrate:
+  Write replication mode is controlled by the cluster-wide `:replication_mode`
+  setting (see `SuperCache.Cluster.Bootstrap`):
 
-      # Single-node
-      alias SuperCache.Struct, as: S
-
-      # Cluster-aware
-      alias SuperCache.Distributed.Struct, as: S
-
-  ## Partition strategy
-
-  Every operation hashes `{:struct_storage, StructName}` to find the
-  partition.  This namespace key is consistent across puts, deletes, and
-  reads, so all operations for a struct type always hit the same ETS table
-  regardless of which node handles the request.
+  | Mode      | Guarantee              | Extra latency    |
+  |-----------|------------------------|------------------|
+  | `:async`  | Eventual (default)     | None             |
+  | `:sync`   | At-least-once delivery | +1 RTT per write |
+  | `:strong` | Three-phase commit     | +3 RTTs per write|
 
   ## Read modes
 
@@ -30,60 +24,28 @@ defmodule SuperCache.Distributed.Struct do
   | `:primary` | Strong (per key)        | +1 RTT if non-primary |
   | `:quorum`  | Majority vote           | +1 RTT (parallel)     |
 
-  Use `:primary` or `:quorum` when a replica may be stale and you need to
-  read your own writes from any node.
-
   ## Example
 
       alias SuperCache.Distributed.Struct, as: DS
 
-      SuperCache.Cluster.Bootstrap.start!(
-        key_pos: 0, partition_pos: 0,
-        cluster: :distributed, replication_factor: 2
-      )
-
-      defmodule Order do
-        defstruct [:id, :customer, :total, :status]
-      end
-
       DS.init(%Order{}, :id)
-
       DS.add(%Order{id: "o-1", customer: "Alice", total: 59.99, status: :pending})
-      DS.add(%Order{id: "o-2", customer: "Bob",   total: 12.00, status: :shipped})
 
-      # Eventual read from local replica (fastest)
       DS.get(%Order{id: "o-1"})
-
-      # Strong read — always hits the primary
       DS.get(%Order{id: "o-1"}, read_mode: :primary)
-
-      # Quorum read — majority of replicas must agree
       DS.get(%Order{id: "o-1"}, read_mode: :quorum)
 
       {:ok, all} = DS.get_all(%Order{})
-      length(all)   # => 2
-
       DS.remove(%Order{id: "o-1"})
       DS.remove_all(%Order{})
   """
 
   alias SuperCache.{Storage, Partition}
-  alias SuperCache.Cluster.{Manager, Replicator}
+  alias SuperCache.Cluster.{Manager, Replicator, ThreePhaseCommit}
   require Logger
 
-  ## Public API ─────────────────────────────────────────────────────────────────
+  ## ── Public API ──────────────────────────────────────────────────────────────
 
-  @doc """
-  Register `key` as the lookup field for the struct type of `struct`.
-
-  Routed to the primary node.  Must be called before any other operation on
-  this struct type.
-
-  ## Example
-
-      DS.init(%Order{}, :id)    # => true
-      DS.init(%Order{}, :id)    # => {:error, "struct already initialised"}
-  """
   @spec init(map, atom) :: true | {:error, any}
   def init(%{__struct__: _} = struct, key \\ :id) when is_atom(key) do
     with true <- Map.has_key?(struct, key),
@@ -95,16 +57,6 @@ defmodule SuperCache.Distributed.Struct do
     end
   end
 
-  @doc """
-  Store `struct`.  Routed to the primary node.
-
-  Overwrites any existing struct with the same key.
-
-  ## Example
-
-      DS.add(%Order{id: "o-1", customer: "Alice", total: 59.99, status: :pending})
-      # => {:ok, %Order{...}}
-  """
   @spec add(map) :: {:ok, map} | {:error, any}
   def add(%{__struct__: _} = struct) do
     with {:ok, _key} <- get_key_field(struct) do
@@ -112,76 +64,20 @@ defmodule SuperCache.Distributed.Struct do
     end
   end
 
-  @doc """
-  Retrieve a struct by its key field.
-
-  Defaults to reading from the **local node** (`:local` mode). Pass
-  `read_mode: :primary` to always hit the partition's primary, or
-  `read_mode: :quorum` to require a majority of replicas to agree.
-
-  Returns `{:ok, struct}` or `{:error, :not_found}`.
-
-  ## Options
-
-  - `:read_mode` — `:local` (default), `:primary`, or `:quorum`.
-
-  ## Example
-
-      DS.get(%Order{id: "o-1"})
-      # => {:ok, %Order{...}}
-
-      DS.get(%Order{id: "o-1"}, read_mode: :primary)
-      # => {:ok, %Order{...}}   (forwarded to primary if needed)
-
-      DS.get(%Order{id: "nope"})
-      # => {:error, :not_found}
-  """
   @spec get(map, keyword) :: {:ok, map} | {:error, :not_found | any}
   def get(%{__struct__: _} = struct, opts \\ []) do
-    read_mode = Keyword.get(opts, :read_mode, :local)
-
     with {:ok, _key} <- get_key_field(struct) do
-      route_read(struct, :local_get, [struct], read_mode)
+      route_read(struct, :local_get, [struct], Keyword.get(opts, :read_mode, :local))
     end
   end
 
-  @doc """
-  Return all structs of this type.
-
-  Defaults to reading from the **local node** (`:local` mode). Supports the
-  same `:read_mode` options as `get/2`.
-
-  Returns `{:ok, [struct]}`.
-
-  ## Options
-
-  - `:read_mode` — `:local` (default), `:primary`, or `:quorum`.
-
-  ## Example
-
-      {:ok, orders} = DS.get_all(%Order{})
-      {:ok, orders} = DS.get_all(%Order{}, read_mode: :primary)
-      Enum.map(orders, & &1.status)
-  """
   @spec get_all(map, keyword) :: {:ok, list} | {:error, any}
   def get_all(%{__struct__: _} = struct, opts \\ []) do
-    read_mode = Keyword.get(opts, :read_mode, :local)
-
     with {:ok, _key} <- get_key_field(struct) do
-      route_read(struct, :local_get_all, [struct], read_mode)
+      route_read(struct, :local_get_all, [struct], Keyword.get(opts, :read_mode, :local))
     end
   end
 
-  @doc """
-  Remove the struct matching the key field of `struct`.  Routed to the primary.
-
-  Returns `{:ok, removed_struct}` or `{:error, :not_found}`.
-
-  ## Example
-
-      DS.remove(%Order{id: "o-1"})   # => {:ok, %Order{...}}
-      DS.remove(%Order{id: "o-1"})   # => {:error, :not_found}
-  """
   @spec remove(map) :: {:ok, map} | {:error, any}
   def remove(%{__struct__: _} = struct) do
     with {:ok, _key} <- get_key_field(struct) do
@@ -199,17 +95,6 @@ defmodule SuperCache.Distributed.Struct do
     end
   end
 
-  @doc """
-  Remove all structs of this type.  Routed to the primary.
-
-  The key field registration is preserved; you can call `add/1` again
-  without calling `init/2`.
-
-  ## Example
-
-      DS.remove_all(%Order{})    # => {:ok, :removed}
-      DS.get_all(%Order{})       # => {:ok, []}
-  """
   @spec remove_all(map) :: {:ok, :removed} | {:error, any}
   def remove_all(%{__struct__: struct_name} = struct) do
     with {:ok, _key} <- get_key_field(struct) do
@@ -223,16 +108,14 @@ defmodule SuperCache.Distributed.Struct do
     end
   end
 
-  ## Remote entry points (called via :erpc — do NOT call directly) ──────────────
+  ## ── Remote entry points — writes (via :erpc, do NOT call directly) ──────────
 
   @doc false
   def local_init(%{__struct__: struct_name} = struct, key) do
     ns = namespace(struct)
     partition = Partition.get_partition(ns)
     idx = Partition.get_partition_order(ns)
-    record = {{:struct_storage, :key, struct_name}, key}
-    Storage.put(record, partition)
-    Replicator.replicate(idx, :put, record)
+    apply_write(idx, partition, [{:put, {{:struct_storage, :key, struct_name}, key}}])
     true
   end
 
@@ -249,10 +132,7 @@ defmodule SuperCache.Distributed.Struct do
         "super_cache, dist.struct, add #{inspect(struct_name)} key=#{inspect(key_data)}"
       end)
 
-      Storage.delete(ets_key, partition)
-      Storage.put({ets_key, struct}, partition)
-      Replicator.replicate(idx, :delete, ets_key)
-      Replicator.replicate(idx, :put, {ets_key, struct})
+      apply_write(idx, partition, [{:delete, ets_key}, {:put, {ets_key, struct}}])
       {:ok, struct}
     end
   end
@@ -264,8 +144,7 @@ defmodule SuperCache.Distributed.Struct do
       partition = Partition.get_partition(ns)
       idx = Partition.get_partition_order(ns)
       ets_key = {{:struct_storage, :struct, struct_name}, Map.get(struct, key)}
-      Storage.delete(ets_key, partition)
-      Replicator.replicate(idx, :delete, ets_key)
+      apply_write(idx, partition, [{:delete, ets_key}])
       :ok
     end
   end
@@ -276,12 +155,12 @@ defmodule SuperCache.Distributed.Struct do
     partition = Partition.get_partition(ns)
     idx = Partition.get_partition_order(ns)
     pattern = {{{:struct_storage, :struct, struct_name}, :_}, :_}
-    Storage.delete_match(pattern, partition)
-    Replicator.replicate(idx, :delete_match, pattern)
+    apply_write(idx, partition, [{:delete_match, pattern}])
     {:ok, :removed}
   end
 
-  # Read entry points called via :erpc for :primary / :quorum routing.
+  ## ── Remote entry points — reads (via :erpc, do NOT call directly) ───────────
+
   @doc false
   def local_get(%{__struct__: struct_name} = struct) do
     with {:ok, key} <- get_key_field(struct) do
@@ -313,9 +192,19 @@ defmodule SuperCache.Distributed.Struct do
     end
   end
 
-  ## Private ────────────────────────────────────────────────────────────────────
+  @doc false
+  def local_get_key_field(struct_name) do
+    ns = {:struct_storage, struct_name}
+    partition = Partition.get_partition(ns)
 
-  # Consistent namespace key for ALL partition hashing in this module.
+    case Storage.get({:struct_storage, :key, struct_name}, partition) do
+      [{_, key}] -> {:ok, key}
+      [] -> {:error, :key_not_found}
+    end
+  end
+
+  ## ── Private ──────────────────────────────────────────────────────────────────
+
   defp namespace(%{__struct__: struct_name}), do: {:struct_storage, struct_name}
 
   defp get_key_field(%{__struct__: struct_name} = struct) do
@@ -327,8 +216,7 @@ defmodule SuperCache.Distributed.Struct do
         {:ok, key}
 
       [] ->
-        # Local ETS missed — this node may not hold the partition at all.
-        # Fall back to the primary, which is guaranteed to have it.
+        # Not found locally — node may not hold this partition. Fall back to primary.
         fetch_key_field_from_primary(struct, struct_name)
     end
   end
@@ -338,34 +226,18 @@ defmodule SuperCache.Distributed.Struct do
     {primary, _replicas} = Manager.get_replicas(idx)
 
     if primary == node() do
-      # We *are* the primary yet still got a miss — the key was never init'd.
+      # We are the primary yet got a miss — struct was never init'd.
       {:error, :key_not_found}
     else
       Logger.debug(fn ->
         "super_cache, dist.struct, get_key_field fallback → #{inspect(primary)}"
       end)
 
-      case :erpc.call(primary, __MODULE__, :local_get_key_field, [struct_name], 5_000) do
-        {:ok, _key} = ok -> ok
-        other -> other
-      end
+      :erpc.call(primary, __MODULE__, :local_get_key_field, [struct_name], 5_000)
     end
   end
 
-  # Called via :erpc from fetch_key_field_from_primary/2 on remote nodes.
-  @doc false
-  def local_get_key_field(struct_name) do
-    # Build a minimal struct just to resolve the namespace / partition.
-    ns = {:struct_storage, struct_name}
-    partition = Partition.get_partition(ns)
-
-    case Storage.get({:struct_storage, :key, struct_name}, partition) do
-      [{_, key}] -> {:ok, key}
-      [] -> {:error, :key_not_found}
-    end
-  end
-
-  # ── Write routing ──────────────────────────────────────────────────────────
+  # ── Write routing ─────────────────────────────────────────────────────────────
 
   defp route_write(struct, fun, args) do
     idx = Partition.get_partition_order(namespace(struct))
@@ -374,22 +246,55 @@ defmodule SuperCache.Distributed.Struct do
     if primary == node() do
       apply(__MODULE__, fun, args)
     else
-      Logger.debug(fn ->
-        "super_cache, dist.struct, fwd #{fun} → #{inspect(primary)}"
-      end)
-
+      Logger.debug(fn -> "super_cache, dist.struct, fwd #{fun} → #{inspect(primary)}" end)
       :erpc.call(primary, __MODULE__, fun, args, 5_000)
     end
   end
 
-  # ── Read routing ───────────────────────────────────────────────────────────
+  # In :strong mode ThreePhaseCommit.commit/2 handles both local Storage apply
+  # and replica propagation atomically (primary applies last after replicas ACK).
+  # In other modes Storage is written locally first then replicated async.
+  defp apply_write(idx, partition, ops) do
+    case Manager.replication_mode() do
+      :strong ->
+        case ThreePhaseCommit.commit(idx, ops) do
+          :ok ->
+            :ok
 
-  # :local — read directly from this node's ETS (original behaviour).
-  defp route_read(struct, fun, args, :local) do
+          {:error, reason} ->
+            Logger.error("super_cache, dist.struct, 3pc failed: #{inspect(reason)}")
+            {:error, reason}
+        end
+
+      _ ->
+        Enum.each(ops, fn
+          {:put, record} ->
+            Storage.put(record, partition)
+            Replicator.replicate(idx, :put, record)
+
+          {:delete, key} ->
+            Storage.delete(key, partition)
+            Replicator.replicate(idx, :delete, key)
+
+          {:delete_match, pattern} ->
+            Storage.delete_match(pattern, partition)
+            Replicator.replicate(idx, :delete_match, pattern)
+
+          {:delete_all, _} ->
+            Storage.delete_all(partition)
+            Replicator.replicate(idx, :delete_all, nil)
+        end)
+
+        :ok
+    end
+  end
+
+  # ── Read routing ──────────────────────────────────────────────────────────────
+
+  defp route_read(_struct, fun, args, :local) do
     apply(__MODULE__, fun, args)
   end
 
-  # :primary — forward to the primary if this node is not the primary.
   defp route_read(struct, fun, args, :primary) do
     idx = Partition.get_partition_order(namespace(struct))
     {primary, _replicas} = Manager.get_replicas(idx)
@@ -405,15 +310,12 @@ defmodule SuperCache.Distributed.Struct do
     end
   end
 
-  # :quorum — ask every replica in parallel; return the majority result.
-  # Falls back to the primary's answer on a tie.
   defp route_read(struct, fun, args, :quorum) do
     idx = Partition.get_partition_order(namespace(struct))
     {primary, replicas} = Manager.get_replicas(idx)
-    all_nodes = [primary | replicas]
 
     results =
-      all_nodes
+      [primary | replicas]
       |> Task.async_stream(
         fn
           n when n == node() -> apply(__MODULE__, fun, args)
@@ -424,33 +326,19 @@ defmodule SuperCache.Distributed.Struct do
       )
       |> Enum.flat_map(fn
         {:ok, result} -> [result]
-        # timed-out or crashed node → skip
         _ -> []
       end)
 
-    quorum_result(results, fn ->
-      # Tie-break: ask the primary directly.
-      if primary == node() do
-        apply(__MODULE__, fun, args)
-      else
-        :erpc.call(primary, __MODULE__, fun, args, 5_000)
-      end
-    end)
-  end
-
-  # Choose the result that appears in the strict majority of responses.
-  # Calls `tiebreak_fn.()` when no majority exists.
-  defp quorum_result(results, tiebreak_fn) do
     majority = div(length(results), 2) + 1
 
-    winner =
-      results
-      |> Enum.frequencies()
-      |> Enum.find(fn {_result, count} -> count >= majority end)
+    case Enum.find(Enum.frequencies(results), fn {_, c} -> c >= majority end) do
+      {result, _} ->
+        result
 
-    case winner do
-      {result, _count} -> result
-      nil -> tiebreak_fn.()
+      nil ->
+        if primary == node(),
+          do: apply(__MODULE__, fun, args),
+          else: :erpc.call(primary, __MODULE__, fun, args, 5_000)
     end
   end
 end

@@ -1,12 +1,17 @@
 defmodule SuperCache.Distributed.KeyValueTest do
   use ExUnit.Case, async: false
-
   alias SuperCache.Distributed.KeyValue
 
   setup_all do
+    if SuperCache.started?(), do: SuperCache.stop()
+    Process.sleep(50)
+
     SuperCache.Cluster.Bootstrap.start!(
-      key_pos: 0, partition_pos: 0,
-      cluster: :distributed, replication_factor: 2,
+      key_pos: 0,
+      partition_pos: 0,
+      cluster: :distributed,
+      replication_factor: 2,
+      replication_mode: :async,
       num_partition: 3
     )
 
@@ -18,7 +23,7 @@ defmodule SuperCache.Distributed.KeyValueTest do
     :ok
   end
 
-  ## add / get ##
+  ## add / get ──────────────────────────────────────────────────────────────────
 
   test "add and get a value" do
     KeyValue.add("kv", :name, "Alice")
@@ -33,7 +38,6 @@ defmodule SuperCache.Distributed.KeyValueTest do
   test "add overwrites existing value" do
     KeyValue.add("kv", :counter, 1)
     KeyValue.add("kv", :counter, 2)
-    dbg(SuperCache.stats())
     assert 2 == KeyValue.get("kv", :counter)
   end
 
@@ -49,7 +53,58 @@ defmodule SuperCache.Distributed.KeyValueTest do
     assert %{data: [1, 2, 3]} == KeyValue.get("kv", {:compound, 1})
   end
 
-  ## remove ##
+  ## read_mode: :primary ────────────────────────────────────────────────────────
+
+  test "get with read_mode :primary returns correct value" do
+    KeyValue.add("kv_pm", :a, 42)
+    assert 42 == KeyValue.get("kv_pm", :a, nil, read_mode: :primary)
+    assert :def == KeyValue.get("kv_pm", :missing, :def, read_mode: :primary)
+  end
+
+  test "keys with read_mode :primary" do
+    KeyValue.add("kv_pm", :x, 1)
+    KeyValue.add("kv_pm", :y, 2)
+    assert Enum.sort([:x, :y]) == Enum.sort(KeyValue.keys("kv_pm", read_mode: :primary))
+  end
+
+  test "values with read_mode :primary" do
+    KeyValue.add("kv_pm", :p, 10)
+    KeyValue.add("kv_pm", :q, 20)
+    assert Enum.sort([10, 20]) == Enum.sort(KeyValue.values("kv_pm", read_mode: :primary))
+  end
+
+  test "count with read_mode :primary" do
+    KeyValue.add("kv_pm", :a, 1)
+    KeyValue.add("kv_pm", :b, 2)
+    assert 2 == KeyValue.count("kv_pm", read_mode: :primary)
+  end
+
+  test "to_list with read_mode :primary" do
+    KeyValue.add("kv_pm", :m, 7)
+    KeyValue.add("kv_pm", :n, 8)
+    assert Enum.sort(m: 7, n: 8) == Enum.sort(KeyValue.to_list("kv_pm", read_mode: :primary))
+  end
+
+  ## read_mode: :quorum ─────────────────────────────────────────────────────────
+
+  test "get with read_mode :quorum returns correct value" do
+    KeyValue.add("kv_q", :foo, :bar)
+    assert :bar == KeyValue.get("kv_q", :foo, nil, read_mode: :quorum)
+  end
+
+  test "count with read_mode :quorum" do
+    KeyValue.add("kv_q", :a, 1)
+    KeyValue.add("kv_q", :b, 2)
+    assert 2 == KeyValue.count("kv_q", read_mode: :quorum)
+  end
+
+  test "keys with read_mode :quorum" do
+    KeyValue.add("kv_q", :x, 1)
+    KeyValue.add("kv_q", :y, 2)
+    assert Enum.sort([:x, :y]) == Enum.sort(KeyValue.keys("kv_q", read_mode: :quorum))
+  end
+
+  ## remove ─────────────────────────────────────────────────────────────────────
 
   test "remove deletes a key" do
     KeyValue.add("kv", :temp, "bye")
@@ -61,7 +116,7 @@ defmodule SuperCache.Distributed.KeyValueTest do
     assert :ok == KeyValue.remove("kv", :ghost)
   end
 
-  ## remove_all ##
+  ## remove_all ─────────────────────────────────────────────────────────────────
 
   test "remove_all clears the namespace" do
     KeyValue.add("kv", :a, 1)
@@ -79,7 +134,7 @@ defmodule SuperCache.Distributed.KeyValueTest do
     assert nil == KeyValue.get("kv_drop", :x)
   end
 
-  ## keys / values / count ##
+  ## keys / values / count / to_list ────────────────────────────────────────────
 
   test "keys returns all keys in namespace" do
     KeyValue.add("meta", :a, 1)
@@ -115,20 +170,50 @@ defmodule SuperCache.Distributed.KeyValueTest do
     assert 1 == KeyValue.count("cnt2")
   end
 
-  ## to_list ##
-
   test "to_list returns key-value pairs" do
     KeyValue.add("list", :p, 7)
     KeyValue.add("list", :q, 8)
-    result = KeyValue.to_list("list") |> Enum.sort()
-    assert [{:p, 7}, {:q, 8}] == result
+    assert Enum.sort(p: 7, q: 8) == Enum.sort(KeyValue.to_list("list"))
   end
 
   test "to_list returns empty list when namespace is empty" do
     assert [] == KeyValue.to_list("empty_list_kv")
   end
 
-  ## complex ##
+  ## replication_mode: :strong (3PC) ────────────────────────────────────────────
+
+  test "add and get survive under :strong replication_mode" do
+    # Restart with 3PC enabled.
+    SuperCache.stop()
+    Process.sleep(50)
+
+    SuperCache.Cluster.Bootstrap.start!(
+      key_pos: 0,
+      partition_pos: 0,
+      cluster: :distributed,
+      replication_factor: 2,
+      replication_mode: :strong,
+      num_partition: 3
+    )
+
+    KeyValue.add("strong_kv", :key, "value")
+    assert "value" == KeyValue.get("strong_kv", :key, nil, read_mode: :primary)
+
+    # Restore async mode for the remaining tests.
+    SuperCache.stop()
+    Process.sleep(50)
+
+    SuperCache.Cluster.Bootstrap.start!(
+      key_pos: 0,
+      partition_pos: 0,
+      cluster: :distributed,
+      replication_factor: 2,
+      replication_mode: :async,
+      num_partition: 3
+    )
+  end
+
+  ## complex ────────────────────────────────────────────────────────────────────
 
   test "complex operations across multiple namespaces" do
     for i <- 1..5 do

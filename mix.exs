@@ -4,7 +4,7 @@ defmodule SuperCache.MixProject do
   def project do
     [
       app: :super_cache,
-      version: "0.10.0",
+      version: "0.10.1",
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -107,19 +107,19 @@ defmodule SuperCache.MixProject do
   end
 
   defp aliases() do
-  [
-    tidewave:
-      "run --no-halt -e 'Agent.start(fn -> Bandit.start_link(plug: Tidewave, port: 4000) end)'",
+    [
+      tidewave:
+        "run --no-halt -e 'Agent.start(fn -> Bandit.start_link(plug: Tidewave, port: 4000) end)'",
 
-    # Normal unit tests — no distribution required.
-    test: ["test --exclude cluster"],
+      # Normal unit tests — no distribution required.
+      test: ["test --exclude cluster"],
 
-    # Cluster integration tests — spawns peer nodes via :peer.
-    # VM flags (--name, --cookie) must be passed via --erl to the runtime,
-    # not directly to mix test which does not understand them.
-    "test.cluster": [
-      "cmd elixir --name primary@127.0.0.1 --cookie test_secret -S mix test --only cluster"
+      # Cluster integration tests — spawns peer nodes via :peer.
+      # VM flags (--name, --cookie) must be passed via --erl to the runtime,
+      # not directly to mix test which does not understand them.
+      "test.cluster": [
+        "cmd elixir --name primary@127.0.0.1 --cookie test_secret -S mix test --only cluster"
+      ]
     ]
-  ]
   end
 end

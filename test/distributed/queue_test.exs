@@ -1,21 +1,29 @@
 defmodule SuperCache.Distributed.QueueTest do
   use ExUnit.Case, async: false
-
   alias SuperCache.Distributed.Queue
 
   setup_all do
     if SuperCache.started?(), do: SuperCache.stop()
     Process.sleep(50)
-    SuperCache.start!()
+
+    SuperCache.Cluster.Bootstrap.start!(
+      key_pos: 0,
+      partition_pos: 0,
+      cluster: :distributed,
+      replication_factor: 2,
+      replication_mode: :async,
+      num_partition: 3
+    )
+
     :ok
   end
 
   setup do
-    SuperCache.delete_all()
+    SuperCache.Distributed.delete_all()
     :ok
   end
 
-  ## add / out ##
+  ## add / out ──────────────────────────────────────────────────────────────────
 
   test "add and out single item" do
     Queue.add("q", "hello")
@@ -47,7 +55,7 @@ defmodule SuperCache.Distributed.QueueTest do
     assert nil == Queue.out("q")
   end
 
-  ## multiple queues ##
+  ## multiple queues ─────────────────────────────────────────────────────────────
 
   test "multiple queues are independent" do
     Enum.each(1..5, fn x ->
@@ -63,7 +71,7 @@ defmodule SuperCache.Distributed.QueueTest do
     assert result
   end
 
-  ## peak ##
+  ## peak ───────────────────────────────────────────────────────────────────────
 
   test "peak returns front without removing" do
     Queue.add("q", :first)
@@ -78,7 +86,19 @@ defmodule SuperCache.Distributed.QueueTest do
     assert :none == Queue.peak("q", :none)
   end
 
-  ## count ##
+  test "peak with read_mode :primary" do
+    Queue.add("qp", :a)
+    Queue.add("qp", :b)
+    assert :a == Queue.peak("qp", nil, read_mode: :primary)
+  end
+
+  test "peak with read_mode :quorum" do
+    Queue.add("qq", 1)
+    Queue.add("qq", 2)
+    assert 1 == Queue.peak("qq", nil, read_mode: :quorum)
+  end
+
+  ## count ──────────────────────────────────────────────────────────────────────
 
   test "count reflects queue size" do
     Enum.each(1..10, &Queue.add("q", &1))
@@ -108,7 +128,17 @@ defmodule SuperCache.Distributed.QueueTest do
     assert 8 == Queue.count("q")
   end
 
-  ## get_all (drain) ##
+  test "count with read_mode :primary" do
+    Enum.each(1..3, &Queue.add("qcnt", &1))
+    assert 3 == Queue.count("qcnt", read_mode: :primary)
+  end
+
+  test "count with read_mode :quorum" do
+    Enum.each(1..3, &Queue.add("qcntq", &1))
+    assert 3 == Queue.count("qcntq", read_mode: :quorum)
+  end
+
+  ## get_all (drain) ─────────────────────────────────────────────────────────────
 
   test "get_all returns all items and empties the queue" do
     list = Enum.to_list(1..10)
@@ -124,13 +154,45 @@ defmodule SuperCache.Distributed.QueueTest do
   test "queue is usable after get_all" do
     Enum.each(1..5, &Queue.add("q", &1))
     Queue.get_all("q")
-
     Enum.each(1..3, &Queue.add("q", &1))
     assert 3 == Queue.count("q")
     assert 1 == Queue.out("q")
   end
 
-  ## complex ##
+  ## replication_mode: :strong (3PC) ────────────────────────────────────────────
+
+  test "queue add/out survive under :strong replication_mode" do
+    SuperCache.stop()
+    Process.sleep(50)
+
+    SuperCache.Cluster.Bootstrap.start!(
+      key_pos: 0,
+      partition_pos: 0,
+      cluster: :distributed,
+      replication_factor: 2,
+      replication_mode: :strong,
+      num_partition: 3
+    )
+
+    Enum.each(1..5, &Queue.add("strong_q", &1))
+    assert 5 == Queue.count("strong_q", read_mode: :primary)
+    assert 1 == Queue.out("strong_q")
+    assert 4 == Queue.count("strong_q", read_mode: :primary)
+
+    SuperCache.stop()
+    Process.sleep(50)
+
+    SuperCache.Cluster.Bootstrap.start!(
+      key_pos: 0,
+      partition_pos: 0,
+      cluster: :distributed,
+      replication_factor: 2,
+      replication_mode: :async,
+      num_partition: 3
+    )
+  end
+
+  ## complex ────────────────────────────────────────────────────────────────────
 
   test "complex lifecycle" do
     list = Enum.to_list(1..10)

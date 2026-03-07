@@ -84,6 +84,28 @@ defmodule SuperCache.Cluster.Manager do
   @spec live_nodes() :: [node]
   def live_nodes(), do: GenServer.call(__MODULE__, :live_nodes)
 
+  @doc """
+  Return the cluster-wide replication mode configured via
+  `SuperCache.Cluster.Bootstrap.start!/1`.
+
+  | Value     | Guarantee              |
+  |-----------|------------------------|
+  | `:async`  | Eventual (default)     |
+  | `:sync`   | At-least-once delivery |
+  | `:strong` | Three-phase commit     |
+
+  Zero-cost read from `SuperCache.Config` — no GenServer hop.
+
+  ## Example
+
+      SuperCache.Cluster.Manager.replication_mode()
+      # => :async
+  """
+  @spec replication_mode() :: :async | :sync | :strong
+  def replication_mode() do
+    Config.get_config(:replication_mode, :async)
+  end
+
   # ── GenServer callbacks ──────────────────────────────────────────────────────
 
   @impl true
@@ -129,6 +151,7 @@ defmodule SuperCache.Cluster.Manager do
         Logger.debug(fn ->
           "super_cache, cluster_manager, #{inspect(new_node)} connected but not ready — will retry"
         end)
+
         Process.send_after(self(), {:retry_node_up, new_node, 1}, 500)
         {:noreply, state}
     end
@@ -151,6 +174,7 @@ defmodule SuperCache.Cluster.Manager do
     nodes
     |> List.delete(node())
     |> Enum.each(&spawn(fn -> sync_to_node(&1) end))
+
     {:noreply, state}
   end
 
@@ -170,23 +194,30 @@ defmodule SuperCache.Cluster.Manager do
         updated = Enum.uniq([target | nodes])
         :persistent_term.put(@pt_key, build_partition_map(updated))
         spawn(fn -> sync_to_node(target) end)
-        Logger.info("super_cache, cluster_manager, node up (retry #{attempt}): #{inspect(target)}")
+
+        Logger.info(
+          "super_cache, cluster_manager, node up (retry #{attempt}): #{inspect(target)}"
+        )
+
         {:noreply, %{state | nodes: updated}}
 
       attempt < 10 ->
         # Back-off: 500 ms * attempt (capped at 5 s).
         delay = min(500 * attempt, 5_000)
         Process.send_after(self(), {:retry_node_up, target, attempt + 1}, delay)
+
         Logger.debug(fn ->
           "super_cache, cluster_manager, #{inspect(target)} still not ready " <>
-          "(attempt #{attempt}) — retrying in #{delay} ms"
+            "(attempt #{attempt}) — retrying in #{delay} ms"
         end)
+
         {:noreply, state}
 
       true ->
         Logger.warning(
           "super_cache, cluster_manager, giving up on #{inspect(target)} after #{attempt} attempts"
         )
+
         {:noreply, state}
     end
   end
@@ -198,26 +229,26 @@ defmodule SuperCache.Cluster.Manager do
   # Build %{partition_idx => {primary, [replicas]}}.
   # `nodes` is guaranteed non-empty (always contains at least node()).
   defp build_partition_map(nodes) when nodes != [] do
-    factor     = Config.get_config(:replication_factor, 2)
-    num_parts  = Config.get_config(:num_partition, Partition.get_schedulers())
-    sorted     = Enum.sort(nodes)
+    factor = Config.get_config(:replication_factor, 2)
+    num_parts = Config.get_config(:num_partition, Partition.get_schedulers())
+    sorted = Enum.sort(nodes)
     node_count = length(sorted)
 
     for idx <- 0..(num_parts - 1), into: %{} do
-      rotated  = rotate(sorted, rem(idx, node_count))
-      primary  = hd(rotated)
+      rotated = rotate(sorted, rem(idx, node_count))
+      primary = hd(rotated)
       replicas = rotated |> tl() |> Enum.take(min(factor - 1, node_count - 1))
       {idx, {primary, replicas}}
     end
   end
 
-  defp rotate(list, 0),    do: list
+  defp rotate(list, 0), do: list
   defp rotate([h | t], n), do: rotate(t ++ [h], n - 1)
 
   # Push all partitions this node owns to `target`.
   defp sync_to_node(target) do
     num_parts = Config.get_config(:num_partition, Partition.get_schedulers())
-    me        = node()
+    me = node()
 
     for idx <- 0..(num_parts - 1) do
       {primary, replicas} = get_replicas(idx)
@@ -236,8 +267,9 @@ defmodule SuperCache.Cluster.Manager do
       kind, reason ->
         Logger.warning(
           "super_cache, cluster_manager, health-check failed " <>
-          "→ #{inspect(target_node)}: #{inspect({kind, reason})}"
+            "→ #{inspect(target_node)}: #{inspect({kind, reason})}"
         )
+
         false
     end
   end

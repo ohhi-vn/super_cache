@@ -1,21 +1,29 @@
 defmodule SuperCache.Distributed.StackTest do
   use ExUnit.Case, async: false
-
   alias SuperCache.Distributed.Stack
 
   setup_all do
     if SuperCache.started?(), do: SuperCache.stop()
     Process.sleep(50)
-    SuperCache.start!()
+
+    SuperCache.Cluster.Bootstrap.start!(
+      key_pos: 0,
+      partition_pos: 0,
+      cluster: :distributed,
+      replication_factor: 2,
+      replication_mode: :async,
+      num_partition: 3
+    )
+
     :ok
   end
 
   setup do
-    SuperCache.delete_all()
+    SuperCache.Distributed.delete_all()
     :ok
   end
 
-  ## push / pop ##
+  ## push / pop ─────────────────────────────────────────────────────────────────
 
   test "push and pop single item" do
     Stack.push("s", "hello")
@@ -47,7 +55,7 @@ defmodule SuperCache.Distributed.StackTest do
     assert nil == Stack.pop("s")
   end
 
-  ## multiple stacks ##
+  ## multiple stacks ─────────────────────────────────────────────────────────────
 
   test "multiple stacks are independent" do
     Enum.each(1..5, fn x ->
@@ -63,7 +71,7 @@ defmodule SuperCache.Distributed.StackTest do
     assert result
   end
 
-  ## count ##
+  ## count ──────────────────────────────────────────────────────────────────────
 
   test "count reflects stack size" do
     Enum.each(1..10, &Stack.push("s", &1))
@@ -92,7 +100,17 @@ defmodule SuperCache.Distributed.StackTest do
     assert 4 == Stack.count("s")
   end
 
-  ## get_all (drain) ##
+  test "count with read_mode :primary" do
+    Enum.each(1..3, &Stack.push("s_pm", &1))
+    assert 3 == Stack.count("s_pm", read_mode: :primary)
+  end
+
+  test "count with read_mode :quorum" do
+    Enum.each(1..3, &Stack.push("s_qm", &1))
+    assert 3 == Stack.count("s_qm", read_mode: :quorum)
+  end
+
+  ## get_all (drain) ─────────────────────────────────────────────────────────────
 
   test "get_all returns items top-first and clears stack" do
     Enum.each(1..5, &Stack.push("s", &1))
@@ -107,20 +125,51 @@ defmodule SuperCache.Distributed.StackTest do
   test "stack is usable after get_all" do
     Enum.each(1..5, &Stack.push("s", &1))
     Stack.get_all("s")
-
     Stack.push("s", :new)
     assert 1 == Stack.count("s")
     assert :new == Stack.pop("s")
   end
 
-  ## complex ##
+  ## replication_mode: :strong (3PC) ────────────────────────────────────────────
+
+  test "push/pop survive under :strong replication_mode" do
+    SuperCache.stop()
+    Process.sleep(50)
+
+    SuperCache.Cluster.Bootstrap.start!(
+      key_pos: 0,
+      partition_pos: 0,
+      cluster: :distributed,
+      replication_factor: 2,
+      replication_mode: :strong,
+      num_partition: 3
+    )
+
+    Enum.each(1..5, &Stack.push("strong_s", &1))
+    assert 5 == Stack.count("strong_s", read_mode: :primary)
+    assert 5 == Stack.pop("strong_s")
+    assert 4 == Stack.count("strong_s", read_mode: :primary)
+
+    SuperCache.stop()
+    Process.sleep(50)
+
+    SuperCache.Cluster.Bootstrap.start!(
+      key_pos: 0,
+      partition_pos: 0,
+      cluster: :distributed,
+      replication_factor: 2,
+      replication_mode: :async,
+      num_partition: 3
+    )
+  end
+
+  ## complex ────────────────────────────────────────────────────────────────────
 
   test "complex lifecycle" do
     Enum.each(1..10, &Stack.push("s", &1))
     assert 10 == Stack.count("s")
 
-    top = Stack.pop("s")
-    assert 10 == top
+    assert 10 == Stack.pop("s")
     assert 9 == Stack.count("s")
 
     Stack.push("s", 100)
