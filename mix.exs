@@ -60,7 +60,7 @@ defmodule SuperCache.MixProject do
       licenses: ["MIT"],
       links: %{
         "GitHub" => "https://github.com/ohhi-vn/super_cache",
-        "About us" => "https://ohhi.vn/team"
+        "About us" => "https://ohhi.vn/"
       }
     ]
   end
