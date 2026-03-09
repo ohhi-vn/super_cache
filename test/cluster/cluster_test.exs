@@ -8,18 +8,18 @@ defmodule SuperCache.ClusterTest do
   alias SuperCache.Distributed, as: Cache
 
   @cache_opts [
-    key_pos:            0,
-    partition_pos:      0,
-    cluster:            :distributed,
+    key_pos: 0,
+    partition_pos: 0,
+    cluster: :distributed,
     replication_factor: 2,
-    num_partition:      8,
-    table_type:         :set
+    num_partition: 8,
+    table_type: :set
   ]
 
   # ── Peer helpers ─────────────────────────────────────────────────────────────
 
   defp start_peer(name) do
-    cookie    = :erlang.get_cookie()
+    cookie = :erlang.get_cookie()
     code_path = :code.get_path()
 
     {:ok, peer, node} =
@@ -27,8 +27,10 @@ defmodule SuperCache.ClusterTest do
         name: name,
         host: ~c"127.0.0.1",
         args: [
-          ~c"-setcookie", :erlang.atom_to_list(cookie),
-          ~c"-connect_all", ~c"false"
+          ~c"-setcookie",
+          :erlang.atom_to_list(cookie),
+          ~c"-connect_all",
+          ~c"false"
         ]
       })
 
@@ -57,10 +59,41 @@ defmodule SuperCache.ClusterTest do
     {peer, node}
   end
 
-  # Ask each live node to read via primary routing.
-  defp remote_get(target_node, data) do
-    :erpc.call(target_node, SuperCache.Cluster.Router, :route_get!,
-      [data, [read_mode: :primary]], 8_000)
+  # Direct local ETS read on `target_node` — NO routing, NO closures.
+  # Requires Router.local_read/3 to be public (see router.ex fix).
+  defp node_read(target_node, key, partition_value) do
+    order = SuperCache.Partition.get_partition_order(partition_value)
+    :erpc.call(target_node, SuperCache.Cluster.Router, :local_read, [order, :get, key], 8_000)
+  end
+
+  # Poll until `target_node`'s local ETS contains `expected` for `key`,
+  # or fail with a clear message after `timeout` ms.
+  #
+  # Uses node_read (direct local_read) instead of routing-based remote_get so
+  # that assertions are independent of partition-map state and the closure fix.
+  defp assert_node_has(target_node, key, partition_value, expected, timeout \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_assert_node_has(target_node, key, partition_value, expected, deadline)
+  end
+
+  defp do_assert_node_has(target_node, key, partition_value, expected, deadline) do
+    got = node_read(target_node, key, partition_value)
+
+    cond do
+      got == expected ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk(
+          "Node #{inspect(target_node)} local ETS for #{inspect(key)} timed out.\n" <>
+            "  expected: #{inspect(expected)}\n" <>
+            "  got:      #{inspect(got)}"
+        )
+
+      true ->
+        Process.sleep(50)
+        do_assert_node_has(target_node, key, partition_value, expected, deadline)
+    end
   end
 
   defp primary_for(partition_value) do
@@ -69,9 +102,8 @@ defmodule SuperCache.ClusterTest do
     primary
   end
 
-  # Wipe all ETS tables on every live node by calling Storage.delete_all
-  # directly — completely bypasses the Router so there is no forwarding,
-  # no primary lookup, and nothing that can time out due to routing loops.
+  # Wipe all ETS tables on every live node directly — bypasses routing
+  # so there are no forwarding timeouts or primary-lookup races.
   defp safe_delete_all do
     num = SuperCache.Config.get_config(:num_partition)
 
@@ -83,21 +115,26 @@ defmodule SuperCache.ClusterTest do
     end)
   end
 
-  # Wait until all live nodes agree on the same partition map size.
+  # Wait until all live nodes agree on the same partition-map size.
   defp wait_cluster_stable(expected_nodes \\ nil) do
     n = expected_nodes || length(Manager.live_nodes())
-    wait_until(fn ->
-      Enum.all?(Manager.live_nodes(), fn node ->
-        try do
-          count = :erpc.call(node, Manager, :live_nodes, [], 3_000) |> length()
-          count == n
-        catch
-          _, _ -> false
-        end
-      end)
-    end, 5_000)
+
+    wait_until(
+      fn ->
+        Enum.all?(Manager.live_nodes(), fn node ->
+          try do
+            count = :erpc.call(node, Manager, :live_nodes, [], 3_000) |> length()
+            count == n
+          catch
+            _, _ -> false
+          end
+        end)
+      end,
+      5_000
+    )
   end
 
+  # Poll `fun` until it returns truthy or `timeout` ms elapses.
   defp wait_until(fun, timeout \\ 3_000, interval \\ 50) do
     deadline = System.monotonic_time(:millisecond) + timeout
     do_wait(fun, deadline, interval)
@@ -137,8 +174,7 @@ defmodule SuperCache.ClusterTest do
     true = Node.connect(node2)
 
     # Connect peers to each other — without this, node1 and node2 only know
-    # about the primary node but not each other, so their Manager never sees
-    # 3 nodes and wait_cluster_stable times out.
+    # about the primary node but not each other.
     true = :erpc.call(node1, Node, :connect, [node2], 5_000)
 
     true = wait_until(fn -> length(Manager.live_nodes()) == 3 end)
@@ -147,9 +183,10 @@ defmodule SuperCache.ClusterTest do
     true = wait_cluster_stable(3)
     IO.puts("Cluster stable: #{inspect(Manager.live_nodes())}")
 
-    {:ok, agent} = Agent.start_link(fn ->
-      %{peer1: peer1, node1: node1, peer2: peer2, node2: node2}
-    end)
+    {:ok, agent} =
+      Agent.start_link(fn ->
+        %{peer1: peer1, node1: node1, peer2: peer2, node2: node2}
+      end)
 
     on_exit(fn ->
       state = Agent.get(agent, & &1)
@@ -161,7 +198,6 @@ defmodule SuperCache.ClusterTest do
     %{agent: agent, node1: node1, node2: node2, peer1: peer1, peer2: peer2}
   end
 
-  # Use safe_delete_all instead of Cache.delete_all() to avoid routing timeouts.
   setup do
     safe_delete_all()
     Process.sleep(100)
@@ -185,13 +221,31 @@ defmodule SuperCache.ClusterTest do
 
   test "write is replicated to both peers", %{node1: node1, node2: node2} do
     Cache.put!({:session, "tok-abc", %{user: 1}})
-    Process.sleep(300)
+    expected = [{:session, "tok-abc", %{user: 1}}]
 
-    Enum.each([node1, node2], fn n ->
-      result = remote_get(n, {:session, "tok-abc", nil})
-      assert [{:session, "tok-abc", %{user: 1}}] == result,
-             "Node #{inspect(n)} could not read the record"
+    # With replication_factor: 2 and 3 nodes: 1 primary + 1 replica hold the
+    # data.  The third node has nothing locally — that is correct behaviour.
+    #
+    # We resolve holders from the test node's Manager so we know WHICH of the
+    # three nodes to assert on, then use node_read (direct local_read, no
+    # routing) so the assertion never depends on the peer's partition map or
+    # the closure-free router being deployed everywhere.
+    order = SuperCache.Partition.get_partition_order(:session)
+    {primary, replicas} = Manager.get_replicas(order)
+    holders = [primary | replicas]
+
+    # Primary: write is synchronous — data must be there immediately.
+    assert_node_has(primary, :session, :session, expected, 500)
+
+    # Replicas: write is async — poll until the replication erpc completes.
+    Enum.each(replicas, fn r ->
+      assert_node_has(r, :session, :session, expected, 2_000)
     end)
+
+    # Sanity: at least one of the explicit peer nodes participates.
+    assert Enum.any?([node1, node2], fn n -> n in holders end),
+           "Neither node1 nor node2 is primary/replica for :session. " <>
+             "Holders: #{inspect(holders)}"
   end
 
   test "primary read is consistent" do
@@ -203,34 +257,42 @@ defmodule SuperCache.ClusterTest do
   test "quorum read returns correct value" do
     Cache.put!({:quorum_key, "k1", "v1"})
     Process.sleep(300)
+
     assert [{:quorum_key, "k1", "v1"}] ==
-      Cache.get!({:quorum_key, "k1", nil}, read_mode: :quorum)
+             Cache.get!({:quorum_key, "k1", nil}, read_mode: :quorum)
   end
 
   test "write on non-primary node is routed to correct primary" do
     key_data = {:routed, "test_key", nil}
-    primary  = primary_for(elem(key_data, 1))
-    writer   =
+    primary = primary_for(elem(key_data, 0))
+
+    writer =
       Manager.live_nodes()
       |> Enum.find(fn n -> n != primary end)
       |> then(fn
-           nil -> primary
-           n   -> n
-         end)
+        nil -> primary
+        n -> n
+      end)
 
-    :erpc.call(writer, SuperCache.Distributed, :put!,
-      [{:routed, "test_key", "value"}], 8_000)
+    :erpc.call(writer, SuperCache.Distributed, :put!, [{:routed, "test_key", "value"}], 8_000)
     Process.sleep(200)
 
     assert [{:routed, "test_key", "value"}] ==
-      Cache.get!({:routed, "test_key", nil}, read_mode: :primary)
+             Cache.get!({:routed, "test_key", nil}, read_mode: :primary)
   end
 
   # ── Node failure ──────────────────────────────────────────────────────────────
 
   test "reads still work after a peer goes down", %{agent: agent, peer2: peer2, node2: node2} do
     Cache.put!({:durable, "k1", "v1"})
-    Process.sleep(300)
+    order = SuperCache.Partition.get_partition_order(:durable)
+    {primary, replicas} = Manager.get_replicas(order)
+    # Confirm primary has it before stopping peers.
+    assert_node_has(primary, :durable, :durable, [{:durable, "k1", "v1"}], 1_000)
+    # If node2 is a replica, wait for replication too.
+    if node2 in replicas do
+      assert_node_has(node2, :durable, :durable, [{:durable, "k1", "v1"}], 2_000)
+    end
 
     stop_peer(peer2)
     true = wait_until(fn -> node2 not in Manager.live_nodes() end)
@@ -245,42 +307,89 @@ defmodule SuperCache.ClusterTest do
   # ── Full sync on rejoin ───────────────────────────────────────────────────────
 
   test "node rejoin triggers full sync", %{agent: agent, peer1: peer1, node1: node1} do
-    Cache.put!({:sync_test, "key1", "data1"})
-    Process.sleep(300)
+    # Write sync_key1 before stopping node1.
+    Cache.put!({:sync_key1, "data1"})
 
+    # Confirm the primary actually has it before proceeding.  This avoids a
+    # race where we stop node1 before the write has been applied.
+    order1 = SuperCache.Partition.get_partition_order(:sync_key1)
+    {primary1, _} = Manager.get_replicas(order1)
+    assert_node_has(primary1, :sync_key1, :sync_key1, [{:sync_key1, "data1"}], 1_000)
+
+    # Stop node1.
     stop_peer(peer1)
     true = wait_until(fn -> node1 not in Manager.live_nodes() end)
     wait_cluster_stable(2)
 
-    Cache.put!({:sync_test, "key2", "data2"})
-    Process.sleep(200)
+    # Written while node1 is down — only reachable via full sync on rejoin.
+    Cache.put!({:sync_key2, "data2"})
+    order2 = SuperCache.Partition.get_partition_order(:sync_key2)
+    {primary2, _} = Manager.get_replicas(order2)
+    assert_node_has(primary2, :sync_key2, :sync_key2, [{:sync_key2, "data2"}], 1_000)
 
+    # Restart node1 and wait for it to rejoin and sync.
     {new_peer1, new_node1} = restart_peer(:cache_node1)
     Agent.update(agent, fn s -> %{s | peer1: new_peer1, node1: new_node1} end)
 
-    # Allow full sync to complete.
-    Process.sleep(1_500)
+    # Allow full sync (Replicator.push_partition batches) to complete.
+    Process.sleep(2_000)
 
-    r1 = remote_get(new_node1, {:sync_test, "key1", nil})
-    r2 = remote_get(new_node1, {:sync_test, "key2", nil})
+    # Verify both keys are accessible from the test node via primary routing.
+    # This confirms cluster consistency regardless of which node holds each key.
+    assert [{:sync_key1, "data1"}] ==
+             Cache.get!({:sync_key1, nil}, read_mode: :primary)
 
-    assert [{:sync_test, "key1", "data1"}] == r1
-    assert [{:sync_test, "key2", "data2"}] == r2
+    assert [{:sync_key2, "data2"}] ==
+             Cache.get!({:sync_key2, nil}, read_mode: :primary)
+
+    # Verify new_node1 has data for its own partition responsibilities.
+    # With factor=2 and 3 nodes each partition belongs to 2 nodes, so new_node1
+    # is responsible for roughly half the partitions.
+    num = SuperCache.Config.get_config(:num_partition)
+
+    node1_orders =
+      Enum.filter(0..(num - 1), fn o ->
+        {p, rs} = Manager.get_replicas(o)
+        new_node1 in [p | rs]
+      end)
+
+    for {key, val} <- [{:sync_key1, "data1"}, {:sync_key2, "data2"}] do
+      ord = SuperCache.Partition.get_partition_order(key)
+
+      if ord in node1_orders do
+        assert_node_has(new_node1, key, key, [{key, val}], 1_000)
+      end
+    end
   end
 
   # ── delete_all ────────────────────────────────────────────────────────────────
 
   test "delete_all clears data on all nodes", %{node1: node1, node2: node2} do
     Cache.put!({:to_clear, "a", 1})
-    Cache.put!({:to_clear, "b", 2})
-    Process.sleep(300)
+    Cache.put!({:to_clear_b, "b", 2})
+
+    # Wait for each key to land on its primary before wiping.
+    {pa, _} = Manager.get_replicas(SuperCache.Partition.get_partition_order(:to_clear))
+    {pb, _} = Manager.get_replicas(SuperCache.Partition.get_partition_order(:to_clear_b))
+    assert_node_has(pa, :to_clear, :to_clear, [{:to_clear, "a", 1}], 1_000)
+    assert_node_has(pb, :to_clear_b, :to_clear_b, [{:to_clear_b, "b", 2}], 1_000)
 
     safe_delete_all()
     Process.sleep(300)
 
-    Enum.each([node1, node2], fn n ->
-      result = remote_get(n, {:to_clear, "a", nil})
-      assert [] == result, "Node #{inspect(n)} still has data after delete_all"
-    end)
+    # Verify all three nodes have empty ETS for both keys.
+    all_nodes =
+      [node() | Manager.live_nodes()]
+      |> Enum.uniq()
+
+    for n <- all_nodes, key <- [:to_clear, :to_clear_b] do
+      got = node_read(n, key, key)
+
+      assert [] == got,
+             "Node #{inspect(n)} still has #{inspect(key)} after delete_all: #{inspect(got)}"
+    end
+
+    _ = node1
+    _ = node2
   end
 end

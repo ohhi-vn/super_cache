@@ -1,323 +1,452 @@
 defmodule SuperCache.Cluster.Router do
   @moduledoc """
-  Routes every cache operation to the correct primary node and fans writes
-  out to replicas.
+  Routes SuperCache operations to the correct primary node and applies
+  replication after each write.
 
-  Every public `route_*` function records a call counter and latency sample
-  via `SuperCache.Cluster.Metrics` so the results are visible in
-  `SuperCache.Cluster.Stats.api/0`.
+  ## Routing contract
 
-  See the module doc in the previous version for the full design-rule
-  explanation (no-forwarding-cycle contract, read modes, timeout table).
+  1. Determine the **partition order** (integer index) for the operation from
+     the data tuple or explicit partition argument via
+     `Partition.get_partition_order/1`.
+  2. Look up `{primary, replicas}` from `Manager.get_replicas/1`
+     (zero-cost `:persistent_term` read).
+  3. If `node() == primary` → apply locally, then call `Replicator.replicate/3`.
+  4. Otherwise → forward the entire operation to the primary via `:erpc`,
+     which applies and replicates it.  Forwarded calls never forward again
+     (detected via a `:forwarded` flag in opts) to prevent cycles.
+
+  ## Anti-cycle guard
+
+  Every outbound `:erpc` call appends `forwarded: true` to its opts list.
+  A function that receives `forwarded: true` always executes locally and
+  skips the primary check, preventing infinite forwarding chains when the
+  partition map is momentarily inconsistent.
+
+  ## No anonymous functions across node boundaries
+
+  All `:erpc` calls pass only plain, serializable Erlang terms — integers,
+  atoms, and tuples.  Anonymous functions (closures) are never passed via
+  `:erpc` because Erlang fun serialization is fragile: the remote node must
+  have the identical module version, otherwise the call raises `badfun`.
+  Instead, every remote read goes through the explicit public dispatcher
+  `local_read/3`, which takes an operation atom (`:get | :match | :match_object`)
+  and a plain argument.
+
+  ## 3PC writes
+
+  When `Manager.replication_mode/0` returns `:strong`, writes are handed
+  to `ThreePhaseCommit.commit/2` on the primary instead of the normal
+  local-write + async/sync replicate path.
   """
 
   require Logger
 
   alias SuperCache.{Config, Partition, Storage}
-  alias SuperCache.Cluster.{Manager, Replicator, Metrics}
+  alias SuperCache.Cluster.{Manager, Replicator, ThreePhaseCommit}
 
-  @forward_timeout 5_000
-  @bulk_timeout    10_000
+  @erpc_timeout 5_000
 
-  ## Public routing API ─────────────────────────────────────────────────────────
+  ## ── Write ────────────────────────────────────────────────────────────────────
 
-  @spec route_put!(tuple) :: true
-  def route_put!(data) when is_tuple(data) do
-    timed(:put, fn ->
-      {idx, partition} = resolve(data)
-      {primary, _} = Manager.get_replicas(idx)
+  @doc "Route a put to the correct primary, then replicate."
+  @spec route_put!(tuple, keyword) :: true
+  def route_put!(data, opts \\ []) when is_tuple(data) do
+    order = get_partition_order(data)
 
-      if primary == node() do
-        local_put(data, idx, partition)
-      else
-        Logger.debug(fn -> "super_cache, router, put → #{inspect(primary)}" end)
-        forward_sync!(primary, :remote_put, [data], @forward_timeout)
-      end
-    end)
+    if primary?(order) or Keyword.get(opts, :forwarded, false) do
+      local_write(order, :put, data)
+    else
+      forward(:route_put!, [data, [forwarded: true]], order)
+    end
   end
 
-  @spec route_delete!(tuple) :: :ok
-  def route_delete!(data) when is_tuple(data) do
-    timed(:delete, fn ->
-      {idx, partition} = resolve(data)
-      {primary, _} = Manager.get_replicas(idx)
+  ## ── Read ─────────────────────────────────────────────────────────────────────
 
-      if primary == node() do
-        local_delete(Config.get_key!(data), idx, partition)
-      else
-        Logger.debug(fn -> "super_cache, router, delete → #{inspect(primary)}" end)
-        forward_sync!(primary, :remote_delete, [data], @forward_timeout)
-      end
-    end)
-  end
-
-  @spec route_delete_by_key_partition!(any, any) :: :ok
-  def route_delete_by_key_partition!(key, partition_data) do
-    timed(:delete, fn ->
-      idx = Partition.get_partition_order(partition_data)
-      partition = Partition.get_partition_by_idx(idx)
-      {primary, _} = Manager.get_replicas(idx)
-
-      if primary == node() do
-        local_delete(key, idx, partition)
-      else
-        forward_sync!(primary, :remote_delete_by_kp, [key, partition_data], @forward_timeout)
-      end
-    end)
-  end
-
-  @spec route_delete_match!(any, tuple) :: :ok
-  def route_delete_match!(partition_data, pattern) when is_tuple(pattern) do
-    timed(:delete_match, fn ->
-      {local_pairs, remote_groups} =
-        partition_data |> partitions_with_idx() |> split_by_primary()
-
-      Enum.each(local_pairs, fn {idx, partition} ->
-        local_delete_match(pattern, idx, partition)
-      end)
-
-      forward_concurrent(remote_groups, :remote_delete_match,
-                         [partition_data, pattern], @bulk_timeout)
-    end)
-  end
-
-  @spec route_delete_all() :: :ok
-  def route_delete_all() do
-    timed(:delete_all, fn ->
-      {local_pairs, remote_groups} =
-        0..(Partition.get_num_partition() - 1)
-        |> Enum.map(fn idx -> {idx, Partition.get_partition_by_idx(idx)} end)
-        |> split_by_primary()
-
-      Enum.each(local_pairs, fn {idx, partition} ->
-        local_delete_all(idx, partition)
-      end)
-
-      forward_concurrent(remote_groups, :remote_delete_all, [], @bulk_timeout)
-    end)
-  end
-
+  @doc "Route a key-based get."
   @spec route_get!(tuple, keyword) :: [tuple]
   def route_get!(data, opts \\ []) when is_tuple(data) do
-    mode = Keyword.get(opts, :read_mode, :local)
-    metric_key = :"get_#{mode}"
+    key = Config.get_key!(data)
+    part_val = Config.get_partition!(data)
+    order = Partition.get_partition_order(part_val)
+    read_mode = Keyword.get(opts, :read_mode, :local)
 
-    timed(metric_key, fn ->
-      {idx, partition} = resolve(data)
+    do_read(read_mode, order, :get, key)
+  end
+
+  @doc "Route a get by explicit key + partition value."
+  @spec route_get_by_key_partition!(any, any, keyword) :: [tuple]
+  def route_get_by_key_partition!(key, partition_data, opts \\ []) do
+    order = Partition.get_partition_order(partition_data)
+    read_mode = Keyword.get(opts, :read_mode, :local)
+
+    do_read(read_mode, order, :get, key)
+  end
+
+  @doc "Route a match-pattern scan across one or all partitions."
+  @spec route_get_by_match!(any, tuple, keyword) :: [[any]]
+  def route_get_by_match!(partition_data, pattern, opts \\ []) when is_tuple(pattern) do
+    read_mode = Keyword.get(opts, :read_mode, :local)
+    fan_read(partition_data, read_mode, :match, pattern)
+  end
+
+  @doc "Route a match-object scan across one or all partitions."
+  @spec route_get_by_match_object!(any, tuple, keyword) :: [tuple]
+  def route_get_by_match_object!(partition_data, pattern, opts \\ []) when is_tuple(pattern) do
+    read_mode = Keyword.get(opts, :read_mode, :local)
+    fan_read(partition_data, read_mode, :match_object, pattern)
+  end
+
+  @doc "Fold over local ETS — always local, never forwarded."
+  @spec route_scan!(any, (any, any -> any), any) :: any
+  def route_scan!(partition_data, fun, acc) when is_function(fun, 2) do
+    resolve_partitions(partition_data)
+    |> Enum.reduce(acc, fn p, result -> Storage.scan(fun, result, p) end)
+  end
+
+  ## ── Remote read entry-point (called via :erpc — NO closures) ─────────────────
+
+  @doc false
+  # Public so it can be invoked via :erpc from do_read/4 and quorum_read/3.
+  # Accepts only plain serializable terms — no anonymous functions.
+  #
+  # op:
+  #   :get          → Storage.get(arg, partition)
+  #   :match        → Storage.get_by_match(arg, partition)
+  #   :match_object → Storage.get_by_match_object(arg, partition)
+  @spec local_read(non_neg_integer, :get | :match | :match_object, any) :: list
+  def local_read(order, op, arg) do
+    partition = Partition.get_partition_by_idx(order)
+
+    case op do
+      :get -> Storage.get(arg, partition)
+      :match -> Storage.get_by_match(arg, partition)
+      :match_object -> Storage.get_by_match_object(arg, partition)
+    end
+  end
+
+  ## ── Delete ───────────────────────────────────────────────────────────────────
+
+  @doc "Route a key-based delete to the correct primary."
+  @spec route_delete!(tuple, keyword) :: :ok
+  def route_delete!(data, opts \\ []) when is_tuple(data) do
+    order = get_partition_order(data)
+
+    if primary?(order) or Keyword.get(opts, :forwarded, false) do
       key = Config.get_key!(data)
-      {primary, replicas} = Manager.get_replicas(idx)
+      local_delete(order, key)
+    else
+      forward(:route_delete!, [data, [forwarded: true]], order)
+    end
 
-      case mode do
-        :local ->
-          Storage.get(key, partition)
+    :ok
+  end
 
-        :primary ->
-          if primary == node() do
-            Storage.get(key, partition)
-          else
-            Logger.debug(fn -> "super_cache, router, get → #{inspect(primary)}" end)
-            forward_sync!(primary, :remote_get, [data, opts], @forward_timeout)
+  @doc "Delete all records — one routed call per partition."
+  @spec route_delete_all() :: :ok
+  def route_delete_all() do
+    num = Config.get_config(:num_partition, Partition.get_schedulers())
+
+    0..(num - 1)
+    |> Enum.each(fn order ->
+      if primary?(order) do
+        local_delete_all(order)
+      else
+        {primary, _} = Manager.get_replicas(order)
+        safe_erpc(primary, __MODULE__, :route_delete_all_partition, [order, [forwarded: true]])
+      end
+    end)
+
+    :ok
+  end
+
+  @doc false
+  # Single-partition delete_all; called via :erpc from route_delete_all/0.
+  @spec route_delete_all_partition(non_neg_integer, keyword) :: :ok
+  def route_delete_all_partition(order, opts \\ []) do
+    if primary?(order) or Keyword.get(opts, :forwarded, false) do
+      local_delete_all(order)
+    else
+      forward(:route_delete_all_partition, [order, [forwarded: true]], order)
+    end
+
+    :ok
+  end
+
+  @doc "Route a match-based delete, one partition order at a time."
+  @spec route_delete_match!(any, tuple) :: :ok
+  def route_delete_match!(partition_data, pattern) when is_tuple(pattern) do
+    resolve_partition_orders(partition_data)
+    |> Enum.each(fn order ->
+      if primary?(order) do
+        local_delete_match(order, pattern)
+      else
+        {primary, _} = Manager.get_replicas(order)
+
+        safe_erpc(primary, __MODULE__, :route_delete_match_partition!, [
+          order,
+          pattern,
+          [forwarded: true]
+        ])
+      end
+    end)
+
+    :ok
+  end
+
+  @doc false
+  # Single-partition delete_match; called via :erpc from route_delete_match!/2.
+  @spec route_delete_match_partition!(non_neg_integer, tuple, keyword) :: :ok
+  def route_delete_match_partition!(order, pattern, opts \\ []) do
+    if primary?(order) or Keyword.get(opts, :forwarded, false) do
+      local_delete_match(order, pattern)
+    else
+      forward(:route_delete_match_partition!, [order, pattern, [forwarded: true]], order)
+    end
+
+    :ok
+  end
+
+  @doc "Route a delete by explicit key + partition value to the correct primary."
+  @spec route_delete_by_key_partition!(any, any, keyword) :: :ok
+  def route_delete_by_key_partition!(key, partition_data, opts \\ []) do
+    order = Partition.get_partition_order(partition_data)
+
+    if primary?(order) or Keyword.get(opts, :forwarded, false) do
+      local_delete(order, key)
+    else
+      forward(:route_delete_by_key_partition!, [key, partition_data, [forwarded: true]], order)
+    end
+
+    :ok
+  end
+
+  ## ── Private — local write helpers ────────────────────────────────────────────
+
+  defp local_write(order, op, data) do
+    mode = Manager.replication_mode()
+    partition = Partition.get_partition_by_idx(order)
+
+    case mode do
+      :strong ->
+        # 3PC applies locally inside ThreePhaseCommit.apply_local/2
+        ThreePhaseCommit.commit(order, [{op, data}])
+        true
+
+      _ ->
+        result = Storage.put(data, partition)
+        Replicator.replicate(order, op, data)
+        result
+    end
+  end
+
+  defp local_delete(order, key) do
+    mode = Manager.replication_mode()
+    partition = Partition.get_partition_by_idx(order)
+
+    case mode do
+      :strong ->
+        ThreePhaseCommit.commit(order, [{:delete, key}])
+
+      _ ->
+        Storage.delete(key, partition)
+        Replicator.replicate(order, :delete, key)
+    end
+
+    :ok
+  end
+
+  defp local_delete_all(order) do
+    mode = Manager.replication_mode()
+    partition = Partition.get_partition_by_idx(order)
+
+    case mode do
+      :strong ->
+        ThreePhaseCommit.commit(order, [{:delete_all, nil}])
+
+      _ ->
+        Storage.delete_all(partition)
+        Replicator.replicate(order, :delete_all, nil)
+    end
+
+    :ok
+  end
+
+  defp local_delete_match(order, pattern) do
+    mode = Manager.replication_mode()
+    partition = Partition.get_partition_by_idx(order)
+
+    case mode do
+      :strong ->
+        ThreePhaseCommit.commit(order, [{:delete_match, pattern}])
+
+      _ ->
+        Storage.delete_match(pattern, partition)
+        Replicator.replicate(order, :delete_match, pattern)
+    end
+
+    :ok
+  end
+
+  ## ── Private — single-partition read dispatcher ───────────────────────────────
+
+  # Local: read directly from the local ETS table — no network hop.
+  defp do_read(:local, order, op, arg) do
+    local_read(order, op, arg)
+  end
+
+  # Primary: if this node IS the primary, read locally; otherwise forward to
+  # the primary via :erpc passing only plain terms (op atom + arg), never
+  # a closure.
+  defp do_read(:primary, order, op, arg) do
+    if primary?(order) do
+      local_read(order, op, arg)
+    else
+      {primary, _} = Manager.get_replicas(order)
+      result = safe_erpc(primary, __MODULE__, :local_read, [order, op, arg])
+
+      case result do
+        list when is_list(list) ->
+          list
+
+        {:error, reason} ->
+          Logger.warning(
+            "super_cache, router, primary read failed (order=#{order}): #{inspect(reason)}"
+          )
+
+          []
+      end
+    end
+  end
+
+  # Quorum: ask primary + all replicas in parallel; only plain terms sent via
+  # :erpc — no closures.  Majority vote decides the result.
+  defp do_read(:quorum, order, op, arg) do
+    {primary, replicas} = Manager.get_replicas(order)
+    nodes = [primary | replicas]
+
+    results =
+      nodes
+      |> Task.async_stream(
+        fn n ->
+          try do
+            if n == node() do
+              local_read(order, op, arg)
+            else
+              :erpc.call(n, __MODULE__, :local_read, [order, op, arg], @erpc_timeout)
+            end
+          catch
+            kind, reason ->
+              Logger.warning(
+                "super_cache, router, quorum read failed on #{inspect(n)}: " <>
+                  inspect({kind, reason})
+              )
+
+              :error
           end
+        end,
+        timeout: @erpc_timeout + 500,
+        on_timeout: :kill_task
+      )
+      |> Enum.flat_map(fn
+        {:ok, list} when is_list(list) -> [list]
+        _ -> []
+      end)
 
-        :quorum ->
-          quorum_read(key, partition, primary, replicas)
+    quorum_merge(results)
+  end
+
+  ## ── Private — multi-partition fan-out ────────────────────────────────────────
+
+  # Local fan: all partitions resolved to ETS table atoms, no :erpc involved.
+  defp fan_read(partition_data, :local, op, arg) do
+    resolve_partitions(partition_data)
+    |> Enum.flat_map(fn p ->
+      case op do
+        :get -> Storage.get(arg, p)
+        :match -> Storage.get_by_match(arg, p)
+        :match_object -> Storage.get_by_match_object(arg, p)
       end
     end)
   end
 
-  ## Remote entry points ────────────────────────────────────────────────────────
-
-  @doc false
-  def remote_put(data) do
-    {idx, partition} = resolve(data)
-    local_put(data, idx, partition)
-  end
-
-  @doc false
-  def remote_delete(data) do
-    {idx, partition} = resolve(data)
-    local_delete(Config.get_key!(data), idx, partition)
-  end
-
-  @doc false
-  def remote_get(data, opts) do
-    {_idx, partition} = resolve(data)
-    Storage.get(Config.get_key!(data), partition)
-    |> maybe_apply_read_opts(data, opts)
-  end
-
-  @doc false
-  def remote_delete_by_kp(key, partition_data) do
-    idx = Partition.get_partition_order(partition_data)
-    partition = Partition.get_partition_by_idx(idx)
-    local_delete(key, idx, partition)
-  end
-
-  @doc false
-  def remote_delete_match(partition_data, pattern) do
-    partition_data
-    |> partitions_with_idx()
-    |> Enum.each(fn {_idx, partition} -> Storage.delete_match(pattern, partition) end)
-    :ok
-  end
-
-  @doc false
-  def remote_delete_all() do
-    0..(Partition.get_num_partition() - 1)
-    |> Enum.each(fn idx ->
-      Storage.delete_all(Partition.get_partition_by_idx(idx))
+  # Primary / quorum fan: resolve partition orders (integers), then for each
+  # order delegate to do_read/4 which handles routing with plain-term :erpc.
+  defp fan_read(partition_data, mode, op, arg) do
+    resolve_partition_orders(partition_data)
+    |> Task.async_stream(
+      fn order -> do_read(mode, order, op, arg) end,
+      timeout: @erpc_timeout + 500
+    )
+    |> Enum.flat_map(fn
+      {:ok, list} when is_list(list) -> list
+      _ -> []
     end)
-    :ok
   end
 
-  ## Local execution kernels ────────────────────────────────────────────────────
+  ## ── Private — quorum resolution ─────────────────────────────────────────────
 
-  defp local_put(data, idx, partition) do
-    Storage.put(data, partition)
-    Replicator.replicate(idx, :put, data)
-    true
+  # Return the result agreed on by ≥ ⌈n/2⌉ nodes; fall back to the first
+  # result when no strict majority exists.
+  defp quorum_merge([]), do: []
+
+  defp quorum_merge(results) do
+    total = length(results)
+    required = div(total, 2) + 1
+
+    case Enum.group_by(results, & &1) |> Enum.find(fn {_, g} -> length(g) >= required end) do
+      {result, _} -> result
+      nil -> hd(results)
+    end
   end
 
-  defp local_delete(key, idx, partition) do
-    Storage.delete(key, partition)
-    Replicator.replicate(idx, :delete, key)
-    :ok
+  ## ── Private — forwarding helpers ─────────────────────────────────────────────
+
+  defp forward(fun_name, args, order) do
+    {primary, _} = Manager.get_replicas(order)
+
+    Logger.debug(fn ->
+      "super_cache, router, forwarding #{fun_name} → primary #{inspect(primary)}"
+    end)
+
+    safe_erpc(primary, __MODULE__, fun_name, args)
   end
 
-  defp local_delete_match(pattern, idx, partition) do
-    Storage.delete_match(pattern, partition)
-    Replicator.replicate(idx, :delete_match, pattern)
-    :ok
-  end
-
-  defp local_delete_all(idx, partition) do
-    Storage.delete_all(partition)
-    Replicator.replicate(idx, :delete_all, nil)
-    :ok
-  end
-
-  ## Private — forwarding ───────────────────────────────────────────────────────
-
-  defp forward_sync!(target, fun, args, timeout) do
+  defp safe_erpc(target, mod, fun, args) do
     try do
-      :erpc.call(target, __MODULE__, fun, args, timeout)
+      :erpc.call(target, mod, fun, args, @erpc_timeout)
     catch
-      :error, {:erpc, :timeout} ->
-        raise RuntimeError,
-          "super_cache, router, timeout forwarding #{fun} to #{inspect(target)}"
-      :error, {:erpc, reason} ->
-        raise RuntimeError,
-          "super_cache, router, erpc #{fun} to #{inspect(target)} failed: #{inspect(reason)}"
+      kind, reason ->
+        Logger.warning(
+          "super_cache, router, erpc #{inspect(fun)} failed → #{inspect(target)}: " <>
+            inspect({kind, reason})
+        )
+
+        {:error, {kind, reason}}
     end
   end
 
-  defp forward_concurrent(remote_groups, fun, args, timeout) do
-    remote_groups
-    |> Enum.map(fn {target, _pairs} ->
-      Task.async(fn ->
-        try do
-          {:ok, :erpc.call(target, __MODULE__, fun, args, timeout)}
-        catch
-          :error, {:erpc, :timeout} ->
-            Logger.warning("super_cache, router, timeout on #{fun} to #{inspect(target)}")
-            {:error, target, :timeout}
-          :error, {:erpc, reason} ->
-            Logger.warning("super_cache, router, #{fun} on #{inspect(target)}: #{inspect(reason)}")
-            {:error, target, reason}
-        end
-      end)
-    end)
-    |> Task.await_many(timeout + 1_000)
-    :ok
+  ## ── Private — partition resolution ──────────────────────────────────────────
+
+  defp primary?(order) do
+    {primary, _} = Manager.get_replicas(order)
+    primary == node()
   end
 
-  ## Private — instrumentation ──────────────────────────────────────────────────
-
-  # Wrap `fun` in a monotonic timer and push both a call counter and a
-  # latency sample to Metrics.  Errors are re-raised after being counted.
-  defp timed(op, fun) do
-    t0 = System.monotonic_time(:microsecond)
-
-    try do
-      result = fun.()
-      elapsed = System.monotonic_time(:microsecond) - t0
-      Metrics.increment({:api, op}, :calls)
-      Metrics.push_latency({:api_latency_us, op}, elapsed)
-      result
-    rescue
-      err ->
-        elapsed = System.monotonic_time(:microsecond) - t0
-        Metrics.increment({:api, op}, :calls)
-        Metrics.increment({:api, op}, :errors)
-        Metrics.push_latency({:api_latency_us, op}, elapsed)
-        reraise err, __STACKTRACE__
-    end
+  defp get_partition_order(data) do
+    data |> Config.get_partition!() |> Partition.get_partition_order()
   end
 
-  ## Private — helpers ──────────────────────────────────────────────────────────
+  # Returns ETS table atoms — used by local reads and scans.
+  defp resolve_partitions(:_), do: Partition.get_all_partition() |> List.flatten()
+  defp resolve_partitions(data), do: [Partition.get_partition(data)]
 
-  defp resolve(data) do
-    partition_data = Config.get_partition!(data)
-    idx            = Partition.get_partition_order(partition_data)
-    partition      = Partition.get_partition_by_idx(idx)
-    {idx, partition}
+  # Returns integer partition orders — used by routed / fan-out operations.
+  defp resolve_partition_orders(:_) do
+    num = Config.get_config(:num_partition, Partition.get_schedulers())
+    Enum.to_list(0..(num - 1))
   end
 
-  defp partitions_with_idx(:_) do
-    Enum.map(0..(Partition.get_num_partition() - 1), fn idx ->
-      {idx, Partition.get_partition_by_idx(idx)}
-    end)
-  end
-
-  defp partitions_with_idx(partition_data) do
-    idx = Partition.get_partition_order(partition_data)
-    [{idx, Partition.get_partition_by_idx(idx)}]
-  end
-
-  defp split_by_primary(pairs) do
-    me = node()
-
-    {local, remote} =
-      Enum.split_with(pairs, fn {idx, _} ->
-        {primary, _} = Manager.get_replicas(idx)
-        primary == me
-      end)
-
-    remote_groups =
-      remote
-      |> Enum.group_by(fn {idx, _} ->
-        {primary, _} = Manager.get_replicas(idx)
-        primary
-      end)
-      |> Enum.to_list()
-
-    {local, remote_groups}
-  end
-
-  defp maybe_apply_read_opts(result, _data, _opts), do: result
-
-  defp quorum_read(key, local_partition, primary, replicas) do
-    all_nodes = Enum.uniq([primary | replicas])
-    me        = node()
-
-    all_nodes
-    |> Enum.map(fn n ->
-      Task.async(fn ->
-        if n == me do
-          {n, Storage.get(key, local_partition)}
-        else
-          try do
-            {n, :erpc.call(n, Storage, :get, [key, local_partition], 3_000)}
-          catch
-            _, _ -> {n, :error}
-          end
-        end
-      end)
-    end)
-    |> Task.await_many(4_000)
-    |> Enum.reject(fn {_, r} -> r == :error end)
-    |> Enum.frequencies_by(fn {_, v} -> v end)
-    |> Enum.max_by(fn {_, count} -> count end, fn -> {[], 0} end)
-    |> elem(0)
+  defp resolve_partition_orders(data) do
+    [Partition.get_partition_order(data)]
   end
 end
