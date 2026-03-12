@@ -2,6 +2,7 @@ defmodule SuperCache.Internal.Stream do
   @moduledoc false
 
   require Logger
+  require SuperCache.Log
 
   alias SuperCache.Internal.Queue
 
@@ -11,7 +12,7 @@ defmodule SuperCache.Internal.Stream do
         q
       end,
       fn queue ->
-        Logger.debug(fn -> "get data from queue" end)
+        SuperCache.Log.debug(fn -> "get data from queue" end)
         {Queue.get(queue), queue}
       end,
       fn _queue ->
@@ -28,6 +29,6 @@ defmodule SuperCache.Internal.Stream do
 
   def push(data) do
     SuperCache.put(data)
-    Logger.debug(fn -> "pushed #{inspect(data)} to cache" end)
+    SuperCache.Log.debug(fn -> "pushed #{inspect(data)} to cache" end)
   end
 end

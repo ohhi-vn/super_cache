@@ -4,6 +4,7 @@ defmodule SuperCache.Partition.Holder do
   use GenServer, restart: :transient, shutdown: 1_000
 
   require Logger
+  require SuperCache.Log
 
   alias SuperCache.Config
   alias :ets, as: Ets
@@ -81,7 +82,7 @@ defmodule SuperCache.Partition.Holder do
   end
 
   def handle_call({:set_num_partition, num}, _from, %{table_name: table_name} = state) do
-    Logger.debug("super_cache, partition holder, update num of partitions, #{inspect num}")
+    SuperCache.Log.debug("super_cache, partition holder, update num of partitions, #{inspect num}")
     Ets.insert(table_name, {:num_partition, :config, num})
 
     {:reply, :ok, state}
@@ -90,7 +91,7 @@ defmodule SuperCache.Partition.Holder do
   def handle_call( {:set_partition, order} , _from, %{table_name: table_name} = state) do
     prefix = Config.get_config(:table_prefix)
     partition = String.to_atom("#{prefix}_#{order}")
-    Logger.debug(fn -> "super_cache, partition holder, add partition #{inspect partition} for order #{order}" end)
+    SuperCache.Log.debug(fn -> "super_cache, partition holder, add partition #{inspect partition} for order #{order}" end)
     Ets.insert(table_name, {order, partition})
 
     {:reply,  :ok, state}

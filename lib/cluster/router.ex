@@ -40,6 +40,7 @@ defmodule SuperCache.Cluster.Router do
   """
 
   require Logger
+  require SuperCache.Log
 
   alias SuperCache.{Config, Partition, Storage}
   alias SuperCache.Cluster.{Manager, Replicator, ThreePhaseCommit}
@@ -404,7 +405,7 @@ defmodule SuperCache.Cluster.Router do
   defp forward(fun_name, args, order) do
     {primary, _} = Manager.get_replicas(order)
 
-    Logger.debug(fn ->
+    SuperCache.Log.debug(fn ->
       "super_cache, router, forwarding #{fun_name} → primary #{inspect(primary)}"
     end)
 

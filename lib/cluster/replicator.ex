@@ -10,6 +10,7 @@ defmodule SuperCache.Cluster.Replicator do
   """
 
   require Logger
+  require SuperCache.Log
 
   alias SuperCache.{Storage, Partition}
   alias SuperCache.Cluster.{Manager, ThreePhaseCommit, Metrics}
@@ -91,7 +92,7 @@ defmodule SuperCache.Cluster.Replicator do
         :erpc.call(target_node, __MODULE__, :apply_op,
                    [partition_idx, :put, batch], 10_000)
 
-        Logger.debug(fn ->
+        SuperCache.Log.debug(fn ->
           "super_cache, replicator, partition #{partition_idx} batch #{batch_num} " <>
           "(#{length(batch)} records) → #{inspect(target_node)}"
         end)

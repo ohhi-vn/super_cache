@@ -33,6 +33,7 @@ defmodule SuperCache.Cluster.TxnRegistry do
   use GenServer, restart: :permanent, shutdown: 5_000
 
   require Logger
+  require SuperCache.Log
 
   @table __MODULE__
 

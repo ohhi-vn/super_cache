@@ -8,6 +8,7 @@ defmodule SuperCache.Buffer do
   """
 
   require Logger
+  require SuperCache.Log
 
   alias SuperCache.Internal.Queue, as: LibQueue
   alias SuperCache.Internal.Stream, as: LibStream
@@ -78,13 +79,13 @@ defmodule SuperCache.Buffer do
   defp buffer_atom(id), do: String.to_atom("SuperCache.Buffer_#{id}")
 
   defp start_stream(name) do
-    Logger.debug(fn -> "super_cache, buffer, starting stream #{inspect(name)}" end)
+    SuperCache.Log.debug(fn -> "super_cache, buffer, starting stream #{inspect(name)}" end)
 
     name
     |> LibQueue.start()
     |> LibStream.create()
     |> LibStream.make_stream_pipe()
 
-    Logger.debug(fn -> "super_cache, buffer, stream #{inspect(name)} finished" end)
+    SuperCache.Log.debug(fn -> "super_cache, buffer, stream #{inspect(name)} finished" end)
   end
 end

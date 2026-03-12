@@ -4,11 +4,12 @@ defmodule SuperCache.MixProject do
   def project do
     [
       app: :super_cache,
-      version: "0.11.0",
+      version: "1.0.0",
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       config_path: "config/config.exs",
+      elixirc_paths: elixirc_paths(Mix.env()),
 
       # Docs
       name: "SuperCache",
@@ -51,7 +52,7 @@ defmodule SuperCache.MixProject do
   end
 
   defp description() do
-    "A library for cache data in memory. The library uses partition storage for a can cache service a mount of requests. Support distributed cache (experiment)"
+    "An in-memory caching library using tuples as the core data type, with support for structs, key/value pairs, queues, and stacks. Includes experimental distributed caching."
   end
 
   defp package() do
@@ -122,4 +123,7 @@ defmodule SuperCache.MixProject do
       ]
     ]
   end
+
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_),     do: ["lib"]
 end

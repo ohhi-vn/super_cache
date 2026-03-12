@@ -41,6 +41,8 @@ defmodule SuperCache.Storage do
   """
 
   require Logger
+  require SuperCache.Log
+
   alias SuperCache.{EtsHolder, Config}
   alias :ets, as: Ets
 
@@ -65,12 +67,12 @@ defmodule SuperCache.Storage do
   """
   @spec stop(pos_integer) :: :ok
   def stop(num) when is_integer(num) and num > 0 do
-    Logger.debug(fn -> "super_cache, storage, stopping #{num} partition(s)" end)
+    SuperCache.Log.debug(fn -> "super_cache, storage, stopping #{num} partition(s)" end)
     prefix = Config.get_config(:table_prefix)
 
     for order <- 0..(num - 1) do
       name = table_name(prefix, order)
-      Logger.debug(fn -> "super_cache, storage, deleting #{inspect(name)}" end)
+      SuperCache.Log.debug(fn -> "super_cache, storage, deleting #{inspect(name)}" end)
       EtsHolder.delete_table(EtsHolder, name)
     end
 
@@ -158,7 +160,7 @@ defmodule SuperCache.Storage do
   """
   @spec get_by_match(atom | tuple, atom | :ets.tid()) :: [[any]]
   def get_by_match(pattern, partition) do
-    Logger.debug(fn -> "super_cache, storage, match pattern=#{inspect(pattern)}" end)
+    SuperCache.Log.debug(fn -> "super_cache, storage, match pattern=#{inspect(pattern)}" end)
     Ets.match(partition, pattern)
   end
 
@@ -174,7 +176,7 @@ defmodule SuperCache.Storage do
   """
   @spec get_by_match_object(atom | tuple, atom | :ets.tid()) :: [tuple]
   def get_by_match_object(pattern, partition) do
-    Logger.debug(fn -> "super_cache, storage, match_object pattern=#{inspect(pattern)}" end)
+    SuperCache.Log.debug(fn -> "super_cache, storage, match_object pattern=#{inspect(pattern)}" end)
     Ets.match_object(partition, pattern)
   end
 
@@ -231,7 +233,7 @@ defmodule SuperCache.Storage do
   """
   @spec delete_match(atom | tuple, atom | :ets.tid()) :: true
   def delete_match(pattern, partition) do
-    Logger.debug(fn -> "super_cache, storage, delete_match pattern=#{inspect(pattern)}" end)
+    SuperCache.Log.debug(fn -> "super_cache, storage, delete_match pattern=#{inspect(pattern)}" end)
     Ets.match_delete(partition, pattern)
   end
 

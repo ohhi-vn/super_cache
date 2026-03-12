@@ -47,6 +47,7 @@ defmodule SuperCache.Cluster.Manager do
   use GenServer, restart: :permanent, shutdown: 5_000
 
   require Logger
+  require SuperCache.Log
 
   alias SuperCache.{Config, Partition}
 
@@ -148,7 +149,7 @@ defmodule SuperCache.Cluster.Manager do
       true ->
         # Remote node connected but SuperCache not yet started on it.
         # Schedule a retry so we pick it up once Bootstrap completes there.
-        Logger.debug(fn ->
+        SuperCache.Log.debug(fn ->
           "super_cache, cluster_manager, #{inspect(new_node)} connected but not ready — will retry"
         end)
 
@@ -206,7 +207,7 @@ defmodule SuperCache.Cluster.Manager do
         delay = min(500 * attempt, 5_000)
         Process.send_after(self(), {:retry_node_up, target, attempt + 1}, delay)
 
-        Logger.debug(fn ->
+        SuperCache.Log.debug(fn ->
           "super_cache, cluster_manager, #{inspect(target)} still not ready " <>
             "(attempt #{attempt}) — retrying in #{delay} ms"
         end)

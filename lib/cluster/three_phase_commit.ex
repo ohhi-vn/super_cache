@@ -26,6 +26,7 @@ defmodule SuperCache.Cluster.ThreePhaseCommit do
   """
 
   require Logger
+  require SuperCache.Log
 
   alias SuperCache.{Storage, Partition}
   alias SuperCache.Cluster.{Manager, TxnRegistry}
@@ -56,7 +57,7 @@ defmodule SuperCache.Cluster.ThreePhaseCommit do
       txn_id = generate_txn_id()
       TxnRegistry.register(txn_id, partition_idx, ops, replicas)
 
-      Logger.debug(fn ->
+      SuperCache.Log.debug(fn ->
         "super_cache, 3pc, txn=#{txn_id} starting on #{length(replicas)} replica(s)"
       end)
 
@@ -99,7 +100,7 @@ defmodule SuperCache.Cluster.ThreePhaseCommit do
     case validate_ops(ops) do
       :ok ->
         TxnRegistry.register(txn_id, partition_idx, ops, [])
-        Logger.debug(fn -> "super_cache, 3pc, txn=#{txn_id} VOTE_YES" end)
+        SuperCache.Log.debug(fn -> "super_cache, 3pc, txn=#{txn_id} VOTE_YES" end)
         :vote_yes
 
       {:error, reason} ->
@@ -112,7 +113,7 @@ defmodule SuperCache.Cluster.ThreePhaseCommit do
   @spec handle_pre_commit(txn_id) :: :ack_pre_commit
   def handle_pre_commit(txn_id) do
     TxnRegistry.mark_pre_committed(txn_id)
-    Logger.debug(fn -> "super_cache, 3pc, txn=#{txn_id} ACK_PRE_COMMIT" end)
+    SuperCache.Log.debug(fn -> "super_cache, 3pc, txn=#{txn_id} ACK_PRE_COMMIT" end)
     :ack_pre_commit
   end
 
@@ -138,7 +139,7 @@ defmodule SuperCache.Cluster.ThreePhaseCommit do
       end
 
     apply_local(partition_idx, ops)
-    Logger.debug(fn -> "super_cache, 3pc, txn=#{txn_id} ACK_COMMIT" end)
+    SuperCache.Log.debug(fn -> "super_cache, 3pc, txn=#{txn_id} ACK_COMMIT" end)
     :ack_commit
   end
 
@@ -146,7 +147,7 @@ defmodule SuperCache.Cluster.ThreePhaseCommit do
   @spec handle_abort(txn_id) :: :ack_abort
   def handle_abort(txn_id) do
     TxnRegistry.remove(txn_id)
-    Logger.debug(fn -> "super_cache, 3pc, txn=#{txn_id} ABORTED on #{node()}" end)
+    SuperCache.Log.debug(fn -> "super_cache, 3pc, txn=#{txn_id} ABORTED on #{node()}" end)
     :ack_abort
   end
 

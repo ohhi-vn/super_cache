@@ -1,4 +1,6 @@
 import Config
 
+# Print only warnings and errors during test
+config :logger, level: :warning
 
-config :logger, level: :debug
+config :super_cache, debug_log: false

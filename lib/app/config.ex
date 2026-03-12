@@ -2,6 +2,7 @@ defmodule SuperCache.Config do
   @moduledoc false
   use GenServer, restart: :permanent, shutdown: 5_000
   require Logger
+  require SuperCache.Log
 
   defexception message: "incorrect config"
 
@@ -80,7 +81,7 @@ defmodule SuperCache.Config do
 
   @impl true
   def init(opts) do
-    Logger.debug(fn -> "super_cache, config, starting with opts: #{inspect(opts)}" end)
+    SuperCache.Log.debug(fn -> "super_cache, config, starting with opts: #{inspect(opts)}" end)
 
     state =
       Enum.reduce(opts, %{}, fn {k, v}, acc -> Map.put(acc, k, v) end)

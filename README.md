@@ -88,7 +88,7 @@ by adding `super_cache` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:super_cache, "~> 0.8"}
+    {:super_cache, "~> 1.0"}
   ]
 end
 ```
@@ -230,7 +230,7 @@ config :super_cache,
   ]
 ```
 
-manual start cache
+Manual start cache in distributed mode. Go to `SuperCache.Cluster.Bootstrap` for more details.
 
 ```elixir
 SuperCache.Cluster.Bootstrap.start!(
