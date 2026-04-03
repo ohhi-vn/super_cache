@@ -117,13 +117,13 @@ defmodule SuperCache.Cluster.Replicator do
 
   defp do_replicate(:async, partition_idx, op_name, op_arg, replicas) do
     spawn(fn ->
-      Enum.each(replicas, &apply_remote(&1, partition_idx, op_name, op_arg))
+      :erpc.multicall(replicas, __MODULE__, :apply_op, [partition_idx, op_name, op_arg], 5_000)
     end)
     :ok
   end
 
   defp do_replicate(:sync, partition_idx, op_name, op_arg, replicas) do
-    Enum.each(replicas, &apply_remote(&1, partition_idx, op_name, op_arg))
+    :erpc.multicall(replicas, __MODULE__, :apply_op, [partition_idx, op_name, op_arg], 5_000)
     :ok
   end
 
@@ -142,5 +142,72 @@ defmodule SuperCache.Cluster.Replicator do
           "#{inspect({kind, reason})}"
         )
     end
+  end
+
+  @doc """
+  Replicate a batch of operations to all replicas in a single `:erpc` call.
+
+  Dramatically reduces network overhead for bulk writes by sending all
+  operations in one message instead of one message per operation.
+
+  ## Example
+
+      Replicator.replicate_batch(2, :put, [
+        {{:user, 1}, {:user, 1, "Alice"}},
+        {{:user, 2}, {:user, 2, "Bob"}}
+      ])
+  """
+  @spec replicate_batch(non_neg_integer, atom, [any]) :: :ok | {:error, term}
+  def replicate_batch(partition_idx, op_name, op_args) when is_list(op_args) do
+    {_primary, replicas} = Manager.get_replicas(partition_idx)
+
+    if replicas == [] do
+      :ok
+    else
+      t0 = System.monotonic_time(:microsecond)
+
+      result =
+        try do
+          :erpc.multicall(replicas, __MODULE__, :apply_op_batch,
+                          [partition_idx, op_name, op_args], 10_000)
+          :ok
+        rescue
+          err -> {:error, err}
+        end
+
+      elapsed = System.monotonic_time(:microsecond) - t0
+      metric_key = :"replicate_batch_#{SuperCache.Config.get_config(:replication_mode, :async)}"
+      Metrics.increment({:api, metric_key}, :calls)
+      Metrics.push_latency({:api_latency_us, metric_key}, elapsed)
+
+      case result do
+        {:error, _} -> Metrics.increment({:api, metric_key}, :errors)
+        _ -> :ok
+      end
+
+      result
+    end
+  end
+
+  @doc """
+  Apply a batch of replicated operations on this node.
+
+  Called via `:erpc` from the primary — **do NOT call directly**.
+  """
+  @spec apply_op_batch(non_neg_integer, atom, [any]) :: :ok
+  def apply_op_batch(partition_idx, op_name, op_args) do
+    partition = Partition.get_partition_by_idx(partition_idx)
+
+    Enum.each(op_args, fn op_arg ->
+      case {op_name, op_arg} do
+        {:put, {key, record}} -> Storage.put({key, record}, partition)
+        {:put, record} when is_tuple(record) -> Storage.put(record, partition)
+        {:delete, key} -> Storage.delete(key, partition)
+        {:delete_match, pattern} -> Storage.delete_match(pattern, partition)
+        {:delete_all, _} -> Storage.delete_all(partition)
+      end
+    end)
+
+    :ok
   end
 end

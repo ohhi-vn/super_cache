@@ -1,123 +1,247 @@
 defmodule SuperCache.EtsHolder do
-  @moduledoc false
+  @moduledoc """
+  GenServer owner for ETS tables managed by SuperCache.
 
-  use GenServer, restart: :permanent
+  This process owns the lifecycle of all ETS tables used for caching.
+  Tables are created, tracked, and deleted through this GenServer so that:
+
+  - Tables are automatically deleted when the owning process terminates.
+  - The table list is tracked in state for clean shutdown.
+  - Creation respects the global `:key_pos` and `:table_type` configuration.
+
+  ## Lifecycle
+
+  1. `start_link/1` starts the GenServer under a given name.
+  2. `new_table/2` creates a new ETS table with the configured options.
+  3. `delete_table/2` removes a specific table.
+  4. On shutdown, `terminate/2` deletes all tracked tables to free memory.
+
+  ## Configuration
+
+  Tables are created with the following options:
+  - `:keypos` — derived from `Config.get_config(:key_pos) + 1` (ETS is 1-based)
+  - `:table_type` — from `Config.get_config(:table_type)` (`:set`, `:bag`, etc.)
+  - `:public` — accessible by any process
+  - `:named_table` — addressable by atom name
+  - `{:write_concurrency, true}` — optimised for concurrent writes
+  - `{:read_concurrency, true}` — optimised for concurrent reads
+  - `{:decentralized_counters, true}` — reduces contention on counter updates
+
+  ## Example
+
+      {:ok, pid} = SuperCache.EtsHolder.start_link(:my_ets_owner)
+      SuperCache.EtsHolder.new_table(:my_ets_owner, :my_cache_table)
+      :ets.insert(:my_cache_table, {:key, "value"})
+      SuperCache.EtsHolder.stop(:my_ets_owner)
+  """
+
+  use GenServer, restart: :permanent, shutdown: 5_000
+
   require Logger
   require SuperCache.Log
 
-  alias :ets, as: Ets
   alias SuperCache.Config
 
-  @spec start_link(any) :: :ignore | {:error, any} | {:ok, pid}
+  ## ── Public API ───────────────────────────────────────────────────────────────
+
   @doc """
-  Starts the GenServer owner Ets table. The process start then go to hibernate.
+  Starts the EtsHolder GenServer under the given `name`.
+
+  The process enters hibernation when idle to reduce memory footprint.
   """
-  def start_link(name) do
+  @spec start_link(atom()) :: :ignore | {:error, any} | {:ok, pid()}
+  def start_link(name) when is_atom(name) do
     GenServer.start_link(__MODULE__, name, name: name)
   end
 
   @doc """
-  Stops GenServer and delete Ets table.
+  Stops the EtsHolder GenServer and deletes all owned ETS tables.
+
+  The `terminate/2` callback ensures all tracked tables are removed
+  before the process exits.
   """
-  @spec stop(atom | pid | {atom, any} | {:via, atom, any}) :: any
+  @spec stop(atom() | pid() | {atom(), any()} | {:via, atom(), any()}) :: :ok
   def stop(name) do
-   GenServer.call(name, :stop)
-  end
-
-  def new_table(name, table_name) do
-    SuperCache.Log.debug(fn -> "super_cache, ets holder, new Ets table: #{inspect table_name}" end)
-    GenServer.call(name, {:new, table_name})
-  end
-
-  def delete_table(name, table_name) do
-    SuperCache.Log.debug(fn -> "super_cache, ets holder, delete Ets table: #{inspect table_name}" end)
-    GenServer.call(name, {:delete, table_name})
+    GenServer.call(name, :stop, 5_000)
   end
 
   @doc """
-  Clear all data in Ets table of GenServer.
+  Creates a new named ETS table owned by this GenServer.
+
+  The table is configured according to the current `:key_pos` and
+  `:table_type` settings in `SuperCache.Config`.
+
+  ## Examples
+
+      SuperCache.EtsHolder.new_table(:my_owner, :users_cache)
+      # => :ok
   """
+  @spec new_table(atom(), atom()) :: :ok
+  def new_table(name, table_name) do
+    SuperCache.Log.debug(fn ->
+      "super_cache, ets_holder, creating table #{inspect(table_name)}"
+    end)
 
+    GenServer.call(name, {:new, table_name}, 5_000)
+  end
+
+  @doc """
+  Deletes a specific ETS table tracked by this GenServer.
+
+  The table is removed from ETS and from the internal tracking list.
+  No-op if the table is not found.
+  """
+  @spec delete_table(atom(), atom()) :: :ok
+  def delete_table(name, table_name) do
+    SuperCache.Log.debug(fn ->
+      "super_cache, ets_holder, deleting table #{inspect(table_name)}"
+    end)
+
+    GenServer.call(name, {:delete, table_name}, 5_000)
+  end
+
+  @doc """
+  Clears all records from a specific ETS table without deleting it.
+
+  Returns `true` on success.
+  """
+  @spec clean(atom(), atom()) :: true
   def clean(name, table_name) do
-    SuperCache.Log.debug(fn -> "super_cache, ets holder, clean Ets table: #{inspect table_name}" end)
-    GenServer.call(name, {:clean, table_name})
+    SuperCache.Log.debug(fn ->
+      "super_cache, ets_holder, clearing table #{inspect(table_name)}"
+    end)
+
+    GenServer.call(name, {:clean, table_name}, 5_000)
   end
 
+  @doc """
+  Clears all records from all tracked ETS tables.
+
+  Tables are not deleted — only their contents are removed.
+  """
+  @spec clean_all(atom()) :: :ok
   def clean_all(name) do
-    GenServer.call(name, :clean_all)
+    GenServer.call(name, :clean_all, 5_000)
   end
 
-  ### Callbacks ###
+  ## ── GenServer callbacks ──────────────────────────────────────────────────────
 
   @impl true
   def init(name) do
-    {:ok, %{my_name: name, table_list: []}}
+    Logger.info("super_cache, ets_holder, started (name: #{inspect(name)})")
+    {:ok, %{my_name: name, table_list: []}, :hibernate}
   end
 
   @impl true
   def handle_call(:stop, _from, state) do
+    Logger.info(
+      "super_cache, ets_holder, stopping (#{length(state.table_list)} table(s) tracked)"
+    )
+
     {:stop, :normal, :ok, state}
   end
 
   def handle_call({:clean, table_name}, _from, state) do
-    {:reply,  clean_up(table_name), state}
+    {:reply, clean_up(table_name), state}
   end
 
-  def handle_call(:clean_all, _from, state) do
-    tables = Map.get(state, :table_list)
+  def handle_call(:clean_all, _from, %{table_list: tables} = state) do
+    count = length(tables)
 
-    for table <- tables do
+    Enum.each(tables, fn table ->
+      SuperCache.Log.debug(fn ->
+        "super_cache, ets_holder, clearing #{inspect(table)}"
+      end)
+
       clean_up(table)
-    end
+    end)
 
+    Logger.info("super_cache, ets_holder, cleared #{count} table(s)")
     {:reply, :ok, state}
   end
 
-  def handle_call({:new, table_name}, _from, state) do
+  def handle_call({:new, table_name}, _from, %{table_list: tables} = state) do
     create_table(table_name)
 
-    {:reply, :ok,  Map.update!(state, :table_list, &([table_name | &1]))}
+    Logger.info(
+      "super_cache, ets_holder, table #{inspect(table_name)} created (#{length(tables) + 1} total)"
+    )
+
+    {:reply, :ok, %{state | table_list: [table_name | tables]}, :hibernate}
   end
 
-  def handle_call({:delete, table_name}, _from, state) do
-    Ets.delete(table_name)
+  def handle_call({:delete, table_name}, _from, %{table_list: tables} = state) do
+    if table_name in tables do
+      :ets.delete(table_name)
+      Logger.info("super_cache, ets_holder, table #{inspect(table_name)} deleted")
+    else
+      SuperCache.Log.debug(fn ->
+        "super_cache, ets_holder, table #{inspect(table_name)} not found, skipping delete"
+      end)
+    end
 
-    {:reply, :ok, Map.update!(state, :table_list, &List.delete(&1, table_name))}
+    {:reply, :ok, %{state | table_list: List.delete(tables, table_name)}, :hibernate}
   end
 
   @impl true
-  def terminate(reason, %{my_name: name} = state) do
-    SuperCache.Log.debug(fn -> "super_cache, ets holder, #{inspect name} shutdown with reason #{inspect reason}" end)
-    tables = Map.get(state, :table_list)
-
-    for table <- tables do
-      Ets.delete(table)
-    end
-
-    :stop
+  def handle_cast(_msg, state) do
+    {:noreply, state, :hibernate}
   end
 
-  ## Private functions ##
+  @impl true
+  def handle_info(_msg, state) do
+    {:noreply, state, :hibernate}
+  end
+
+  @impl true
+  def terminate(reason, %{my_name: name, table_list: tables}) do
+    count = length(tables)
+
+    Logger.info(
+      "super_cache, ets_holder, #{inspect(name)} shutting down " <>
+        "(reason: #{inspect(reason)}, cleaning up #{count} table(s))"
+    )
+
+    Enum.each(tables, fn table ->
+      try do
+        :ets.delete(table)
+      catch
+        kind, err ->
+          Logger.warning(
+            "super_cache, ets_holder, failed to delete table #{inspect(table)}: " <>
+              inspect({kind, err})
+          )
+      end
+    end)
+
+    :ok
+  end
+
+  def terminate(_reason, _state) do
+    :ok
+  end
+
+  ## ── Private helpers ──────────────────────────────────────────────────────────
 
   defp clean_up(table_name) do
     :ets.delete_all_objects(table_name)
   end
 
   defp create_table(table_name) do
-    SuperCache.Log.debug(fn -> "super_cache, ets holder, create cache table for #{inspect table_name}" end)
-    key_pos = Config.get_config(:key_pos) + 1 # key order of ets start from 1
-    table_type = Config.get_config(:table_type)
+    key_pos = Config.get_config(:key_pos, 0) + 1
+    table_type = Config.get_config(:table_type, :set)
 
-    ^table_name = Ets.new(table_name, [
-      table_type,
-      :public,
-      :named_table,
-      {:keypos, key_pos},
-      {:write_concurrency, true},
-      {:read_concurrency, true},
-      {:decentralized_counters, true}
-    ])
-    Logger.info("super_cache, ets holder, table #{inspect table_name} is created")
+    ^table_name =
+      :ets.new(table_name, [
+        table_type,
+        :public,
+        :named_table,
+        {:keypos, key_pos},
+        {:write_concurrency, true},
+        {:read_concurrency, true},
+        {:decentralized_counters, true}
+      ])
+
     :ok
   end
 end

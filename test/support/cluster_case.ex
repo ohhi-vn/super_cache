@@ -307,7 +307,9 @@ defmodule SuperCache.ClusterCase do
           partition =
             :erpc.call(n, SuperCache.Partition, :get_partition_by_idx, [idx], 5_000)
 
-          :erpc.call(n, SuperCache.Storage, :delete_all, [partition], 5_000)
+          if partition do
+            :erpc.call(n, SuperCache.Storage, :delete_all, [partition], 5_000)
+          end
         catch
           kind, reason ->
             Logger.debug(

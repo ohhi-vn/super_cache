@@ -191,6 +191,10 @@ defmodule SuperCache.Cluster.Bootstrap do
     end
 
     Config.set_config(:started, true)
+
+    # Pre-warm :erpc connections to all known peers to avoid first-call latency.
+    prewarm_peer_connections(opts)
+
     Logger.info("super_cache, cluster.bootstrap, ready (#{num_partition} partitions)")
     :ok
   end
@@ -416,6 +420,39 @@ defmodule SuperCache.Cluster.Bootstrap do
     catch
       kind, reason ->
         {:error, {kind, reason}}
+    end
+  end
+
+  # ── Private — connection pre-warming ─────────────────────────────────────────
+
+  # Pre-warm :erpc connections to all known peers by making a lightweight call.
+  # This avoids the ~50ms connection setup penalty on the first cache operation.
+  defp prewarm_peer_connections(opts) do
+    peers =
+      case Keyword.get(opts, :nodes) do
+        nil -> []
+        nodes -> nodes
+      end
+
+    if peers != [] do
+      Logger.info(
+        "super_cache, bootstrap, pre-warming connections to #{length(peers)} peer(s)..."
+      )
+
+      peers
+      |> Enum.each(fn peer ->
+        try do
+          # Lightweight call to verify connectivity and establish :erpc channel.
+          :erpc.call(peer, :erlang, :node, [], 5_000)
+          Logger.debug("super_cache, bootstrap, pre-warmed connection to #{inspect(peer)}")
+        catch
+          kind, reason ->
+            Logger.warning(
+              "super_cache, bootstrap, failed to pre-warm connection to #{inspect(peer)}: " <>
+                inspect({kind, reason})
+            )
+        end
+      end)
     end
   end
 

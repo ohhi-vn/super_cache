@@ -90,6 +90,30 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
     :replication_mode
   ]
 
+
+  # ── Setup ─────────────────────────────────────────────────────────────────────
+
+  setup_all do
+    # Ensure the primary node starts with the correct config so that
+    # isolated peer tests do not fail due to stale config from previous runs.
+    if SuperCache.started?() do
+      SuperCache.Cluster.Bootstrap.stop()
+      Process.sleep(100)
+    end
+
+    SuperCache.Cluster.Bootstrap.start!(@base_opts)
+
+    on_exit(fn ->
+      try do
+        SuperCache.Cluster.Bootstrap.stop()
+      catch
+        :exit, _ -> :ok
+      end
+    end)
+
+    :ok
+  end
+
   # ── Peer lifecycle helpers ────────────────────────────────────────────────────
 
   # Start a `:peer` node, load the SuperCache code path, start the OTP app,

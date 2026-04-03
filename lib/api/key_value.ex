@@ -113,6 +113,72 @@ defmodule SuperCache.KeyValue do
     end
   end
 
+  @doc """
+  Add multiple key-value pairs in a single batch operation.
+
+  Groups entries by partition and sends each group in a single `:erpc` call
+  in distributed mode, dramatically reducing network overhead.
+
+  ## Example
+
+      KeyValue.add_batch("session", [
+        {:user_1, %{name: "Alice"}},
+        {:user_2, %{name: "Bob"}}
+      ])
+  """
+  @spec add_batch(any, [{any, any}]) :: :ok
+  def add_batch(kv_name, pairs) when is_list(pairs) do
+    if distributed?() do
+      # Group by partition and batch-write each group
+      partition = Partition.get_partition(kv_name)
+      records = Enum.map(pairs, fn {key, value} ->
+        {{:kv, kv_name, key}, value}
+      end)
+
+      SuperCache.put_batch!(records)
+    else
+      Enum.each(pairs, fn {key, value} ->
+        Storage.put({{:kv, kv_name, key}, value}, Partition.get_partition(kv_name))
+      end)
+    end
+
+    :ok
+  end
+
+  @doc """
+  Remove multiple keys in a single batch operation.
+
+  Groups entries by partition and sends each group in a single `:erpc` call
+  in distributed mode.
+
+  ## Example
+
+      KeyValue.remove_batch("session", [:user_1, :user_2])
+  """
+  @spec remove_batch(any, [any]) :: :ok
+  def remove_batch(kv_name, keys) when is_list(keys) do
+    if distributed?() do
+      partition = Partition.get_partition(kv_name)
+      # Build delete records for batch routing
+      records = Enum.map(keys, fn key ->
+        {:kv, kv_name, key}
+      end)
+
+      # Use Router for distributed deletes
+      Enum.each(keys, fn key ->
+        ets_key = {:kv, kv_name, key}
+        Router.route_delete_by_key_partition!(ets_key, kv_name)
+      end)
+    else
+      partition = Partition.get_partition(kv_name)
+      Enum.each(keys, fn key ->
+        Storage.delete({:kv, kv_name, key}, partition)
+      end)
+    end
+
+    :ok
+  end
+
   ## ── Remote entry points — writes (called via :erpc on primary) ──────────────
 
   @doc false

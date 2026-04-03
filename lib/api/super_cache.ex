@@ -148,6 +148,39 @@ defmodule SuperCache do
     end
   end
 
+
+  @doc """
+  Store multiple tuples in a single batch operation.
+
+  In distributed mode, groups data by partition and sends each group
+  in a single `:erpc` call, dramatically reducing network overhead.
+
+  ## Example
+
+      SuperCache.put_batch!([
+        {:user, 1, "Alice"},
+        {:user, 2, "Bob"},
+        {:session, "tok1", :active}
+      ])
+  """
+  @spec put_batch!([tuple]) :: :ok
+  def put_batch!(data_list) when is_list(data_list) do
+    if distributed?() do
+      Router.route_put_batch!(data_list)
+    else
+      partition = data_list
+        |> hd()
+        |> Config.get_partition!()
+        |> Partition.get_partition()
+
+      Enum.each(data_list, fn data ->
+        Storage.put(data, partition)
+      end)
+    end
+
+    :ok
+  end
+
   ## ── Read ─────────────────────────────────────────────────────────────────────
 
   @doc """
@@ -377,11 +410,125 @@ defmodule SuperCache do
 
   ## ── Stats ────────────────────────────────────────────────────────────────────
 
-  @doc "Return local ETS record counts per partition plus `:total`."
+  # ── Direct partition access (zero routing overhead) ──────────────────────────
+
+  @doc """
+  Store a tuple directly into a specific partition table.
+
+  Bypasses all routing and partition resolution. Use when you already know
+  the target partition table atom (e.g., from a previous `get_partition/1`
+  call or from `Partition.get_all_partition/0`).
+
+  ## Examples
+
+      partition = SuperCache.Partition.get_partition(:my_key)
+      SuperCache.put_partition!({:user, 1, "Alice"}, partition)
+  """
+  @spec put_partition!(tuple, atom | :ets.tid()) :: true
+  def put_partition!(data, partition) when is_tuple(data) do
+    Storage.put(data, partition)
+  end
+
+  @doc """
+  Retrieve records directly from a specific partition table.
+
+  Bypasses all routing and partition resolution. The `key` is looked up
+  directly in the given `partition` table.
+
+  ## Examples
+
+      partition = SuperCache.Partition.get_partition(:my_key)
+      SuperCache.get_partition!(:user, partition)
+      # => [{:user, 1, "Alice"}]
+  """
+  @spec get_partition!(any, atom | :ets.tid()) :: [tuple]
+  def get_partition!(key, partition) do
+    Storage.get(key, partition)
+  end
+
+  @doc """
+  Delete a record directly from a specific partition table.
+
+  Bypasses all routing and partition resolution.
+
+  ## Examples
+
+      partition = SuperCache.Partition.get_partition(:my_key)
+      SuperCache.delete_partition!(:user, partition)
+      # => :ok
+  """
+  @spec delete_partition!(any, atom | :ets.tid()) :: :ok
+  def delete_partition!(key, partition) do
+    Storage.delete(key, partition)
+    :ok
+  end
+
+  @doc """
+  Store a tuple directly into a partition by its integer index.
+
+  This is the fastest write path — bypasses routing, partition resolution,
+  and even the partition table name lookup. The index is used directly to
+  fetch the cached partition table atom from `persistent_term`.
+
+  ## Examples
+
+      # Get partition index once
+      idx = SuperCache.Partition.get_partition_order(:my_key)
+
+      # Use it for fast repeated access
+      SuperCache.put_partition_by_idx!({:user, 1, "Alice"}, idx)
+  """
+  @spec put_partition_by_idx!(tuple, non_neg_integer) :: true
+  def put_partition_by_idx!(data, partition_idx) when is_tuple(data) and is_integer(partition_idx) do
+    partition = Partition.get_partition_by_idx(partition_idx)
+    Storage.put(data, partition)
+  end
+
+  @doc """
+  Retrieve records directly from a partition by its integer index.
+
+  This is the fastest read path — bypasses routing, partition resolution,
+  and partition table name lookup.
+
+  ## Examples
+
+      idx = SuperCache.Partition.get_partition_order(:my_key)
+      SuperCache.get_partition_by_idx!(:user, idx)
+      # => [{:user, 1, "Alice"}]
+  """
+  @spec get_partition_by_idx!(any, non_neg_integer) :: [tuple]
+  def get_partition_by_idx!(key, partition_idx) when is_integer(partition_idx) do
+    partition = Partition.get_partition_by_idx(partition_idx)
+    Storage.get(key, partition)
+  end
+
+  @doc """
+  Delete a record directly from a partition by its integer index.
+
+  This is the fastest delete path — bypasses routing and partition resolution.
+
+  ## Examples
+
+      idx = SuperCache.Partition.get_partition_order(:my_key)
+      SuperCache.delete_partition_by_idx!(:user, idx)
+      # => :ok
+  """
+  @spec delete_partition_by_idx!(any, non_neg_integer) :: :ok
+  def delete_partition_by_idx!(key, partition_idx) when is_integer(partition_idx) do
+    partition = Partition.get_partition_by_idx(partition_idx)
+    Storage.delete(key, partition)
+    :ok
+  end
+
+  ## ── Stats ────────────────────────────────────────────────────────────────────
+
+  @doc """
+  Return local ETS record counts per partition plus `:total`.
+  """
   @spec stats() :: keyword
   def stats() do
     entries = Partition.get_all_partition() |> List.flatten() |> Enum.map(&Storage.stats/1)
-    total   = Enum.reduce(entries, 0, fn {_, n}, acc -> acc + n end)
+    total = Enum.reduce(entries, 0, fn {_, n}, acc -> acc + n end)
     entries ++ [total: total]
   end
 

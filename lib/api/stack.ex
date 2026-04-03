@@ -1,5 +1,3 @@
-
-
 # =============================================================================
 # lib/super_cache/stack.ex
 #
@@ -106,9 +104,15 @@ defmodule SuperCache.Stack do
     case Storage.take({:stack, :counter, stack_name}, partition) do
       [] ->
         case Storage.get({:stack, :updating, stack_name}, partition) do
-          [] -> local_init(stack_name); local_push(partition, stack_name, value)
-          _  -> :erlang.yield();        local_push(partition, stack_name, value)
+          [] ->
+            local_init(stack_name)
+            local_push(partition, stack_name, value)
+
+          _ ->
+            :erlang.yield()
+            local_push(partition, stack_name, value)
         end
+
       [{_, counter}] ->
         next = counter + 1
         Storage.put({{:stack, :updating, stack_name}, true}, partition)
@@ -123,16 +127,31 @@ defmodule SuperCache.Stack do
     case Storage.take({:stack, :counter, stack_name}, partition) do
       [] ->
         case Storage.get({:stack, :updating, stack_name}, partition) do
-          [] -> default
-          _  -> :erlang.yield(); local_pop(partition, stack_name, default)
+          [] ->
+            default
+
+          _ ->
+            :erlang.yield()
+            local_pop(partition, stack_name, default)
         end
-      [{_, 0}] -> default
+
+      [{_, 0}] ->
+        default
+
       [{_, counter}] ->
         Storage.put({{:stack, :updating, stack_name}, true}, partition)
-        value = case Storage.take({:stack, stack_name, counter}, partition) do
-          []       -> Storage.put({{:stack, :counter, stack_name}, 0}, partition); default
-          [{_, v}] -> Storage.put({{:stack, :counter, stack_name}, counter - 1}, partition); v
-        end
+
+        value =
+          case Storage.take({:stack, stack_name, counter}, partition) do
+            [] ->
+              Storage.put({{:stack, :counter, stack_name}, 0}, partition)
+              default
+
+            [{_, v}] ->
+              Storage.put({{:stack, :counter, stack_name}, counter - 1}, partition)
+              v
+          end
+
         Storage.delete({:stack, :updating, stack_name}, partition)
         value
     end
@@ -142,18 +161,28 @@ defmodule SuperCache.Stack do
     case Storage.take({:stack, :counter, stack_name}, partition) do
       [] ->
         case Storage.get({:stack, :updating, stack_name}, partition) do
-          [] -> []
-          _  -> :erlang.yield(); local_drain(partition, stack_name)
+          [] ->
+            []
+
+          _ ->
+            :erlang.yield()
+            local_drain(partition, stack_name)
         end
-      [{_, 0}] -> []
+
+      [{_, 0}] ->
+        []
+
       [{_, counter}] ->
         Storage.put({{:stack, :updating, stack_name}, true}, partition)
-        values = Enum.reduce(counter..1//-1, [], fn x, acc ->
-          case Storage.take({:stack, stack_name, x}, partition) do
-            []       -> acc
-            [{_, v}] -> [v | acc]
-          end
-        end)
+
+        values =
+          Enum.reduce(counter..1//-1, [], fn x, acc ->
+            case Storage.take({:stack, stack_name, x}, partition) do
+              [] -> acc
+              [{_, v}] -> [v | acc]
+            end
+          end)
+
         Storage.put({{:stack, :counter, stack_name}, 0}, partition)
         Storage.delete({:stack, :updating, stack_name}, partition)
         values
@@ -167,8 +196,9 @@ defmodule SuperCache.Stack do
 
   defp local_count(stack_name) do
     part = Partition.get_partition(stack_name)
+
     case Storage.get({:stack, :counter, stack_name}, part) do
-      []             -> 0
+      [] -> 0
       [{_, counter}] -> counter
     end
   end
@@ -179,14 +209,24 @@ defmodule SuperCache.Stack do
     case Storage.get({:stack, :counter, stack_name}, partition) do
       [] ->
         case Storage.get({:stack, :updating, stack_name}, partition) do
-          [] -> dist_init(stack_name); dist_do_push(partition, stack_name, value)
-          _  -> :erlang.yield();       dist_do_push(partition, stack_name, value)
+          [] ->
+            dist_init(stack_name)
+            dist_do_push(partition, stack_name, value)
+
+          _ ->
+            :erlang.yield()
+            dist_do_push(partition, stack_name, value)
         end
+
       [{_, counter}] ->
         next = counter + 1
         lock(partition, stack_name)
-        ops = [{:put, {{:stack, :counter, stack_name}, next}},
-               {:put, {{:stack, stack_name, next}, value}}]
+
+        ops = [
+          {:put, {{:stack, :counter, stack_name}, next}},
+          {:put, {{:stack, stack_name, next}, value}}
+        ]
+
         apply_write(idx(stack_name), partition, ops)
         unlock(partition, stack_name)
         true
@@ -197,19 +237,33 @@ defmodule SuperCache.Stack do
     case Storage.get({:stack, :counter, stack_name}, partition) do
       [] ->
         case Storage.get({:stack, :updating, stack_name}, partition) do
-          [] -> default
-          _  -> :erlang.yield(); dist_do_pop(partition, stack_name, default)
+          [] ->
+            default
+
+          _ ->
+            :erlang.yield()
+            dist_do_pop(partition, stack_name, default)
         end
-      [{_, 0}] -> default
+
+      [{_, 0}] ->
+        default
+
       [{_, counter}] ->
         lock(partition, stack_name)
-        {value, ops} = case Storage.get({:stack, stack_name, counter}, partition) do
-          [] ->
-            {default, [{:put, {{:stack, :counter, stack_name}, 0}}]}
-          [{_, v}] ->
-            {v, [{:delete, {:stack, stack_name, counter}},
-                 {:put, {{:stack, :counter, stack_name}, counter - 1}}]}
-        end
+
+        {value, ops} =
+          case Storage.get({:stack, stack_name, counter}, partition) do
+            [] ->
+              {default, [{:put, {{:stack, :counter, stack_name}, 0}}]}
+
+            [{_, v}] ->
+              {v,
+               [
+                 {:delete, {:stack, stack_name, counter}},
+                 {:put, {{:stack, :counter, stack_name}, counter - 1}}
+               ]}
+          end
+
         apply_write(idx(stack_name), partition, ops)
         unlock(partition, stack_name)
         value
@@ -218,16 +272,23 @@ defmodule SuperCache.Stack do
 
   defp dist_do_drain(partition, stack_name) do
     case Storage.get({:stack, :counter, stack_name}, partition) do
-      []        -> []
-      [{_, 0}]  -> []
+      [] ->
+        []
+
+      [{_, 0}] ->
+        []
+
       [{_, counter}] ->
         lock(partition, stack_name)
-        {values, del_ops} = Enum.reduce(1..counter, {[], []}, fn x, {vs, ops} ->
-          case Storage.get({:stack, stack_name, x}, partition) do
-            []       -> {vs, ops}
-            [{_, v}] -> {[v | vs], [{:delete, {:stack, stack_name, x}} | ops]}
-          end
-        end)
+
+        {values, del_ops} =
+          Enum.reduce(1..counter, {[], []}, fn x, {vs, ops} ->
+            case Storage.get({:stack, stack_name, x}, partition) do
+              [] -> {vs, ops}
+              [{_, v}] -> {[v | vs], [{:delete, {:stack, stack_name, x}} | ops]}
+            end
+          end)
+
         reset_ops = [{:put, {{:stack, :counter, stack_name}, 0}}]
         apply_write(idx(stack_name), partition, del_ops ++ reset_ops)
         unlock(partition, stack_name)
@@ -242,64 +303,104 @@ defmodule SuperCache.Stack do
 
   ## ── Private — shared helpers ─────────────────────────────────────────────────
 
-  defp lock(partition, name),   do: Storage.put({{:stack, :updating, name}, true}, partition)
+  defp lock(partition, name), do: Storage.put({{:stack, :updating, name}, true}, partition)
   defp unlock(partition, name), do: Storage.delete({:stack, :updating, name}, partition)
 
   defp distributed?(), do: Config.get_config(:cluster, :local) == :distributed
-  defp idx(name),      do: Partition.get_partition_order(name)
+  defp idx(name), do: Partition.get_partition_order(name)
 
   defp apply_write(idx, partition, ops) do
     case Manager.replication_mode() do
       :strong ->
         case ThreePhaseCommit.commit(idx, ops) do
-          :ok         -> :ok
-          {:error, r} -> Logger.error("super_cache, stack, 3pc failed: #{inspect(r)}"); {:error, r}
+          :ok ->
+            :ok
+
+          {:error, r} ->
+            Logger.error("super_cache, stack, 3pc failed: #{inspect(r)}")
+            {:error, r}
         end
+
       _ ->
         Enum.each(ops, fn
-          {:put, r}          -> Storage.put(r, partition);          Replicator.replicate(idx, :put, r)
-          {:delete, k}       -> Storage.delete(k, partition);       Replicator.replicate(idx, :delete, k)
-          {:delete_match, p} -> Storage.delete_match(p, partition); Replicator.replicate(idx, :delete_match, p)
-          {:delete_all, _}   -> Storage.delete_all(partition);      Replicator.replicate(idx, :delete_all, nil)
+          {:put, r} ->
+            Storage.put(r, partition)
+            Replicator.replicate(idx, :put, r)
+
+          {:delete, k} ->
+            Storage.delete(k, partition)
+            Replicator.replicate(idx, :delete, k)
+
+          {:delete_match, p} ->
+            Storage.delete_match(p, partition)
+            Replicator.replicate(idx, :delete_match, p)
+
+          {:delete_all, _} ->
+            Storage.delete_all(partition)
+            Replicator.replicate(idx, :delete_all, nil)
         end)
+
         :ok
     end
   end
 
   defp route_write(stack_name, fun, args) do
     {primary, _} = Manager.get_replicas(idx(stack_name))
+
     if primary == node() do
       apply(__MODULE__, fun, args)
     else
-      SuperCache.Log.debug(fn -> "super_cache, stack #{inspect(stack_name)}, fwd #{fun} → #{inspect(primary)}" end)
+      SuperCache.Log.debug(fn ->
+        "super_cache, stack #{inspect(stack_name)}, fwd #{fun} → #{inspect(primary)}"
+      end)
+
       :erpc.call(primary, __MODULE__, fun, args, 5_000)
     end
   end
 
   defp route_read(stack_name, fun, args, opts) do
     mode = Keyword.get(opts, :read_mode, :local)
-    eff  = if mode == :local and not has_partition?(stack_name), do: :primary, else: mode
+    eff = if mode == :local and not has_partition?(stack_name), do: :primary, else: mode
+
     case eff do
-      :local   -> apply(__MODULE__, fun, args)
+      :local ->
+        apply(__MODULE__, fun, args)
+
       :primary ->
         {primary, _} = Manager.get_replicas(idx(stack_name))
-        if primary == node(), do: apply(__MODULE__, fun, args),
-        else: :erpc.call(primary, __MODULE__, fun, args, 5_000)
+
+        if primary == node(),
+          do: apply(__MODULE__, fun, args),
+          else: :erpc.call(primary, __MODULE__, fun, args, 5_000)
+
       :quorum ->
         {primary, replicas} = Manager.get_replicas(idx(stack_name))
-        results = [primary | replicas]
-        |> Task.async_stream(
-          fn n when n == node() -> apply(__MODULE__, fun, args)
-             n                  -> :erpc.call(n, __MODULE__, fun, args, 5_000)
-          end,
-          timeout: 5_000, on_timeout: :kill_task
-        )
-        |> Enum.flat_map(fn {:ok, r} -> [r]; _ -> [] end)
+
+        results =
+          [primary | replicas]
+          |> Task.async_stream(
+            fn
+              n when n == node() -> apply(__MODULE__, fun, args)
+              n -> :erpc.call(n, __MODULE__, fun, args, 5_000)
+            end,
+            timeout: 5_000,
+            on_timeout: :kill_task
+          )
+          |> Enum.flat_map(fn
+            {:ok, r} -> [r]
+            _ -> []
+          end)
+
         majority = div(length(results), 2) + 1
+
         case Enum.find(Enum.frequencies(results), fn {_, c} -> c >= majority end) do
-          {result, _} -> result
-          nil -> if primary == node(), do: apply(__MODULE__, fun, args),
-                 else: :erpc.call(primary, __MODULE__, fun, args, 5_000)
+          {result, _} ->
+            result
+
+          nil ->
+            if primary == node(),
+              do: apply(__MODULE__, fun, args),
+              else: :erpc.call(primary, __MODULE__, fun, args, 5_000)
         end
     end
   end
