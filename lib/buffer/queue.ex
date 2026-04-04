@@ -32,9 +32,6 @@ defmodule SuperCache.Internal.Queue do
   require Logger
   require SuperCache.Log
 
-  @default_timeout 5_000
-  @max_retries 3
-
   ## API
 
   @doc """
@@ -95,8 +92,6 @@ defmodule SuperCache.Internal.Queue do
 
   ## Private helpers
 
-
-
   # There are waiting readers and buffered data – deliver immediately.
   defp loop([reader | rest_readers], [_ | _] = data, status, name) do
     SuperCache.Log.debug(fn ->
@@ -108,9 +103,9 @@ defmodule SuperCache.Internal.Queue do
   end
 
   # There are waiting readers but no data, and we are stopping – notify them.
-  defp loop([_ | _] = readers, [], :stop, name) do
+  defp loop([_ | _] = readers, [], :stop, _name) do
     Enum.each(readers, &send(&1, :stop))
-    SuperCache.Log.debug(fn -> "super_cache, internal_queue, #{inspect(name)} stopped" end)
+    SuperCache.Log.debug(fn -> "super_cache, internal_queue, queue stopped" end)
   end
 
   defp loop(readers, data, status, name) do

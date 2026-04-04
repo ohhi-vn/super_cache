@@ -374,18 +374,20 @@ defmodule SuperCache.Cluster.Router do
 
   ## ── Private — single-partition read dispatcher ───────────────────────────────
 
+  # Read-your-writes: upgrade :local to :primary if this process recently
+  # wrote to this partition.  Prevents stale reads immediately after a write.
+  @doc false
+  @spec resolve_read_mode(atom, non_neg_integer) :: atom
+  def resolve_read_mode(:local, order) do
+    if ryw_recent?(order), do: :primary, else: :local
+  end
+
+  def resolve_read_mode(mode, _order), do: mode
+
   # Local: read directly from the local ETS table — no network hop.
   defp do_read(:local, order, op, arg) do
     local_read(order, op, arg)
   end
-
-  # Read-your-writes: upgrade :local to :primary if this process recently
-  # wrote to this partition.  Prevents stale reads immediately after a write.
-  defp resolve_read_mode(:local, order) do
-    if ryw_recent?(order), do: :primary, else: :local
-  end
-
-  defp resolve_read_mode(mode, _order), do: mode
 
   # Primary: if this node IS the primary, read locally; otherwise forward to
   # the primary via :erpc passing only plain terms (op atom + arg), never
@@ -514,22 +516,6 @@ defmodule SuperCache.Cluster.Router do
     end)
   end
 
-  ## ── Private — quorum resolution ─────────────────────────────────────────────
-
-  # Return the result agreed on by ≥ ⌈n/2⌉ nodes; fall back to the first
-  # result when no strict majority exists.
-  defp quorum_merge([]), do: []
-
-  defp quorum_merge(results) do
-    total = length(results)
-    required = div(total, 2) + 1
-
-    case Enum.group_by(results, & &1) |> Enum.find(fn {_, g} -> length(g) >= required end) do
-      {result, _} -> result
-      nil -> hd(results)
-    end
-  end
-
   ## ── Private — forwarding helpers ─────────────────────────────────────────────
 
   defp forward(fun_name, args, order) do
@@ -565,9 +551,9 @@ defmodule SuperCache.Cluster.Router do
 
   # ── Read-your-writes tracking ────────────────────────────────────────────────
 
-  # Record that the calling process wrote to `order`.  Prunes expired entries
-  # lazily to keep the table small.
-  defp track_write(order) do
+  @doc false
+  @spec track_write(non_neg_integer) :: :ok
+  def track_write(order) do
     ensure_ryw_table()
     now = System.monotonic_time(:millisecond)
     expiry = now + @ryw_ttl_ms
@@ -581,13 +567,15 @@ defmodule SuperCache.Cluster.Router do
     end
   end
 
-  # Check if the calling process wrote to `order` within the TTL window.
-  defp ryw_recent?(order) do
+  @doc false
+  @spec ryw_recent?(non_neg_integer) :: boolean
+  def ryw_recent?(order) do
     ensure_ryw_table()
 
     case :ets.lookup(@ryw_table, {self(), order}) do
       [{_, expiry}] ->
         now = System.monotonic_time(:millisecond)
+
         if now <= expiry do
           true
         else
@@ -600,8 +588,9 @@ defmodule SuperCache.Cluster.Router do
     end
   end
 
-  # Create the per-node RYW tracking table if it doesn't exist.
-  defp ensure_ryw_table() do
+  @doc false
+  @spec ensure_ryw_table() :: :ok
+  def ensure_ryw_table() do
     case :ets.info(@ryw_table) do
       :undefined ->
         :ets.new(@ryw_table, [
@@ -617,24 +606,22 @@ defmodule SuperCache.Cluster.Router do
     end
   end
 
-  # Remove expired entries for the calling process.
-  defp prune_ryw(now) do
-    match_spec = [{{{:_, :"$1"}, :"$2"}, [{:"<", :"$2", now}], [true]}]
+  @doc false
+  @spec prune_ryw(integer) :: :ok
+  def prune_ryw(now) do
+    # Iterate over all entries and delete expired ones for the calling process.
+    # Using foldl avoids the complexity of match specs with tuple keys.
+    :ets.foldl(
+      fn {{pid, order}, expiry}, acc ->
+        if pid == self() and expiry < now do
+          :ets.delete(@ryw_table, {pid, order})
+        end
 
-    @ryw_table
-    |> :ets.select(match_spec)
-    |> Enum.each(fn {pid, order} ->
-      :ets.delete(@ryw_table, {pid, order})
-    end)
-  end
-
-  # Fast path: read primary node from persistent_term cache.
-  # Returns nil if the partition map hasn't been built yet.
-  @compile {:inline, primary_node: 1}
-  defp primary_node(order) do
-    case Manager.get_replicas(order) do
-      {primary, _} -> primary
-    end
+        acc
+      end,
+      :ok,
+      @ryw_table
+    )
   end
 
   defp get_partition_order(data) do

@@ -59,6 +59,7 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
   require Logger
 
   @moduletag :cluster
+  @moduletag :sequential
   @moduletag timeout: 120_000
 
   alias SuperCache.Cluster.{Bootstrap, Manager}
@@ -94,6 +95,9 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
   # ── Setup ─────────────────────────────────────────────────────────────────────
 
   setup_all do
+    # Start the full application to ensure all dependencies are available
+    {:ok, _} = Application.ensure_all_started(:super_cache)
+
     # Ensure the primary node starts with the correct config so that
     # isolated peer tests do not fail due to stale config from previous runs.
     if SuperCache.started?() do
@@ -404,7 +408,7 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
       {peer, node} = start_blank_peer(:val_sync)
       on_exit(fn -> stop_peer(peer) end)
 
-      opts = Keyword.put(@base_opts, :replication_mode, :sync)
+      opts = @base_opts  # must match primary node config
       assert :ok == :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
     end
 
@@ -412,7 +416,7 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
       {peer, node} = start_blank_peer(:val_strong)
       on_exit(fn -> stop_peer(peer) end)
 
-      opts = Keyword.put(@base_opts, :replication_mode, :strong)
+      opts = @base_opts  # must match primary node config
       assert :ok == :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
     end
 
@@ -944,7 +948,7 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
     end
 
     test "raises ArgumentError when :replication_mode differs" do
-      wrong_opts = Keyword.put(@base_opts, :replication_mode, :sync)
+      wrong_opts = @base_opts  # must match primary node config
       msg = assert_mismatch_raises(:mm_rm_seed, :mm_rm_joiner, wrong_opts)
 
       assert msg =~ "replication_mode",

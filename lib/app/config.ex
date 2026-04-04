@@ -219,9 +219,9 @@ defmodule SuperCache.Config do
   end
 
   def handle_call(:clear, _from, state) do
-    count = map_size(state)
+    _count = map_size(state)
     Enum.each(Map.keys(@fast_keys), fn k -> :persistent_term.erase({__MODULE__, k}) end)
-    SuperCache.Log.debug(fn -> "super_cache, config, cleared #{count} key(s)" end)
+    SuperCache.Log.debug(fn -> "super_cache, config, cleared #{_count} key(s)" end)
     {:reply, :ok, %{}}
   end
 

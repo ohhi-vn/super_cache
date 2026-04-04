@@ -1,5 +1,5 @@
 defmodule SuperCacheTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
   doctest SuperCache
 
   @data {:a, :b, :c, 1, "Hello"}

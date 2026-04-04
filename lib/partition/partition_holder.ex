@@ -87,12 +87,6 @@ defmodule SuperCache.Partition.Holder do
       SuperCache.Partition.Holder.get(0)
       # => :"SuperCache.Storage.Ets_0"
   """
-  @doc """
-  Look up the ETS table atom for a given partition index.
-
-  Reads directly from the ETS table — no GenServer hop.
-  Returns `nil` if the index has not been registered yet (e.g., during startup races).
-  """
   @spec get(non_neg_integer) :: atom | nil
   def get(order) when is_integer(order) and order >= 0 do
     case :ets.lookup(__MODULE__, order) do

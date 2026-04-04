@@ -1,4 +1,3 @@
-
 defmodule SuperCache.KeyValue do
   @moduledoc """
   In-memory key-value namespaces backed by SuperCache ETS partitions.
@@ -29,7 +28,7 @@ defmodule SuperCache.KeyValue do
   require SuperCache.Log
 
   alias SuperCache.{Storage, Partition, Config}
-  alias SuperCache.Cluster.{Manager, Replicator, ThreePhaseCommit}
+  alias SuperCache.Cluster.{Manager, Replicator, ThreePhaseCommit, Router}
 
   ## ── Public API ──────────────────────────────────────────────────────────────
 
@@ -50,7 +49,7 @@ defmodule SuperCache.KeyValue do
       route_read(kv_name, :local_get, [kv_name, key, default], opts)
     else
       case Storage.get({:kv, kv_name, key}, Partition.get_partition(kv_name)) do
-        []           -> default
+        [] -> default
         [{_, value}] -> value
       end
     end
@@ -94,7 +93,9 @@ defmodule SuperCache.KeyValue do
 
   @spec remove(any, any) :: :ok
   def remove(kv_name, key) do
-    SuperCache.Log.debug(fn -> "super_cache, kv #{inspect(kv_name)}, remove key=#{inspect(key)}" end)
+    SuperCache.Log.debug(fn ->
+      "super_cache, kv #{inspect(kv_name)}, remove key=#{inspect(key)}"
+    end)
 
     if distributed?() do
       route_write(kv_name, :local_delete, [kv_name, key])
@@ -128,18 +129,17 @@ defmodule SuperCache.KeyValue do
   """
   @spec add_batch(any, [{any, any}]) :: :ok
   def add_batch(kv_name, pairs) when is_list(pairs) do
-    if distributed?() do
-      # Group by partition and batch-write each group
-      partition = Partition.get_partition(kv_name)
-      records = Enum.map(pairs, fn {key, value} ->
+    records =
+      Enum.map(pairs, fn {key, value} ->
         {{:kv, kv_name, key}, value}
       end)
 
+    if distributed?() do
       SuperCache.put_batch!(records)
     else
-      Enum.each(pairs, fn {key, value} ->
-        Storage.put({{:kv, kv_name, key}, value}, Partition.get_partition(kv_name))
-      end)
+      # Single :ets.insert with list — ~10-100x faster than per-item calls.
+      partition = Partition.get_partition(kv_name)
+      Storage.put(records, partition)
     end
 
     :ok
@@ -158,21 +158,16 @@ defmodule SuperCache.KeyValue do
   @spec remove_batch(any, [any]) :: :ok
   def remove_batch(kv_name, keys) when is_list(keys) do
     if distributed?() do
-      partition = Partition.get_partition(kv_name)
-      # Build delete records for batch routing
-      records = Enum.map(keys, fn key ->
-        {:kv, kv_name, key}
-      end)
-
-      # Use Router for distributed deletes
       Enum.each(keys, fn key ->
         ets_key = {:kv, kv_name, key}
         Router.route_delete_by_key_partition!(ets_key, kv_name)
       end)
     else
+      # Single partition lookup + direct :ets.delete — avoids Storage wrapper overhead.
       partition = Partition.get_partition(kv_name)
+
       Enum.each(keys, fn key ->
-        Storage.delete({:kv, kv_name, key}, partition)
+        :ets.delete(partition, {:kv, kv_name, key})
       end)
     end
 
@@ -183,22 +178,25 @@ defmodule SuperCache.KeyValue do
 
   @doc false
   def local_put(kv_name, key, value) do
-    apply_write(idx(kv_name), Partition.get_partition(kv_name),
-                [{:put, {{:kv, kv_name, key}, value}}])
+    apply_write(idx(kv_name), Partition.get_partition(kv_name), [
+      {:put, {{:kv, kv_name, key}, value}}
+    ])
+
     true
   end
 
   @doc false
   def local_delete(kv_name, key) do
-    apply_write(idx(kv_name), Partition.get_partition(kv_name),
-                [{:delete, {:kv, kv_name, key}}])
+    apply_write(idx(kv_name), Partition.get_partition(kv_name), [{:delete, {:kv, kv_name, key}}])
     :ok
   end
 
   @doc false
   def local_delete_all(kv_name) do
-    apply_write(idx(kv_name), Partition.get_partition(kv_name),
-                [{:delete_match, {{:kv, kv_name, :_}, :_}}])
+    apply_write(idx(kv_name), Partition.get_partition(kv_name), [
+      {:delete_match, {{:kv, kv_name, :_}, :_}}
+    ])
+
     :ok
   end
 
@@ -207,7 +205,7 @@ defmodule SuperCache.KeyValue do
   @doc false
   def local_get(kv_name, key, default) do
     case Storage.get({:kv, kv_name, key}, Partition.get_partition(kv_name)) do
-      []           -> default
+      [] -> default
       [{_, value}] -> value
     end
   end
@@ -233,7 +231,7 @@ defmodule SuperCache.KeyValue do
   ## ── Private ──────────────────────────────────────────────────────────────────
 
   defp distributed?(), do: Config.get_config(:cluster, :local) == :distributed
-  defp idx(name),      do: Partition.get_partition_order(name)
+  defp idx(name), do: Partition.get_partition_order(name)
 
   defp do_match(kv_name) do
     Storage.get_by_match_object({{:kv, kv_name, :_}, :_}, Partition.get_partition(kv_name))
@@ -243,34 +241,52 @@ defmodule SuperCache.KeyValue do
     case Manager.replication_mode() do
       :strong ->
         ThreePhaseCommit.commit(idx, ops)
+
       _ ->
         Enum.each(ops, fn
-          {:put, r}           -> Storage.put(r, partition);           Replicator.replicate(idx, :put, r)
-          {:delete, k}        -> Storage.delete(k, partition);        Replicator.replicate(idx, :delete, k)
-          {:delete_match, p}  -> Storage.delete_match(p, partition);  Replicator.replicate(idx, :delete_match, p)
-          {:delete_all, _}    -> Storage.delete_all(partition);       Replicator.replicate(idx, :delete_all, nil)
+          {:put, r} ->
+            Storage.put(r, partition)
+            Replicator.replicate(idx, :put, r)
+
+          {:delete, k} ->
+            Storage.delete(k, partition)
+            Replicator.replicate(idx, :delete, k)
+
+          {:delete_match, p} ->
+            Storage.delete_match(p, partition)
+            Replicator.replicate(idx, :delete_match, p)
+
+          {:delete_all, _} ->
+            Storage.delete_all(partition)
+            Replicator.replicate(idx, :delete_all, nil)
         end)
+
         :ok
     end
   end
 
   defp route_write(kv_name, fun, args) do
     {primary, _} = Manager.get_replicas(idx(kv_name))
+
     if primary == node() do
       apply(__MODULE__, fun, args)
     else
-      SuperCache.Log.debug(fn -> "super_cache, kv #{inspect(kv_name)}, fwd #{fun} → #{inspect(primary)}" end)
+      SuperCache.Log.debug(fn ->
+        "super_cache, kv #{inspect(kv_name)}, fwd #{fun} → #{inspect(primary)}"
+      end)
+
       :erpc.call(primary, __MODULE__, fun, args, 5_000)
     end
   end
 
   defp route_read(kv_name, fun, args, opts) do
     mode = Keyword.get(opts, :read_mode, :local)
-    eff  = if mode == :local and not has_partition?(kv_name), do: :primary, else: mode
+    eff = if mode == :local and not has_partition?(kv_name), do: :primary, else: mode
+
     case eff do
-      :local   -> apply(__MODULE__, fun, args)
+      :local -> apply(__MODULE__, fun, args)
       :primary -> read_from_primary(kv_name, fun, args)
-      :quorum  -> read_from_quorum(kv_name, fun, args)
+      :quorum -> read_from_quorum(kv_name, fun, args)
     end
   end
 
@@ -281,25 +297,74 @@ defmodule SuperCache.KeyValue do
 
   defp read_from_primary(kv_name, fun, args) do
     {primary, _} = Manager.get_replicas(idx(kv_name))
-    if primary == node(), do: apply(__MODULE__, fun, args),
-    else: :erpc.call(primary, __MODULE__, fun, args, 5_000)
+
+    if primary == node(),
+      do: apply(__MODULE__, fun, args),
+      else: :erpc.call(primary, __MODULE__, fun, args, 5_000)
   end
 
   defp read_from_quorum(kv_name, fun, args) do
     {primary, replicas} = Manager.get_replicas(idx(kv_name))
-    results = [primary | replicas]
-    |> Task.async_stream(
-      fn n when n == node() -> apply(__MODULE__, fun, args)
-         n                  -> :erpc.call(n, __MODULE__, fun, args, 5_000)
-      end,
-      timeout: 5_000, on_timeout: :kill_task
-    )
-    |> Enum.flat_map(fn {:ok, r} -> [r]; _ -> [] end)
-    majority = div(length(results), 2) + 1
-    case Enum.find(Enum.frequencies(results), fn {_, c} -> c >= majority end) do
-      {result, _} -> result
-      nil -> if primary == node(), do: apply(__MODULE__, fun, args),
-             else: :erpc.call(primary, __MODULE__, fun, args, 5_000)
+    nodes = [primary | replicas]
+    total = length(nodes)
+    required = div(total, 2) + 1
+
+    # Launch all reads as independent tasks for early termination.
+    tasks =
+      Enum.map(nodes, fn n ->
+        Task.async(fn ->
+          if n == node(),
+            do: apply(__MODULE__, fun, args),
+            else: :erpc.call(n, __MODULE__, fun, args, 5_000)
+        end)
+      end)
+
+    # Await tasks one-by-one, returning as soon as any result reaches majority.
+    # This avoids waiting for slow replicas once quorum is satisfied.
+    await_quorum(tasks, required, %{}, primary, fun, args)
+  end
+
+  # No tasks left — return most frequent result or fall back to primary.
+  defp await_quorum([], _required, counts, primary, fun, args) do
+    case map_max(counts) do
+      {result, _count} -> result
+      nil ->
+        if primary == node(),
+          do: apply(__MODULE__, fun, args),
+          else: :erpc.call(primary, __MODULE__, fun, args, 5_000)
     end
+  end
+
+  defp await_quorum([task | rest], required, counts, primary, fun, args) do
+    result =
+      case Task.yield(task, 5_000) || Task.shutdown(task, :brutal_kill) do
+        {:ok, val} -> val
+        _ -> nil
+      end
+
+    new_counts =
+      if result != nil do
+        Map.update(counts, result, 1, &(&1 + 1))
+      else
+        counts
+      end
+
+    # Check if any result has reached quorum — early termination.
+    if quorum_reached?(new_counts, required) do
+      Enum.each(rest, &Task.shutdown(&1, :brutal_kill))
+      {winner, _} = Enum.max_by(new_counts, fn {_, c} -> c end)
+      winner
+    else
+      await_quorum(rest, required, new_counts, primary, fun, args)
+    end
+  end
+
+  # Returns {result, count} for the most frequent result, or nil if map is empty.
+  defp map_max(counts) when map_size(counts) == 0, do: nil
+  defp map_max(counts), do: Enum.max_by(counts, fn {_, c} -> c end)
+
+  # True if any result has reached the required quorum count.
+  defp quorum_reached?(counts, required) do
+    Enum.any?(counts, fn {_, count} -> count >= required end)
   end
 end

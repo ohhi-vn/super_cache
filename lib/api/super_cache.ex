@@ -164,17 +164,22 @@ defmodule SuperCache do
       ])
   """
   @spec put_batch!([tuple]) :: :ok
+  def put_batch!([]), do: :ok
+
   def put_batch!(data_list) when is_list(data_list) do
     if distributed?() do
       Router.route_put_batch!(data_list)
     else
-      partition = data_list
-        |> hd()
-        |> Config.get_partition!()
-        |> Partition.get_partition()
-
-      Enum.each(data_list, fn data ->
-        Storage.put(data, partition)
+      # Route each record to its correct partition based on its own key.
+      # Group by partition to minimize ETS table switches.
+      data_list
+      |> Enum.group_by(fn data ->
+        data |> Config.get_partition!() |> Partition.get_partition()
+      end)
+      |> Enum.each(fn {partition, records} ->
+        Enum.each(records, fn data ->
+          Storage.put(data, partition)
+        end)
       end)
     end
 

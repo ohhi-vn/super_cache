@@ -1,5 +1,5 @@
 defmodule SuperCache.PartitionTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
 
   alias SuperCache.{Partition, Config}
 

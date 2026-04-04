@@ -1,5 +1,5 @@
 defmodule SuperCache.KeyValueTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
   doctest SuperCache
 
   alias SuperCache.KeyValue, as: KV

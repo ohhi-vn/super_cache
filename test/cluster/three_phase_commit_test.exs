@@ -62,6 +62,9 @@ defmodule SuperCache.Cluster.ThreePhaseCommitTest do
   # ── Unit-test group setup ─────────────────────────────────────────────────────
 
   setup_all do
+    # Start the full application to ensure all dependencies are available
+    {:ok, _} = Application.ensure_all_started(:super_cache)
+
     if SuperCache.started?(), do: SuperCache.Cluster.Bootstrap.stop()
     Process.sleep(50)
     SuperCache.Cluster.Bootstrap.start!(@cache_opts)
@@ -321,6 +324,7 @@ defmodule SuperCache.Cluster.ThreePhaseCommitTest do
 
   describe "3PC multi-node" do
     @moduletag :cluster
+  @moduletag :sequential
 
     setup do
       if node() == :nonode@nohost do

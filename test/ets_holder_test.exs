@@ -1,5 +1,5 @@
 defmodule SuperCache.EtsHolderTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
 
   alias SuperCache.EtsHolder
 

@@ -149,19 +149,13 @@ defmodule SuperCache.Buffer do
         idx = rem(:erlang.system_info(:scheduler_id) - 1, tuple_size(names_tuple))
         buffer_name = elem(names_tuple, idx)
 
-        case LibQueue.add(buffer_name, data) do
-          :ok ->
-            SuperCache.Log.debug(fn ->
-              "super_cache, buffer, enqueued to #{inspect(buffer_name)} (idx: #{idx})"
-            end)
+        LibQueue.add(buffer_name, data)
 
-            :ok
+        SuperCache.Log.debug(fn ->
+          "super_cache, buffer, enqueued to #{inspect(buffer_name)} (idx: #{idx})"
+        end)
 
-          {:error, :process_down} ->
-            Logger.warning("super_cache, buffer, buffer process #{inspect(buffer_name)} is down")
-
-            {:error, :process_down}
-        end
+        :ok
     end
   end
 

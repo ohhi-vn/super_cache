@@ -41,20 +41,24 @@ defmodule SuperCache.Application do
 
     children = [
       # Core config — must start first.
-      {SuperCache.Config, [key_pos: 0, partition_pos: 0]},
+      {SuperCache.Config,              [key_pos: 0, partition_pos: 0]},
       # Dynamic supervisor for user-spawned workers.
-      {SuperCache.Sup, []},
+      {SuperCache.Sup,                 []},
       # Partition registry.
-      {SuperCache.Partition.Holder, []},
+      {SuperCache.Partition.Holder,    []},
       # Owns the ETS data tables.
-      {SuperCache.EtsHolder, SuperCache.EtsHolder},
+      {SuperCache.EtsHolder,           SuperCache.EtsHolder},
       # Cluster components — always started; idle in local mode.
-      {SuperCache.Cluster.Manager, []},
+      {SuperCache.Cluster.Manager,     []},
       {SuperCache.Cluster.NodeMonitor, []},
       # 3PC transaction log — must start before Bootstrap.
       {SuperCache.Cluster.TxnRegistry, []},
+      # WAL for fast strong consistency — replaces heavy 3PC.
+      {SuperCache.Cluster.WAL, []},
       # Metrics store.
-      {SuperCache.Cluster.Metrics, []}
+      {SuperCache.Cluster.Metrics,     []},
+      # Health monitor — continuously checks cluster health.
+      {SuperCache.Cluster.HealthMonitor, []}
     ]
 
     opts = [strategy: :one_for_one, name: SuperCache.Supervisor]

@@ -2,6 +2,7 @@ defmodule SuperCache.ClusterTest do
   use ExUnit.Case, async: false
 
   @moduletag :cluster
+  @moduletag :sequential
   @moduletag timeout: 120_000
 
   alias SuperCache.Cluster.Manager

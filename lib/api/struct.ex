@@ -98,9 +98,9 @@ defmodule SuperCache.Struct do
   end
 
   @spec remove_all(map) :: {:ok, :removed} | {:error, any}
-  def remove_all(%{__struct__: struct_name} = struct) do
+  def remove_all(%{__struct__: _struct_name} = struct) do
     with {:ok, _key} <- get_key_field(struct) do
-      SuperCache.Log.debug(fn -> "super_cache, struct, remove_all #{inspect(struct_name)}" end)
+      SuperCache.Log.debug(fn -> "super_cache, struct, remove_all #{inspect(_struct_name)}" end)
 
       if distributed?() do
         case route_write(struct, :local_remove_all, [struct]) do

@@ -109,11 +109,9 @@ defmodule SuperCache.Log do
         end
       end
     else
-      quote do
-        if SuperCache.Log.enabled?() do
-          Logger.debug(unquote(chardata_or_fun))
-        end
-      end
+      # Compile-time elimination — expands to :ok with zero runtime overhead.
+      # No function call, no string building, no branch prediction miss.
+      quote do: :ok
     end
   end
 

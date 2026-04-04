@@ -1,5 +1,5 @@
 defmodule SuperCache.StackTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
   doctest SuperCache
 
   alias SuperCache.Stack

@@ -66,10 +66,10 @@ defmodule SuperCache.Partition do
       # => :"SuperCache.Storage.Ets_3"
   """
   @spec get_partition(any) :: atom
+  @compile {:inline, get_partition: 1}
   def get_partition(data) do
-    data
-    |> get_partition_order()
-    |> get_partition_by_idx()
+    idx = :erlang.phash2(data, fast_num_partition())
+    fast_get_partition_by_idx(idx)
   end
 
   @doc """
