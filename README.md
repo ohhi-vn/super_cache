@@ -5,7 +5,7 @@
 
 ## Introduction
 
-High-performance in-memory caching library for Elixir backed by ETS tables with experimental distributed cluster support. SuperCache provides transparent local and distributed modes with configurable consistency guarantees, batch operations, and horizontal scalability.
+High-performance in-memory caching library for Elixir backed by partitioned ETS tables with experimental distributed cluster support. SuperCache provides transparent local and distributed modes with configurable consistency guarantees, batch operations, and multiple data structures.
 
 ## Features
 
@@ -15,75 +15,62 @@ High-performance in-memory caching library for Elixir backed by ETS tables with 
 - **Configurable Consistency** — Choose between async, sync (quorum), or strong (WAL) replication
 - **Batch Operations** — High-throughput bulk writes with `put_batch!/1`, `add_batch/2`, `remove_batch/2`
 - **Performance Optimized** — Compile-time log elimination, partition resolution inlining, worker pools, and early termination quorum reads
+- **Health Monitoring** — Built-in cluster health checks with telemetry integration
 
-## Design
+## Architecture
+
+SuperCache contains **34 modules** organized into 7 layers:
 
 ```
-Client → API → Partition Router → Storage (ETS)
-                ↓
-        Distributed Router (optional)
-                ↓
-        Replicator → Remote Nodes
+┌─────────────────────────────────────────────────────────────┐
+│                    Application Layer                          │
+│  SuperCache │ KeyValue │ Queue │ Stack │ Struct               │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+┌─────────────────────────▼───────────────────────────────────┐
+│                    Routing Layer                              │
+│  Partition Router (local) │ Cluster Router (distributed)     │
+│  Cluster.DistributedStore (shared helpers)                    │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+┌─────────────────────────▼───────────────────────────────────┐
+│                  Replication Layer                            │
+│  Replicator (async/sync) │ WAL (strong) │ ThreePhaseCommit   │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+┌─────────────────────────▼───────────────────────────────────┐
+│                   Storage Layer                               │
+│  Storage (ETS wrapper) │ EtsHolder (table lifecycle)         │
+│  Partition (hashing) │ Partition.Holder (registry)           │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│                Cluster Infrastructure                         │
+│  Manager │ NodeMonitor │ HealthMonitor │ Metrics │ Stats     │
+│  TxnRegistry │ Router                                        │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│                Buffer System (lazy_put)                       │
+│  Buffer (scheduler-affine) → Internal.Queue → Internal.Stream│
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### Architecture Components
+### Module Overview
 
-1. **API Layer** — Public interface (`SuperCache`, `KeyValue`, `Queue`, `Stack`, `Struct`)
-2. **Partition Layer** — Hash-based routing to ETS tables (`Partition`, `Partition.Holder`)
-3. **Storage Layer** — ETS table management (`Storage`, `EtsHolder`)
-4. **Cluster Layer** — Distributed coordination (`Manager`, `Replicator`, `WAL`, `Router`)
-
-### Call Flow (Local Mode)
-
-```mermaid
-sequenceDiagram
-  participant Client
-  participant Api
-  participant Partition
-  participant Storage
-
-  Client->>Api: put!({:user, 1, "Alice"})
-  Api->>Partition: get_partition(1)
-  Partition->>Api: :"SuperCache.Storage.Ets_2"
-  Api->>Storage: put({:user, 1, "Alice"}, partition)
-  Storage->>Api: true
-  Api->>Client: true
-  
-  Client->>Api: get!({:user, 1})
-  Api->>Partition: get_partition(1)
-  Partition->>Api: :"SuperCache.Storage.Ets_2"
-  Api->>Storage: get({:user, 1}, partition)
-  Storage->>Api: [{:user, 1, "Alice"}]
-  Api->>Client: [{:user, 1, "Alice"}]
-```
-
-### Call Flow (Distributed Mode)
-
-```mermaid
-sequenceDiagram
-  participant Client
-  participant Api
-  participant Router
-  participant Primary
-  participant Replicas
-  participant WAL
-
-  Client->>Api: put!({:user, 1, "Alice"})
-  Api->>Router: route_put!
-  Router->>Primary: local_put (if primary)
-  Primary->>WAL: commit(ops)
-  WAL->>Primary: apply_local
-  WAL->>Replicas: async replicate_and_ack
-  Replicas->>WAL: ack
-  WAL->>Primary: majority reached
-  Primary->>Router: true
-  Router->>Api: true
-  Api->>Client: true
-```
+| Layer | Modules | Responsibility |
+|-------|---------|----------------|
+| **API** | `SuperCache`, `KeyValue`, `Queue`, `Stack`, `Struct` | Public interfaces for all data structures |
+| **Routing** | `Partition`, `Cluster.Router`, `Cluster.DistributedStore` | Hash-based partition routing and distributed request routing |
+| **Replication** | `Cluster.Replicator`, `Cluster.WAL`, `Cluster.ThreePhaseCommit` | Async/sync/strong replication engines |
+| **Storage** | `Storage`, `EtsHolder`, `Partition.Holder` | ETS table management and lifecycle |
+| **Cluster** | `Cluster.Manager`, `Cluster.NodeMonitor`, `Cluster.HealthMonitor` | Membership, discovery, and health monitoring |
+| **Observability** | `Cluster.Metrics`, `Cluster.Stats`, `Cluster.TxnRegistry` | Counters, latency tracking, and transaction logs |
+| **Buffer** | `Buffer`, `Internal.Queue`, `Internal.Stream` | Scheduler-affine write buffers for `lazy_put/1` |
 
 ## Installation
 
-**Requirements**: Erlang/OTP 25 or later, Elixir 1.14 or later.
+**Requirements**: Erlang/OTP 25 or later, Elixir 1.15 or later.
 
 Add `super_cache` to your dependencies in `mix.exs`:
 
@@ -107,7 +94,7 @@ SuperCache.start!()
 opts = [key_pos: 0, partition_pos: 1, table_type: :bag, num_partition: 4]
 SuperCache.start!(opts)
 
-# Basic operations
+# Basic tuple operations
 SuperCache.put!({:user, 1, "Alice"})
 SuperCache.get!({:user, 1})
 # => [{:user, 1, "Alice"}]
@@ -144,6 +131,9 @@ Queue.add("jobs", "process_order_2")
 Queue.out("jobs")
 # => "process_order_1"
 
+Queue.peak("jobs")
+# => "process_order_2"
+
 # LIFO Stack
 Stack.push("history", "page_a")
 Stack.push("history", "page_b")
@@ -163,13 +153,137 @@ end
 Struct.init(%User{}, :id)
 Struct.add(%User{id: 1, name: "Alice", email: "alice@example.com"})
 {:ok, user} = Struct.get(%User{id: 1})
+# => {:ok, %User{id: 1, name: "Alice", email: "alice@example.com"}}
+```
+
+## Complete API Reference
+
+### SuperCache (Main API)
+
+Primary entry point for tuple storage with transparent local/distributed mode support.
+
+#### Lifecycle
+```elixir
+SuperCache.start!()
+SuperCache.start!(opts)
+SuperCache.start()
+SuperCache.start(opts)
+SuperCache.started?()
+SuperCache.stop()
+```
+
+#### Write Operations
+```elixir
+SuperCache.put!(data)
+SuperCache.put(data)
+SuperCache.lazy_put(data)
+SuperCache.put_batch!(data_list)
+```
+
+#### Read Operations
+```elixir
+SuperCache.get!(data, opts \\ [])
+SuperCache.get(data, opts \\ [])
+SuperCache.get_by_key_partition!(key, partition_data, opts \\ [])
+SuperCache.get_same_key_partition!(key, opts \\ [])
+SuperCache.get_by_match!(partition_data, pattern, opts \\ [])
+SuperCache.get_by_match!(pattern)
+SuperCache.get_by_match_object!(partition_data, pattern, opts \\ [])
+SuperCache.get_by_match_object!(pattern)
+SuperCache.scan!(partition_data, fun, acc)
+SuperCache.scan!(fun, acc)
+```
+
+#### Delete Operations
+```elixir
+SuperCache.delete!(data)
+SuperCache.delete(data)
+SuperCache.delete_all()
+SuperCache.delete_by_match!(partition_data, pattern)
+SuperCache.delete_by_match!(pattern)
+SuperCache.delete_by_key_partition!(key, partition_data)
+SuperCache.delete_same_key_partition!(key)
+```
+
+#### Partition-Specific Operations
+```elixir
+SuperCache.put_partition!(data, partition)
+SuperCache.get_partition!(key, partition)
+SuperCache.delete_partition!(key, partition)
+SuperCache.put_partition_by_idx!(data, partition_idx)
+SuperCache.get_partition_by_idx!(key, partition_idx)
+SuperCache.delete_partition_by_idx!(key, partition_idx)
+```
+
+#### Statistics & Mode
+```elixir
+SuperCache.stats()
+SuperCache.cluster_stats()
+SuperCache.distributed?()
+```
+
+### KeyValue
+
+In-memory key-value namespaces backed by ETS partitions. Multiple independent namespaces coexist using different `kv_name` values.
+
+```elixir
+KeyValue.add(kv_name, key, value)
+KeyValue.get(kv_name, key, default \\ nil, opts \\ [])
+KeyValue.remove(kv_name, key)
+KeyValue.remove_all(kv_name)
+
+KeyValue.keys(kv_name, opts \\ [])
+KeyValue.values(kv_name, opts \\ [])
+KeyValue.count(kv_name, opts \\ [])
+KeyValue.to_list(kv_name, opts \\ [])
+
+KeyValue.add_batch(kv_name, pairs)
+KeyValue.remove_batch(kv_name, keys)
+```
+
+### Queue
+
+Named FIFO queues backed by ETS partitions.
+
+```elixir
+Queue.add(queue_name, value)
+Queue.out(queue_name, default \\ nil)
+Queue.peak(queue_name, default \\ nil, opts \\ [])
+Queue.count(queue_name, opts \\ [])
+Queue.get_all(queue_name)
+```
+
+### Stack
+
+Named LIFO stacks backed by ETS partitions.
+
+```elixir
+Stack.push(stack_name, value)
+Stack.pop(stack_name, default \\ nil)
+Stack.count(stack_name, opts \\ [])
+Stack.get_all(stack_name)
+```
+
+### Struct
+
+In-memory struct store backed by ETS partitions. Call `init/2` once per struct type before using.
+
+```elixir
+Struct.init(struct, key \\ :id)
+Struct.add(struct)
+Struct.get(struct, opts \\ [])
+Struct.get_all(struct, opts \\ [])
+Struct.remove(struct)
+Struct.remove_all(struct)
 ```
 
 ## Distributed Mode
 
+SuperCache supports distributing data across a cluster of Erlang nodes with configurable consistency guarantees.
+
 ### Configuration
 
-All nodes must share identical partition configuration:
+All nodes **must** share identical partition configuration:
 
 ```elixir
 # config/config.exs
@@ -178,10 +292,10 @@ config :super_cache,
   key_pos:            0,
   partition_pos:      0,
   cluster:            :distributed,
-  replication_mode:   :async,  # :async | :sync | :strong
-  replication_factor: 2,       # primary + 1 replica
+  replication_mode:   :async,      # :async | :sync | :strong
+  replication_factor: 2,           # primary + 1 replica
   table_type:         :set,
-  num_partition:      8        # Must match across all nodes
+  num_partition:      8            # Must match across ALL nodes
 
 # config/runtime.exs
 config :super_cache,
@@ -200,7 +314,7 @@ config :super_cache,
 | `:sync` | Majority ack (adaptive quorum) | ~100-300µs | Balanced durability/performance |
 | `:strong` | WAL-based strong consistency | ~200µs | Critical data requiring durability |
 
-**Async Mode**: Fire-and-forget replication via worker pool. Returns immediately after local write.
+**Async Mode**: Fire-and-forget replication via `Task.Supervisor` worker pool. Returns immediately after local write.
 
 **Sync Mode**: Adaptive quorum writes — returns `:ok` once a strict majority of replicas acknowledge, avoiding waits for slow stragglers.
 
@@ -261,52 +375,32 @@ SuperCache.Cluster.Bootstrap.start!(
 5. **Adaptive quorum writes** — Returns on majority ack, not all replicas
 6. **Quorum read early termination** — Stops waiting once majority is reached
 7. **WAL-based strong consistency** — Replaces 3PC with fast local write + async replication + majority ack
+8. **Persistent-term config** — Hot-path config keys served from `:persistent_term` for O(1) access
+9. **Scheduler-affine buffers** — `lazy_put/1` routes to buffer on same scheduler
+10. **Protected ETS tables** — Partition.Holder uses `:protected` ETS for lock-free reads
 
 ### WAL Configuration
 
 ```elixir
 config :super_cache, :wal,
   majority_timeout: 2_000,  # ms to wait for majority ack
-  cleanup_interval: 5_000   # ms between WAL cleanup cycles
+  cleanup_interval: 5_000,  # ms between WAL cleanup cycles
+  max_pending: 10_000       # max uncommitted entries
 ```
 
-## API Reference
+## Examples
 
-### SuperCache (Main API)
+The `examples/` directory contains runnable examples:
 
-- `start!/1`, `start/1` — Start cache with options
-- `put!/1`, `put/1` — Insert tuple (bang returns `true`, safe returns `{:ok, true}`)
-- `put_batch!/1` — Batch insert (10-100x faster for bulk writes)
-- `get!/2`, `get/2` — Retrieve by key
-- `delete!/1`, `delete/1` — Remove by key
-- `delete_all/0` — Clear all partitions
-- `get_by_match!/3`, `get_by_match_object!/3` — Pattern matching
-- `scan!/3` — Fold over partition records
-- `stats/0` — Get cache statistics
-- `distributed?/0` — Check if running in distributed mode
+- **`examples/local_mode_example.exs`** — Complete local mode demonstration covering all APIs (tuple storage, KeyValue, Queue, Stack, Struct, batch operations)
+- **`examples/distributed_mode_example.exs`** — Distributed mode demonstration with cluster configuration, replication modes, read modes, and health monitoring
 
-### KeyValue
+Run examples with:
 
-- `add/3`, `get/4`, `remove/2` — Basic operations
-- `add_batch/2`, `remove_batch/2` — Batch operations
-- `keys/2`, `values/2`, `count/2`, `to_list/2` — Collection operations
-- `remove_all/1` — Clear namespace
-
-### Queue
-
-- `add/2`, `out/1`, `peak/1` — FIFO operations
-- `count/1`, `get_all/1` — Inspection
-
-### Stack
-
-- `push/2`, `pop/1`, `peak/1` — LIFO operations
-- `count/1`, `get_all/1` — Inspection
-
-### Struct
-
-- `init/2` — Initialize struct type with key field
-- `add/1`, `get/2`, `remove/1` — CRUD operations
-- `get_all/2`, `remove_all/1` — Bulk operations
+```bash
+mix run examples/local_mode_example.exs
+mix run examples/distributed_mode_example.exs
+```
 
 ## Configuration Options
 
@@ -315,13 +409,37 @@ config :super_cache, :wal,
 | `key_pos` | integer | `0` | Tuple index for ETS key lookup |
 | `partition_pos` | integer | `0` | Tuple index for partition hashing |
 | `num_partition` | integer | schedulers | Number of ETS partitions |
-| `table_type` | atom | `:set` | ETS table type (`:set`, `:bag`, `:ordered_set`) |
+| `table_type` | atom | `:set` | ETS table type (`:set`, `:bag`, `:ordered_set`, `:duplicate_bag`) |
+| `table_prefix` | string | `"SuperCache.Storage.Ets"` | Prefix for ETS table atom names |
 | `cluster` | atom | `:local` | `:local` or `:distributed` |
 | `replication_mode` | atom | `:async` | `:async`, `:sync`, or `:strong` |
 | `replication_factor` | integer | `2` | Total copies (primary + replicas) |
 | `cluster_peers` | list | `[]` | List of peer node atoms |
 | `auto_start` | boolean | `false` | Auto-start on application boot |
 | `debug_log` | boolean | `false` | Enable debug logging (compile-time) |
+
+## Health Monitoring
+
+SuperCache includes a built-in health monitor that continuously tracks:
+
+- **Node connectivity** — RTT measurement via `:erpc`
+- **Replication lag** — Probe-based delay measurement
+- **Partition balance** — Size variance across nodes
+- **Operation success rates** — Failed vs total operations
+
+Access health data:
+
+```elixir
+SuperCache.Cluster.HealthMonitor.cluster_health()
+SuperCache.Cluster.HealthMonitor.node_health(node)
+SuperCache.Cluster.HealthMonitor.replication_lag(partition_idx)
+SuperCache.Cluster.HealthMonitor.partition_balance()
+SuperCache.Cluster.HealthMonitor.force_check()
+```
+
+Health data is also emitted via `:telemetry` events:
+- `[:super_cache, :health, :check]` — Periodic health check results
+- `[:super_cache, :health, :alert]` — Threshold violations
 
 ## Debug Logging
 
@@ -339,33 +457,17 @@ SuperCache.Log.enable(true)
 SuperCache.Log.enable(false)
 ```
 
-## Health Monitoring
-
-SuperCache includes a built-in health monitor that tracks:
-
-- Node connectivity (RTT via `:erpc`)
-- Replication lag (probe-based measurement)
-- Partition balance (size variance tracking)
-- Operation success rates
-
-Access health data:
-
-```elixir
-SuperCache.Cluster.HealthMonitor.health()
-SuperCache.Cluster.HealthMonitor.metrics()
-```
-
 ## Troubleshooting
 
 ### Common Issues
 
 **"tuple size is lower than key_pos"** — Ensure your tuples have enough elements for the configured `key_pos`.
 
-**Partition count mismatch** — All nodes in a cluster must have the same `num_partition` value.
+**"Partition count mismatch"** — All nodes in a cluster must have the same `num_partition` value.
 
-**Replication lag** — Check network connectivity between nodes. Use `HealthMonitor.metrics()` to diagnose.
+**"Replication lag increasing"** — Check network connectivity between nodes. Use `HealthMonitor.cluster_health()` to diagnose.
 
-**High memory usage** — Monitor partition sizes with `SuperCache.stats()`. Consider increasing `num_partition` or implementing TTL.
+**"Quorum reads timing out"** — Ensure majority of nodes are reachable, check `:erpc` connectivity.
 
 ### Performance Tips
 
@@ -374,10 +476,32 @@ SuperCache.Cluster.HealthMonitor.metrics()
 3. Prefer `:async` replication mode for high-throughput caches
 4. Use `read_mode: :local` when eventual consistency is acceptable
 5. Enable compile-time `debug_log: false` for production (default)
+6. Monitor health metrics and wire telemetry to Prometheus/Datadog
 
-## License
+## Guides
 
-MIT License. See [LICENSE](LICENSE) for details.
+- [Usage Guide](guides/Usage.md) — Complete API reference and usage examples
+- [Distributed Guide](guides/Distributed.md) — Detailed distributed mode documentation
+- [Developer Guide](guides/Developer.md) — Development, testing, benchmarking, and contribution guide
+
+## Testing
+
+```bash
+# All tests (includes cluster tests)
+mix test
+
+# Unit tests only — no distribution needed
+mix test --exclude cluster
+
+# Cluster tests only
+mix test.cluster
+
+# Specific test file
+mix test test/kv_test.exs
+
+# With warnings as errors
+mix test --warnings-as-errors
+```
 
 ## Contributing
 
@@ -387,15 +511,27 @@ MIT License. See [LICENSE](LICENSE) for details.
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-Run tests:
+### Code Style
 
-```bash
-mix test
-mix test --exclude cluster  # Skip flaky cluster tests
-mix test --warnings-as-errors
-```
+- Run formatter: `mix format`
+- Check for warnings: `mix compile --warnings-as-errors`
+- Run tests: `mix test --exclude cluster`
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.
 
 ## Changelog
+
+### v1.2.1
+
+- **Unified API** — Local and distributed modes now use the same modules (no separate `Distributed.*` namespaces)
+- **Health Monitor** — Added `cluster_health/0`, `node_health/1`, `replication_lag/1`, `partition_balance/0`
+- **Read-Your-Writes** — Router tracks recent writes and forces `:primary` reads for consistency
+- **NodeMonitor** — Supports static `:nodes`, dynamic `:nodes_mfa`, and legacy all-node watching
+- **Buffer System** — Scheduler-affine write buffers for `lazy_put/1` with `Internal.Queue` and `Internal.Stream`
+- **Examples** — Added `examples/local_mode_example.exs` and `examples/distributed_mode_example.exs`
+- **Documentation** — Complete module reference with all 34 modules documented
 
 ### v1.1.0
 
