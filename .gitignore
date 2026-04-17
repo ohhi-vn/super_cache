@@ -25,11 +25,10 @@ super_cache-*.tar
 # Temporary files, for example, from tests.
 /tmp/
 
-mix.lock
-
 .DS_Store
 
 AGENTS.md
 .expert
 .elixir_ls
 mise.toml
+.dexter.db*
