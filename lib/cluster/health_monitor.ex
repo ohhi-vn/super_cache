@@ -241,9 +241,21 @@ defmodule SuperCache.Cluster.HealthMonitor do
         _, _ -> {node(), []}
       end
 
+    # A node cannot replicate to itself — filter out the current node so that
+    # single-node clusters correctly report an empty replicas list.
+    other_replicas = Enum.reject(replicas, &(&1 == node()))
+
     replica_status =
-      Enum.map(replicas, fn replica ->
+      Enum.map(other_replicas, fn replica ->
         lag = measure_replication_lag(partition_idx, primary, replica)
+
+        threshold =
+          try do
+            Config.get_config(:replication_lag_threshold_ms, 500)
+          catch
+            :exit, _ -> 500
+            _, _ -> 500
+          end
 
         %{
           node: replica,
@@ -251,7 +263,7 @@ defmodule SuperCache.Cluster.HealthMonitor do
           status:
             cond do
               is_nil(lag) -> :unknown
-              lag <= Config.get_config(:replication_lag_threshold_ms, 500) -> :synced
+              lag <= threshold -> :synced
               true -> :lagging
             end
         }
@@ -510,8 +522,9 @@ defmodule SuperCache.Cluster.HealthMonitor do
           {primary, _} = Manager.get_replicas(idx)
           primary == node
         end)
-      rescue
-        _ -> []
+      catch
+        :exit, _ -> []
+        _, _ -> []
       end
 
     if primary_partitions == [] do
@@ -526,7 +539,16 @@ defmodule SuperCache.Cluster.HealthMonitor do
     else
       # Measure replication lag on a sample partition
       sample_idx = hd(primary_partitions)
-      {_, replicas} = Manager.get_replicas(sample_idx)
+      {_, all_replicas} =
+        try do
+          Manager.get_replicas(sample_idx)
+        catch
+          :exit, _ -> {node(), []}
+          _, _ -> {node(), []}
+        end
+
+      # A node cannot replicate to itself — filter out the current node.
+      replicas = Enum.reject(all_replicas, &(&1 == node()))
 
       if replicas == [] do
         store_check(node, :replication, %{
@@ -575,8 +597,9 @@ defmodule SuperCache.Cluster.HealthMonitor do
           {primary, _} = Manager.get_replicas(idx)
           primary == node
         end)
-      rescue
-        _ -> []
+      catch
+        :exit, _ -> []
+        _, _ -> []
       end
 
     if primary_partitions == [] do
@@ -727,7 +750,10 @@ defmodule SuperCache.Cluster.HealthMonitor do
     cond do
       :fail in statuses -> :unhealthy
       :degraded in statuses -> :degraded
-      :unknown in statuses -> :unknown
+      # Only propagate :unknown if connectivity itself is unknown.
+      # In single-node clusters, replication/partitions checks are :unknown
+      # (not primary, no replicas) but connectivity passes — the node is healthy.
+      checks.connectivity.status == :unknown -> :unknown
       true -> :healthy
     end
   end

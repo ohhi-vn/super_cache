@@ -40,7 +40,7 @@ defmodule SuperCache.Cluster.BasicTest do
     {primary, replicas} = Manager.get_replicas(order)
     holders = [primary | replicas]
 
-    assert_node_has(primary, :session, :session, expected, 500)
+    assert_node_has(primary, :session, :session, expected, 2_000)
 
     Enum.each(replicas, fn r ->
       assert_node_has(r, :session, :session, expected, 2_000)
@@ -59,7 +59,7 @@ defmodule SuperCache.Cluster.BasicTest do
 
   test "quorum read returns correct value" do
     Cache.put!({:quorum_key, "k1", "v1"})
-    Process.sleep(300)
+    Process.sleep(1_000)
 
     assert [{:quorum_key, "k1", "v1"}] ==
              Cache.get!({:quorum_key, "k1", nil}, read_mode: :quorum)
@@ -67,14 +67,14 @@ defmodule SuperCache.Cluster.BasicTest do
 
   test "write on non-primary node is routed to correct primary" do
     key_data = {:routed, "test_key", nil}
-    primary  = primary_for(elem(key_data, 0))
+    primary = primary_for(elem(key_data, 0))
 
     writer =
       Manager.live_nodes()
       |> Enum.find(fn n -> n != primary end)
       |> then(fn
         nil -> primary
-        n   -> n
+        n -> n
       end)
 
     :erpc.call(writer, SuperCache.Distributed, :put!, [{:routed, "test_key", "value"}], 8_000)

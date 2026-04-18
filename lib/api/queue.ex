@@ -34,19 +34,23 @@ defmodule SuperCache.Queue do
   require SuperCache.Log
 
   alias SuperCache.{Storage, Partition, Config}
-  alias SuperCache.Cluster.{Manager, Replicator, ThreePhaseCommit}
+  alias SuperCache.Cluster.DistributedHelpers
 
   @max_count_retries 50
   @max_spin_retries 100
-  @spin_wait_ms 1
 
   ## ── Public API ──────────────────────────────────────────────────────────────
 
   @doc "Enqueue `value` into `queue_name`. Creates the queue if it does not exist."
   @spec add(any, any) :: true
   def add(queue_name, value) do
-    if distributed?() do
-      route_write(queue_name, :dist_enqueue, [queue_name, value])
+    if Config.distributed?() do
+      DistributedHelpers.route_write(
+        __MODULE__,
+        :dist_enqueue,
+        [queue_name, value],
+        idx(queue_name)
+      )
     else
       local_enqueue(Partition.get_partition(queue_name), queue_name, value)
     end
@@ -55,8 +59,13 @@ defmodule SuperCache.Queue do
   @doc "Dequeue and return the front value. Returns `default` (`nil`) when empty."
   @spec out(any, any) :: any
   def out(queue_name, default \\ nil) do
-    if distributed?() do
-      route_write(queue_name, :dist_dequeue, [queue_name, default])
+    if Config.distributed?() do
+      DistributedHelpers.route_write(
+        __MODULE__,
+        :dist_dequeue,
+        [queue_name, default],
+        idx(queue_name)
+      )
     else
       local_dequeue(Partition.get_partition(queue_name), queue_name, default)
     end
@@ -71,8 +80,14 @@ defmodule SuperCache.Queue do
   """
   @spec peak(any, any, keyword) :: any
   def peak(queue_name, default \\ nil, opts \\ []) do
-    if distributed?() do
-      route_read(queue_name, :dist_peek, [queue_name, default], opts)
+    if Config.distributed?() do
+      DistributedHelpers.route_read(
+        __MODULE__,
+        :dist_peek,
+        [queue_name, default],
+        idx(queue_name),
+        opts
+      )
     else
       local_peek(Partition.get_partition(queue_name), queue_name, default)
     end
@@ -87,8 +102,8 @@ defmodule SuperCache.Queue do
   """
   @spec count(any, keyword) :: non_neg_integer
   def count(queue_name, opts \\ []) do
-    if distributed?() do
-      route_read(queue_name, :dist_count, [queue_name], opts)
+    if Config.distributed?() do
+      DistributedHelpers.route_read(__MODULE__, :dist_count, [queue_name], idx(queue_name), opts)
     else
       count_safe(Partition.get_partition(queue_name), queue_name, @max_count_retries)
     end
@@ -97,8 +112,8 @@ defmodule SuperCache.Queue do
   @doc "Drain all items (oldest first). Returns `[]` for an empty queue."
   @spec get_all(any) :: list
   def get_all(queue_name) do
-    if distributed?() do
-      route_write(queue_name, :dist_drain, [queue_name])
+    if Config.distributed?() do
+      DistributedHelpers.route_write(__MODULE__, :dist_drain, [queue_name], idx(queue_name))
     else
       local_drain(Partition.get_partition(queue_name), queue_name)
     end
@@ -155,7 +170,7 @@ defmodule SuperCache.Queue do
             local_enqueue(partition, queue_name, value, retries)
 
           _ ->
-            :timer.sleep(@spin_wait_ms)
+            :erlang.yield()
             local_enqueue(partition, queue_name, value, retries + 1)
         end
 
@@ -194,7 +209,7 @@ defmodule SuperCache.Queue do
   defp local_dequeue(partition, queue_name, default, retries) do
     case Storage.get({:queue, :updating, queue_name}, partition) do
       [_] ->
-        :timer.sleep(@spin_wait_ms)
+        :erlang.yield()
         local_dequeue(partition, queue_name, default, retries + 1)
 
       [] ->
@@ -251,7 +266,7 @@ defmodule SuperCache.Queue do
   defp local_drain(partition, queue_name, retries) do
     case Storage.get({:queue, :updating, queue_name}, partition) do
       [_] ->
-        :timer.sleep(@spin_wait_ms)
+        :erlang.yield()
         local_drain(partition, queue_name, retries + 1)
 
       [] ->
@@ -316,7 +331,7 @@ defmodule SuperCache.Queue do
             dist_do_enqueue(partition, queue_name, value, retries)
 
           _ ->
-            :timer.sleep(@spin_wait_ms)
+            :erlang.yield()
             dist_do_enqueue(partition, queue_name, value, retries + 1)
         end
 
@@ -330,7 +345,7 @@ defmodule SuperCache.Queue do
           {:put, {{:queue, :tail, queue_name}, 1}}
         ]
 
-        apply_write(idx(queue_name), partition, ops)
+        DistributedHelpers.apply_write(idx(queue_name), partition, ops)
         unlock(partition, queue_name)
         true
 
@@ -343,7 +358,7 @@ defmodule SuperCache.Queue do
           {:put, {{:queue, :tail, queue_name}, next}}
         ]
 
-        apply_write(idx(queue_name), partition, ops)
+        DistributedHelpers.apply_write(idx(queue_name), partition, ops)
         unlock(partition, queue_name)
         true
     end
@@ -365,7 +380,7 @@ defmodule SuperCache.Queue do
   defp dist_do_dequeue(partition, queue_name, default, retries) do
     case Storage.get({:queue, :updating, queue_name}, partition) do
       [_] ->
-        :timer.sleep(@spin_wait_ms)
+        :erlang.yield()
         dist_do_dequeue(partition, queue_name, default, retries + 1)
 
       [] ->
@@ -410,7 +425,7 @@ defmodule SuperCache.Queue do
                   {v, ops}
               end
 
-            apply_write(idx(queue_name), partition, ops)
+            DistributedHelpers.apply_write(idx(queue_name), partition, ops)
             unlock(partition, queue_name)
             value
         end
@@ -433,7 +448,7 @@ defmodule SuperCache.Queue do
   defp dist_do_drain(partition, queue_name, retries) do
     case Storage.get({:queue, :updating, queue_name}, partition) do
       [_] ->
-        :timer.sleep(@spin_wait_ms)
+        :erlang.yield()
         dist_do_drain(partition, queue_name, retries + 1)
 
       [] ->
@@ -461,7 +476,7 @@ defmodule SuperCache.Queue do
               {:put, {{:queue, :tail, queue_name}, 0}}
             ]
 
-            apply_write(idx(queue_name), partition, del_ops ++ reset_ops)
+            DistributedHelpers.apply_write(idx(queue_name), partition, del_ops ++ reset_ops)
             unlock(partition, queue_name)
             Enum.reverse(values)
         end
@@ -472,7 +487,7 @@ defmodule SuperCache.Queue do
     part = Partition.get_partition(queue_name)
 
     if Storage.insert_new({{:queue, :updating, queue_name}, true}, part) do
-      apply_write(idx(queue_name), part, [
+      DistributedHelpers.apply_write(idx(queue_name), part, [
         {:put, {{:queue, :head, queue_name}, 0}},
         {:put, {{:queue, :tail, queue_name}, 0}}
       ])
@@ -504,7 +519,7 @@ defmodule SuperCache.Queue do
             default
 
           _ ->
-            :timer.sleep(@spin_wait_ms)
+            :erlang.yield()
             local_peek(partition, queue_name, default, retries + 1)
         end
 
@@ -559,110 +574,5 @@ defmodule SuperCache.Queue do
     Storage.put({{:queue, :tail, name}, 0}, partition)
   end
 
-  defp distributed?(), do: Config.get_config(:cluster, :local) == :distributed
   defp idx(name), do: Partition.get_partition_order(name)
-
-  defp apply_write(idx, partition, ops) do
-    case Manager.replication_mode() do
-      :strong ->
-        case ThreePhaseCommit.commit(idx, ops) do
-          :ok ->
-            :ok
-
-          {:error, r} ->
-            Logger.error("super_cache, queue, 3pc failed: #{inspect(r)}")
-            {:error, r}
-        end
-
-      _ ->
-        Enum.each(ops, fn
-          {:put, r} ->
-            Storage.put(r, partition)
-            Replicator.replicate(idx, :put, r)
-
-          {:delete, k} ->
-            Storage.delete(k, partition)
-            Replicator.replicate(idx, :delete, k)
-
-          {:delete_match, p} ->
-            Storage.delete_match(p, partition)
-            Replicator.replicate(idx, :delete_match, p)
-
-          {:delete_all, _} ->
-            Storage.delete_all(partition)
-            Replicator.replicate(idx, :delete_all, nil)
-        end)
-
-        :ok
-    end
-  end
-
-  defp route_write(queue_name, fun, args) do
-    {primary, _} = Manager.get_replicas(idx(queue_name))
-
-    if primary == node() do
-      apply(__MODULE__, fun, args)
-    else
-      SuperCache.Log.debug(fn ->
-        "super_cache, queue #{inspect(queue_name)}, fwd #{fun} → #{inspect(primary)}"
-      end)
-
-      :erpc.call(primary, __MODULE__, fun, args, 5_000)
-    end
-  end
-
-  defp route_read(queue_name, fun, args, opts) do
-    mode = Keyword.get(opts, :read_mode, :local)
-    eff = if mode == :local and not has_partition?(queue_name), do: :primary, else: mode
-
-    case eff do
-      :local -> apply(__MODULE__, fun, args)
-      :primary -> read_primary(queue_name, fun, args)
-      :quorum -> read_quorum(queue_name, fun, args)
-    end
-  end
-
-  defp has_partition?(name) do
-    {p, rs} = Manager.get_replicas(idx(name))
-    node() in [p | rs]
-  end
-
-  defp read_primary(queue_name, fun, args) do
-    {primary, _} = Manager.get_replicas(idx(queue_name))
-
-    if primary == node(),
-      do: apply(__MODULE__, fun, args),
-      else: :erpc.call(primary, __MODULE__, fun, args, 5_000)
-  end
-
-  defp read_quorum(queue_name, fun, args) do
-    {primary, replicas} = Manager.get_replicas(idx(queue_name))
-
-    results =
-      [primary | replicas]
-      |> Task.async_stream(
-        fn
-          n when n == node() -> apply(__MODULE__, fun, args)
-          n -> :erpc.call(n, __MODULE__, fun, args, 5_000)
-        end,
-        timeout: 5_000,
-        on_timeout: :kill_task
-      )
-      |> Enum.flat_map(fn
-        {:ok, r} -> [r]
-        _ -> []
-      end)
-
-    majority = div(length(results), 2) + 1
-
-    case Enum.find(Enum.frequencies(results), fn {_, c} -> c >= majority end) do
-      {result, _} ->
-        result
-
-      nil ->
-        if primary == node(),
-          do: apply(__MODULE__, fun, args),
-          else: :erpc.call(primary, __MODULE__, fun, args, 5_000)
-    end
-  end
 end

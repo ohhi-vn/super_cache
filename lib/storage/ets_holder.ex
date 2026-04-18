@@ -172,8 +172,18 @@ defmodule SuperCache.EtsHolder do
 
   def handle_call({:delete, table_name}, _from, %{table_list: tables} = state) do
     if table_name in tables do
-      :ets.delete(table_name)
-      Logger.info("super_cache, ets_holder, table #{inspect(table_name)} deleted")
+      # Guard against the table already being deleted (e.g., by a prior stop
+      # or the create_table cleanup path) — :ets.delete raises on missing tables.
+      case :ets.info(table_name) do
+        :undefined ->
+          SuperCache.Log.debug(fn ->
+            "super_cache, ets_holder, table #{inspect(table_name)} already gone, skipping delete"
+          end)
+
+        _ ->
+          :ets.delete(table_name)
+          Logger.info("super_cache, ets_holder, table #{inspect(table_name)} deleted")
+      end
     else
       SuperCache.Log.debug(fn ->
         "super_cache, ets_holder, table #{inspect(table_name)} not found, skipping delete"
@@ -230,6 +240,13 @@ defmodule SuperCache.EtsHolder do
   defp create_table(table_name) do
     key_pos = Config.get_config(:key_pos, 0) + 1
     table_type = Config.get_config(:table_type, :set)
+
+    # If the table already exists (e.g., from a previous test or incomplete
+    # shutdown), delete it first to avoid "table name already exists" errors.
+    case :ets.info(table_name) do
+      :undefined -> :ok
+      _ -> :ets.delete(table_name)
+    end
 
     ^table_name =
       :ets.new(table_name, [

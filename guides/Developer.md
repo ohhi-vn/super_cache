@@ -132,6 +132,7 @@ SuperCache is built on a layered architecture designed for high performance and 
 | `SuperCache.Cluster.Metrics` | `lib/cluster/metrics.ex` | Low-overhead counter and latency sample store. Uses `:public` ETS table with atomic `update_counter/3`. Ring buffer for latency samples (max 256). |
 | `SuperCache.Cluster.Stats` | `lib/cluster/stats.ex` | Generates cluster overview, partition maps, 3PC metrics, and API call statistics. Provides pretty-printing for console output. |
 | `SuperCache.Cluster.DistributedStore` | `lib/cluster/distributed_store.ex` | Shared routing helpers used by all distributed high-level stores (KeyValue, Queue, Stack, Struct). Provides `route_put`, `route_delete`, `local_get`, `local_match`, etc. |
+| `SuperCache.Cluster.DistributedHelpers` | `lib/cluster/distributed_helpers.ex` | Shared distributed read/write helpers extracted from KeyValue, Queue, Stack, and Struct. Provides `distributed?/0`, `apply_write/3`, `route_write/4`, `route_read/5`, `has_partition?/1`, `read_primary/4`, `read_quorum/4`. Eliminates ~400 lines of code duplication across API modules. |
 
 #### 7. Compatibility Shims (`lib/distributed/`)
 
@@ -151,14 +152,18 @@ The codebase includes several performance optimizations:
 
 1. **Compile-time log elimination** — `SuperCache.Log.debug/1` expands to `:ok` when `debug_log: false`
 2. **Partition resolution inlining** — `@compile {:inline, get_partition: 1}` eliminates function call overhead
-3. **Batch ETS operations** — `:ets.insert/2` with lists instead of per-item calls
-4. **Async replication worker pool** — `Task.Supervisor` eliminates per-operation `spawn/1` overhead
-5. **Adaptive quorum writes** — Sync mode returns on majority ack, not all replicas
-6. **Quorum read early termination** — Stops waiting once majority is reached
-7. **WAL-based strong consistency** — Replaces 3PC with fast local write + async replication + majority ack
-8. **Persistent-term config** — Hot-path config keys served from `:persistent_term` for O(1) access
-9. **Scheduler-affine buffers** — `lazy_put/1` routes to buffer on same scheduler via `:erlang.system_info(:scheduler_id)`
-10. **Protected ETS tables** — Partition.Holder uses `:protected` ETS for lock-free reads
+3. **Config.distributed?/0 inlining** — `@compile {:inline, distributed?: 0}` for zero-cost cluster-mode checks on the hot path (called by every API operation)
+4. **Batch ETS operations** — `:ets.insert/2` with lists instead of per-item calls
+5. **Async replication worker pool** — `Task.Supervisor` eliminates per-operation `spawn/1` overhead
+6. **Adaptive quorum writes** — Sync mode returns on majority ack, not all replicas
+7. **Quorum read early termination** — Stops waiting once majority is reached; kills remaining tasks immediately
+8. **WAL-based strong consistency** — Replaces 3PC with fast local write + async replication + majority ack (~200µs vs ~1500µs)
+9. **Atomic WAL sequence generation** — `:ets.update_counter/4` for race-condition-free sequence numbers
+10. **Persistent-term config** — Hot-path config keys served from `:persistent_term` for O(1) access
+11. **Scheduler-affine buffers** — `lazy_put/1` routes to buffer on same scheduler via `:erlang.system_info(:scheduler_id)`
+12. **Protected ETS tables** — Partition.Holder uses `:protected` ETS for lock-free reads
+13. **Spin-wait optimization** — `:erlang.yield/0` instead of `:timer.sleep/1` in Queue/Stack lock contention loops
+14. **Shared distributed helpers** — `DistributedHelpers` module eliminates code duplication across KeyValue, Queue, Stack, and Struct
 
 ## Usage Guide in Plain IEx (Single Cluster, Two Nodes)
 

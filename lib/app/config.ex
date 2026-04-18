@@ -149,6 +149,24 @@ defmodule SuperCache.Config do
   end
 
   @doc """
+  Returns `true` when SuperCache is running in distributed mode.
+
+  Zero-cost read from `:persistent_term` — no GenServer hop.
+  This function is inlined by the compiler and is the fastest way to
+  check cluster mode on the hot path (called by every API operation).
+
+  ## Examples
+
+      SuperCache.Config.distributed?()
+      # => true  (when cluster: :distributed was set at startup)
+  """
+  @spec distributed?() :: boolean
+  @compile {:inline, distributed?: 0}
+  def distributed? do
+    :persistent_term.get({__MODULE__, :cluster}, :local) == :distributed
+  end
+
+  @doc """
   Store a configuration value.
 
   Hot keys are also written to `:persistent_term` for fast subsequent reads.

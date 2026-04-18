@@ -29,7 +29,7 @@ defmodule SuperCache.Struct do
   require SuperCache.Log
 
   alias SuperCache.{Storage, Partition, Config}
-  alias SuperCache.Cluster.{Manager, Replicator, ThreePhaseCommit}
+  alias SuperCache.Cluster.{Manager, DistributedHelpers}
 
   # ── Public API ───────────────────────────────────────────────────────────────
 
@@ -37,13 +37,18 @@ defmodule SuperCache.Struct do
   def init(%{__struct__: _} = struct, key \\ :id) when is_atom(key) do
     with true <- Map.has_key?(struct, key),
          {:error, :key_not_found} <- get_key_field(struct) do
-      if distributed?() do
-        route_write(struct, :local_init, [struct, key])
+      if Config.distributed?() do
+        DistributedHelpers.route_write(
+          __MODULE__,
+          :local_init,
+          [struct, key],
+          Partition.get_partition_order(ns(struct))
+        )
       else
         do_local_init(struct, key)
       end
     else
-      false    -> {:error, "key does not exist on struct"}
+      false -> {:error, "key does not exist on struct"}
       {:ok, _} -> {:error, "struct already initialised"}
     end
   end
@@ -51,8 +56,13 @@ defmodule SuperCache.Struct do
   @spec add(map) :: {:ok, map} | {:error, any}
   def add(%{__struct__: _} = struct) do
     with {:ok, _key} <- get_key_field(struct) do
-      if distributed?() do
-        route_write(struct, :local_add, [struct])
+      if Config.distributed?() do
+        DistributedHelpers.route_write(
+          __MODULE__,
+          :local_add,
+          [struct],
+          Partition.get_partition_order(ns(struct))
+        )
       else
         do_local_add(struct)
       end
@@ -62,8 +72,14 @@ defmodule SuperCache.Struct do
   @spec get(map, keyword) :: {:ok, map} | {:error, :not_found | any}
   def get(%{__struct__: _} = struct, opts \\ []) do
     with {:ok, _key} <- get_key_field(struct) do
-      if distributed?() do
-        route_read(struct, :local_get, [struct], Keyword.get(opts, :read_mode, :local))
+      if Config.distributed?() do
+        DistributedHelpers.route_read(
+          __MODULE__,
+          :local_get,
+          [struct],
+          Partition.get_partition_order(ns(struct)),
+          opts
+        )
       else
         do_local_get(struct)
       end
@@ -73,8 +89,14 @@ defmodule SuperCache.Struct do
   @spec get_all(map, keyword) :: {:ok, list} | {:error, any}
   def get_all(%{__struct__: _} = struct, opts \\ []) do
     with {:ok, _key} <- get_key_field(struct) do
-      if distributed?() do
-        route_read(struct, :local_get_all, [struct], Keyword.get(opts, :read_mode, :local))
+      if Config.distributed?() do
+        DistributedHelpers.route_read(
+          __MODULE__,
+          :local_get_all,
+          [struct],
+          Partition.get_partition_order(ns(struct)),
+          opts
+        )
       else
         do_local_get_all(struct)
       end
@@ -83,13 +105,15 @@ defmodule SuperCache.Struct do
 
   @spec remove(map) :: {:ok, map} | {:error, any}
   def remove(%{__struct__: _} = struct) do
-    with {:ok, _key}      <- get_key_field(struct),
+    with {:ok, _key} <- get_key_field(struct),
          {:ok, _existing} <- get(struct) do
-      if distributed?() do
-        case route_write(struct, :local_remove, [struct]) do
-          :ok      -> {:ok, struct}
+      if Config.distributed?() do
+        partition_idx = Partition.get_partition_order(ns(struct))
+
+        case DistributedHelpers.route_write(__MODULE__, :local_remove, [struct], partition_idx) do
+          :ok -> {:ok, struct}
           {:ok, _} -> {:ok, struct}
-          other    -> other
+          other -> other
         end
       else
         do_local_remove(struct)
@@ -102,11 +126,18 @@ defmodule SuperCache.Struct do
     with {:ok, _key} <- get_key_field(struct) do
       SuperCache.Log.debug(fn -> "super_cache, struct, remove_all #{inspect(_struct_name)}" end)
 
-      if distributed?() do
-        case route_write(struct, :local_remove_all, [struct]) do
-          :ok             -> {:ok, :removed}
+      if Config.distributed?() do
+        partition_idx = Partition.get_partition_order(ns(struct))
+
+        case DistributedHelpers.route_write(
+               __MODULE__,
+               :local_remove_all,
+               [struct],
+               partition_idx
+             ) do
+          :ok -> {:ok, :removed}
           {:ok, :removed} -> {:ok, :removed}
-          other           -> other
+          other -> other
         end
       else
         do_local_remove_all(struct)
@@ -122,22 +153,29 @@ defmodule SuperCache.Struct do
 
   @doc false
   def local_init(%{__struct__: struct_name} = struct, key) do
-    ns  = ns(struct)
+    ns = ns(struct)
     idx = Partition.get_partition_order(ns)
-    apply_write(idx, Partition.get_partition(ns),
-                [{:put, {{:struct_storage, :key, struct_name}, key}}])
+
+    DistributedHelpers.apply_write(idx, Partition.get_partition(ns), [
+      {:put, {{:struct_storage, :key, struct_name}, key}}
+    ])
+
     true
   end
 
   @doc false
   def local_add(%{__struct__: struct_name} = struct) do
     with {:ok, key} <- get_key_field(struct) do
-      ns       = ns(struct)
-      idx      = Partition.get_partition_order(ns)
+      ns = ns(struct)
+      idx = Partition.get_partition_order(ns)
       key_data = Map.get(struct, key)
-      ets_key  = {{:struct_storage, :struct, struct_name}, key_data}
-      apply_write(idx, Partition.get_partition(ns),
-                  [{:delete, ets_key}, {:put, {ets_key, struct}}])
+      ets_key = {{:struct_storage, :struct, struct_name}, key_data}
+
+      DistributedHelpers.apply_write(idx, Partition.get_partition(ns), [
+        {:delete, ets_key},
+        {:put, {ets_key, struct}}
+      ])
+
       {:ok, struct}
     end
   end
@@ -145,20 +183,20 @@ defmodule SuperCache.Struct do
   @doc false
   def local_remove(%{__struct__: struct_name} = struct) do
     with {:ok, key} <- get_key_field(struct) do
-      ns      = ns(struct)
-      idx     = Partition.get_partition_order(ns)
+      ns = ns(struct)
+      idx = Partition.get_partition_order(ns)
       ets_key = {{:struct_storage, :struct, struct_name}, Map.get(struct, key)}
-      apply_write(idx, Partition.get_partition(ns), [{:delete, ets_key}])
+      DistributedHelpers.apply_write(idx, Partition.get_partition(ns), [{:delete, ets_key}])
       :ok
     end
   end
 
   @doc false
   def local_remove_all(%{__struct__: struct_name} = struct) do
-    ns      = ns(struct)
-    idx     = Partition.get_partition_order(ns)
+    ns = ns(struct)
+    idx = Partition.get_partition_order(ns)
     pattern = {{{:struct_storage, :struct, struct_name}, :_}, :_}
-    apply_write(idx, Partition.get_partition(ns), [{:delete_match, pattern}])
+    DistributedHelpers.apply_write(idx, Partition.get_partition(ns), [{:delete_match, pattern}])
     {:ok, :removed}
   end
 
@@ -170,7 +208,7 @@ defmodule SuperCache.Struct do
       ets_key = {{:struct_storage, :struct, struct_name}, Map.get(struct, key)}
 
       case Storage.get(ets_key, Partition.get_partition(ns(struct))) do
-        []            -> {:error, :not_found}
+        [] -> {:error, :not_found}
         [{_, result}] -> {:ok, result}
       end
     end
@@ -192,12 +230,12 @@ defmodule SuperCache.Struct do
 
   @doc false
   def local_get_key_field(struct_name) do
-    ns        = {:struct_storage, struct_name}
+    ns = {:struct_storage, struct_name}
     partition = Partition.get_partition(ns)
 
     case Storage.get({:struct_storage, :key, struct_name}, partition) do
       [{_, key}] -> {:ok, key}
-      []         -> {:error, :key_not_found}
+      [] -> {:error, :key_not_found}
     end
   end
 
@@ -208,14 +246,15 @@ defmodule SuperCache.Struct do
       {{:struct_storage, :key, struct_name}, key},
       Partition.get_partition(ns(struct))
     )
+
     true
   end
 
   defp do_local_add(%{__struct__: struct_name} = struct) do
     with {:ok, key} <- get_key_field(struct) do
       key_data = Map.get(struct, key)
-      ets_key  = {{:struct_storage, :struct, struct_name}, key_data}
-      part     = Partition.get_partition(ns(struct))
+      ets_key = {{:struct_storage, :struct, struct_name}, key_data}
+      part = Partition.get_partition(ns(struct))
       Storage.delete(ets_key, part)
       Storage.put({ets_key, struct}, part)
       {:ok, struct}
@@ -225,11 +264,15 @@ defmodule SuperCache.Struct do
   defp do_local_remove(%{__struct__: struct_name} = struct) do
     with {:ok, key} <- get_key_field(struct) do
       ets_key = {{:struct_storage, :struct, struct_name}, Map.get(struct, key)}
-      part    = Partition.get_partition(ns(struct))
+      part = Partition.get_partition(ns(struct))
 
       case Storage.get(ets_key, part) do
-        []            -> {:error, :not_found}
-        [{_, result}] -> Storage.delete(ets_key, part); {:ok, result}
+        [] ->
+          {:error, :not_found}
+
+        [{_, result}] ->
+          Storage.delete(ets_key, part)
+          {:ok, result}
       end
     end
   end
@@ -239,15 +282,17 @@ defmodule SuperCache.Struct do
       {{{:struct_storage, :struct, struct_name}, :_}, :_},
       Partition.get_partition(ns(struct))
     )
+
     {:ok, :removed}
   end
 
   defp do_local_get(%{__struct__: struct_name} = struct) do
     with {:ok, key} <- get_key_field(struct) do
       ets_key = {{:struct_storage, :struct, struct_name}, Map.get(struct, key)}
+      partition = Partition.get_partition(ns(struct))
 
-      case Storage.get(ets_key, Partition.get_partition(ns(struct))) do
-        []            -> {:error, :not_found}
+      case Storage.get(ets_key, partition) do
+        [] -> {:error, :not_found}
         [{_, result}] -> {:ok, result}
       end
     end
@@ -268,12 +313,10 @@ defmodule SuperCache.Struct do
 
   defp ns(%{__struct__: struct_name}), do: {:struct_storage, struct_name}
 
-  defp distributed?(), do: Config.get_config(:cluster, :local) == :distributed
-
   defp get_key_field(%{__struct__: struct_name} = struct) do
     case Storage.get({:struct_storage, :key, struct_name}, Partition.get_partition(ns(struct))) do
       [{_, key}] -> {:ok, key}
-      []         -> fetch_key_field_from_primary(struct, struct_name)
+      [] -> fetch_key_field_from_primary(struct, struct_name)
     end
   end
 
@@ -284,76 +327,6 @@ defmodule SuperCache.Struct do
       {:error, :key_not_found}
     else
       :erpc.call(primary, __MODULE__, :local_get_key_field, [struct_name], 5_000)
-    end
-  end
-
-  defp apply_write(idx, partition, ops) do
-    case Manager.replication_mode() do
-      :strong ->
-        case ThreePhaseCommit.commit(idx, ops) do
-          :ok         -> :ok
-          {:error, r} ->
-            Logger.error("super_cache, struct, 3pc failed: #{inspect(r)}")
-            {:error, r}
-        end
-
-      _ ->
-        Enum.each(ops, fn
-          {:put, r}          -> Storage.put(r, partition);          Replicator.replicate(idx, :put, r)
-          {:delete, k}       -> Storage.delete(k, partition);       Replicator.replicate(idx, :delete, k)
-          {:delete_match, p} -> Storage.delete_match(p, partition); Replicator.replicate(idx, :delete_match, p)
-          {:delete_all, _}   -> Storage.delete_all(partition);      Replicator.replicate(idx, :delete_all, nil)
-        end)
-        :ok
-    end
-  end
-
-  defp route_write(struct, fun, args) do
-    {primary, _} = Manager.get_replicas(Partition.get_partition_order(ns(struct)))
-
-    if primary == node() do
-      apply(__MODULE__, fun, args)
-    else
-      SuperCache.Log.debug(fn -> "super_cache, struct, fwd #{fun} → #{inspect(primary)}" end)
-      :erpc.call(primary, __MODULE__, fun, args, 5_000)
-    end
-  end
-
-  defp route_read(_struct, fun, args, :local), do: apply(__MODULE__, fun, args)
-
-  defp route_read(struct, fun, args, :primary) do
-    {primary, _} = Manager.get_replicas(Partition.get_partition_order(ns(struct)))
-    if primary == node(),
-      do: apply(__MODULE__, fun, args),
-      else: :erpc.call(primary, __MODULE__, fun, args, 5_000)
-  end
-
-  defp route_read(struct, fun, args, :quorum) do
-    {primary, replicas} = Manager.get_replicas(Partition.get_partition_order(ns(struct)))
-    nodes = [primary | replicas]
-
-    results =
-      nodes
-      |> Task.async_stream(
-        fn
-          n when n == node() -> apply(__MODULE__, fun, args)
-          n                  -> :erpc.call(n, __MODULE__, fun, args, 5_000)
-        end,
-        timeout: 5_000,
-        on_timeout: :kill_task
-      )
-      |> Enum.flat_map(fn {:ok, r} -> [r]; _ -> [] end)
-
-    majority = div(length(nodes), 2) + 1
-
-    case Enum.find(Enum.frequencies(results), fn {_, c} -> c >= majority end) do
-      {result, _} ->
-        result
-
-      nil ->
-        if primary == node(),
-          do: apply(__MODULE__, fun, args),
-          else: :erpc.call(primary, __MODULE__, fun, args, 5_000)
     end
   end
 end

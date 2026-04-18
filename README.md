@@ -61,7 +61,7 @@ SuperCache contains **34 modules** organized into 7 layers:
 | Layer | Modules | Responsibility |
 |-------|---------|----------------|
 | **API** | `SuperCache`, `KeyValue`, `Queue`, `Stack`, `Struct` | Public interfaces for all data structures |
-| **Routing** | `Partition`, `Cluster.Router`, `Cluster.DistributedStore` | Hash-based partition routing and distributed request routing |
+| **Routing** | `Partition`, `Cluster.Router`, `Cluster.DistributedStore`, `Cluster.DistributedHelpers` | Hash-based partition routing, distributed request routing, and shared read/write helpers |
 | **Replication** | `Cluster.Replicator`, `Cluster.WAL`, `Cluster.ThreePhaseCommit` | Async/sync/strong replication engines |
 | **Storage** | `Storage`, `EtsHolder`, `Partition.Holder` | ETS table management and lifecycle |
 | **Cluster** | `Cluster.Manager`, `Cluster.NodeMonitor`, `Cluster.HealthMonitor` | Membership, discovery, and health monitoring |
@@ -522,6 +522,16 @@ mix test --warnings-as-errors
 MIT License. See [LICENSE](LICENSE) for details.
 
 ## Changelog
+
+### v1.3.0
+
+- **DistributedHelpers module** — Extracted duplicated `apply_write/3`, `route_write/4`, `route_read/5`, `has_partition?/1`, `read_primary/4`, `read_quorum/4` from KeyValue, Queue, Stack, and Struct into a shared `SuperCache.Cluster.DistributedHelpers` module, eliminating ~400 lines of code duplication
+- **WAL race condition fix** — Replaced non-atomic `persistent_term` read+write in `next_seq/0` with atomic `:ets.update_counter/4`, preventing duplicate sequence numbers under concurrent commits
+- **Config.distributed?/0** — Added a dedicated, inlined `distributed?/0` function to `SuperCache.Config` for zero-cost cluster-mode checks on the hot path (called by every API operation)
+- **Queue spin-wait improvement** — Replaced `:timer.sleep(1)` with `:erlang.yield()` in all spin-wait loops, reducing overhead from timer-wheel insertion during lock contention
+- **Quorum read early termination** — Standardized all modules to use the KeyValue-style `Task.async` + early-kill approach for quorum reads, which terminates as soon as majority is reached (previously Queue/Stack/Struct used `Task.async_stream` which always waits for all tasks)
+- **New test suites** — Added comprehensive tests for `Config` (325 lines), `WAL` (477 lines), `Bootstrap` (554 lines), and `DistributedHelpers` (750 lines), covering lifecycle, validation, concurrent access, edge cases, and race conditions
+- **Code formatting** — Consistent formatting across all modified modules
 
 ### v1.2.1
 

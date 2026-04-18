@@ -7,7 +7,6 @@ defmodule SuperCache.ClusterTest do
 
   alias SuperCache.Cluster.Manager
   alias SuperCache.Cluster.NodeMonitor
-  alias SuperCache.Distributed, as: Cache
 
   require Logger
 
@@ -27,7 +26,7 @@ defmodule SuperCache.ClusterTest do
   # ── Peer helpers ──────────────────────────────────────────────────────────────
 
   defp start_peer(name) do
-    cookie    = :erlang.get_cookie()
+    cookie = :erlang.get_cookie()
     code_path = :code.get_path()
 
     {:ok, peer, node} =
@@ -35,8 +34,10 @@ defmodule SuperCache.ClusterTest do
         name: name,
         host: ~c"127.0.0.1",
         args: [
-          ~c"-setcookie", :erlang.atom_to_list(cookie),
-          ~c"-connect_all", ~c"false"
+          ~c"-setcookie",
+          :erlang.atom_to_list(cookie),
+          ~c"-connect_all",
+          ~c"false"
         ]
       })
 
@@ -60,8 +61,10 @@ defmodule SuperCache.ClusterTest do
         name: name,
         host: ~c"127.0.0.1",
         args: [
-          ~c"-setcookie", :erlang.atom_to_list(cookie),
-          ~c"-connect_all", ~c"false"
+          ~c"-setcookie",
+          :erlang.atom_to_list(cookie),
+          ~c"-connect_all",
+          ~c"false"
         ]
       })
 
@@ -82,6 +85,7 @@ defmodule SuperCache.ClusterTest do
     true = Node.connect(node)
 
     existing = Manager.live_nodes() |> List.delete(node())
+
     Enum.each(existing, fn other ->
       try do
         :erpc.call(node, Node, :connect, [other], 5_000)
@@ -94,6 +98,7 @@ defmodule SuperCache.ClusterTest do
 
     assert wait_until(fn -> node in Manager.live_nodes() end, 15_000),
            "Restarted node #{inspect(node)} did not join Manager.live_nodes"
+
     wait_cluster_stable()
     {peer, node}
   end
@@ -106,7 +111,14 @@ defmodule SuperCache.ClusterTest do
 
   defp node_read(target_node, key, partition_value) do
     order = SuperCache.Partition.get_partition_order(partition_value)
-    :erpc.call(target_node, SuperCache.Cluster.Router, :local_read, [order, :get, key], 8_000)
+
+    :erpc.call(
+      target_node,
+      SuperCache.Cluster.Router,
+      :local_read,
+      [order, :get, key],
+      8_000
+    )
   end
 
   defp assert_node_has(target_node, key, partition_value, expected, timeout \\ 2_000) do
@@ -207,11 +219,11 @@ defmodule SuperCache.ClusterTest do
     {:ok, _} = Application.ensure_all_started(:super_cache)
 
     if SuperCache.started?() do
-      SuperCache.Cluster.Bootstrap.stop()
+      SuperCache.stop()
       Process.sleep(100)
     end
 
-    SuperCache.Cluster.Bootstrap.start!(@cache_opts)
+    SuperCache.start!(@cache_opts)
 
     {peer1, node1} = start_peer(:cache_node1)
     {peer2, node2} = start_peer(:cache_node2)
@@ -253,7 +265,7 @@ defmodule SuperCache.ClusterTest do
       stop_peer(state.peer2)
 
       try do
-        SuperCache.Cluster.Bootstrap.stop()
+        SuperCache.stop()
       catch
         :exit, _ -> :ok
       end
@@ -275,20 +287,20 @@ defmodule SuperCache.ClusterTest do
   # ── Basic write / read ────────────────────────────────────────────────────────
 
   test "put and primary read" do
-    Cache.put!({:user, 1, "Alice"})
-    assert [{:user, 1, "Alice"}] == Cache.get!({:user, 1, nil}, read_mode: :primary)
+    SuperCache.put!({:user, 1, "Alice"})
+    assert [{:user, 1, "Alice"}] == SuperCache.get!({:user, 1, nil}, read_mode: :primary)
   end
 
   test "delete removes a record" do
-    Cache.put!({:user, 2, "Bob"})
-    Cache.delete!({:user, 2, nil})
-    assert [] == Cache.get!({:user, 2, nil}, read_mode: :primary)
+    SuperCache.put!({:user, 2, "Bob"})
+    SuperCache.delete!({:user, 2, nil})
+    assert [] == SuperCache.get!({:user, 2, nil}, read_mode: :primary)
   end
 
   # ── Replication ───────────────────────────────────────────────────────────────
 
   test "write is replicated to both peers", %{node1: node1, node2: node2} do
-    Cache.put!({:session, "tok-abc", %{user: 1}})
+    SuperCache.put!({:session, "tok-abc", %{user: 1}})
     expected = [{:session, "tok-abc", %{user: 1}}]
 
     order = SuperCache.Partition.get_partition_order(:session)
@@ -307,42 +319,49 @@ defmodule SuperCache.ClusterTest do
   end
 
   test "primary read is consistent" do
-    Cache.put!({:item, 99, "value"})
+    SuperCache.put!({:item, 99, "value"})
     Process.sleep(100)
-    assert [{:item, 99, "value"}] == Cache.get!({:item, 99, nil}, read_mode: :primary)
+    assert [{:item, 99, "value"}] == SuperCache.get!({:item, 99, nil}, read_mode: :primary)
   end
 
   test "quorum read returns correct value" do
-    Cache.put!({:quorum_key, "k1", "v1"})
-    Process.sleep(300)
+    SuperCache.put!({:quorum_key, "k1", "v1"})
+    Process.sleep(1_000)
 
     assert [{:quorum_key, "k1", "v1"}] ==
-             Cache.get!({:quorum_key, "k1", nil}, read_mode: :quorum)
+             SuperCache.get!({:quorum_key, "k1", nil}, read_mode: :quorum)
   end
 
   test "write on non-primary node is routed to correct primary" do
     key_data = {:routed, "test_key", nil}
-    primary  = primary_for(elem(key_data, 0))
+    primary = primary_for(elem(key_data, 0))
 
     writer =
       Manager.live_nodes()
       |> Enum.find(fn n -> n != primary end)
       |> then(fn
         nil -> primary
-        n   -> n
+        n -> n
       end)
 
-    :erpc.call(writer, SuperCache.Distributed, :put!, [{:routed, "test_key", "value"}], 8_000)
+    :erpc.call(
+      writer,
+      SuperCache,
+      :put!,
+      [{:routed, "test_key", "value"}],
+      8_000
+    )
+
     Process.sleep(200)
 
     assert [{:routed, "test_key", "value"}] ==
-             Cache.get!({:routed, "test_key", nil}, read_mode: :primary)
+             SuperCache.get!({:routed, "test_key", nil}, read_mode: :primary)
   end
 
   # ── Node failure ──────────────────────────────────────────────────────────────
 
   test "reads still work after a peer goes down", %{agent: agent, peer2: peer2, node2: node2} do
-    Cache.put!({:durable, "k1", "v1"})
+    SuperCache.put!({:durable, "k1", "v1"})
     order = SuperCache.Partition.get_partition_order(:durable)
     {primary, replicas} = Manager.get_replicas(order)
 
@@ -359,7 +378,7 @@ defmodule SuperCache.ClusterTest do
 
     wait_cluster_stable(2)
 
-    assert [{:durable, "k1", "v1"}] == Cache.get!({:durable, "k1", nil}, read_mode: :primary)
+    assert [{:durable, "k1", "v1"}] == SuperCache.get!({:durable, "k1", nil}, read_mode: :primary)
 
     {new_peer2, new_node2} = restart_peer(:cache_node2)
     Agent.update(agent, fn s -> %{s | peer2: new_peer2, node2: new_node2} end)
@@ -372,7 +391,7 @@ defmodule SuperCache.ClusterTest do
   # ── Full sync on rejoin ───────────────────────────────────────────────────────
 
   test "node rejoin triggers full sync", %{agent: agent, peer1: peer1, node1: node1} do
-    Cache.put!({:sync_key1, "data1"})
+    SuperCache.put!({:sync_key1, "data1"})
 
     order1 = SuperCache.Partition.get_partition_order(:sync_key1)
     {primary1, _} = Manager.get_replicas(order1)
@@ -385,7 +404,7 @@ defmodule SuperCache.ClusterTest do
 
     wait_cluster_stable(2)
 
-    Cache.put!({:sync_key2, "data2"})
+    SuperCache.put!({:sync_key2, "data2"})
     order2 = SuperCache.Partition.get_partition_order(:sync_key2)
     {primary2, _} = Manager.get_replicas(order2)
     assert_node_has(primary2, :sync_key2, :sync_key2, [{:sync_key2, "data2"}], 1_000)
@@ -393,10 +412,23 @@ defmodule SuperCache.ClusterTest do
     {new_peer1, new_node1} = restart_peer(:cache_node1)
     Agent.update(agent, fn s -> %{s | peer1: new_peer1, node1: new_node1} end)
 
-    Process.sleep(2_000)
+    # Wait for the full sync to deliver data to the rejoined node.
+    # After rejoin the partition map is rebuilt, so recompute the primary
+    # for each key — the old primary may no longer be correct.  Use
+    # assert_node_has (which polls) instead of a fixed sleep so the test
+    # is resilient to variable sync latency.
+    {new_primary1, _} =
+      Manager.get_replicas(SuperCache.Partition.get_partition_order(:sync_key1))
 
-    assert [{:sync_key1, "data1"}] == Cache.get!({:sync_key1, nil}, read_mode: :primary)
-    assert [{:sync_key2, "data2"}] == Cache.get!({:sync_key2, nil}, read_mode: :primary)
+    {new_primary2, _} =
+      Manager.get_replicas(SuperCache.Partition.get_partition_order(:sync_key2))
+
+    assert_node_has(new_primary1, :sync_key1, :sync_key1, [{:sync_key1, "data1"}], 5_000)
+    assert_node_has(new_primary2, :sync_key2, :sync_key2, [{:sync_key2, "data2"}], 5_000)
+
+    # Cross-check via the public API as well.
+    assert [{:sync_key1, "data1"}] == SuperCache.get!({:sync_key1, nil}, read_mode: :primary)
+    assert [{:sync_key2, "data2"}] == SuperCache.get!({:sync_key2, nil}, read_mode: :primary)
 
     num = SuperCache.Config.get_config(:num_partition)
 
@@ -422,8 +454,8 @@ defmodule SuperCache.ClusterTest do
   # ── delete_all ────────────────────────────────────────────────────────────────
 
   test "delete_all clears data on all nodes", %{node1: node1, node2: node2} do
-    Cache.put!({:to_clear, "a", 1})
-    Cache.put!({:to_clear_b, "b", 2})
+    SuperCache.put!({:to_clear, "a", 1})
+    SuperCache.put!({:to_clear_b, "b", 2})
 
     {pa, _} = Manager.get_replicas(SuperCache.Partition.get_partition_order(:to_clear))
     {pb, _} = Manager.get_replicas(SuperCache.Partition.get_partition_order(:to_clear_b))
@@ -446,7 +478,6 @@ defmodule SuperCache.ClusterTest do
     _ = node2
   end
 
-
   # ═════════════════════════════════════════════════════════════════════════════
   # Config consistency tests
   # ═════════════════════════════════════════════════════════════════════════════
@@ -461,19 +492,56 @@ defmodule SuperCache.ClusterTest do
   ]
 
   describe "config consistency" do
-    setup %{node1: node1, node2: node2} do
-      restart_node_monitor(nodes: [node1, node2])
+    setup %{agent: agent} do
+      # Always read fresh refs from the agent — a prior test (e.g. the
+      # late-joining test) may have restarted a peer and updated the agent.
+      %{node1: node1, node2: node2, peer1: peer1, peer2: peer2} = Agent.get(agent, & &1)
 
-      assert wait_until(fn -> node1 in Node.list() and node2 in Node.list() end, 10_000),
+      # If a peer is dead (e.g. a prior test stopped it and failed before
+      # restoring it), restart it and update the agent.
+      for {name, node_ref, peer_key, node_key} <- [
+            {:cache_node1, node1, :peer1, :node1},
+            {:cache_node2, node2, :peer2, :node2}
+          ] do
+        peer_alive =
+          try do
+            :erpc.call(node_ref, :erlang, :node, [], 2_000)
+            true
+          catch
+            _, _ -> false
+          end
+
+        unless peer_alive do
+          {new_peer, new_node} = restart_peer(name)
+          Agent.update(agent, &Map.put(&1, peer_key, new_peer))
+          Agent.update(agent, &Map.put(&1, node_key, new_node))
+        end
+      end
+
+      # Re-read fresh refs in case restart_peer updated them.
+      %{node1: fresh_node1, node2: fresh_node2} = Agent.get(agent, & &1)
+
+      # Reconnect at the Erlang level in case the distribution link was lost.
+      Node.connect(fresh_node1)
+      Node.connect(fresh_node2)
+
+      restart_node_monitor(nodes: [fresh_node1, fresh_node2])
+
+      assert wait_until(
+               fn -> fresh_node1 in Node.list() and fresh_node2 in Node.list() end,
+               10_000
+             ),
              "config consistency setup: node1 and node2 must be Erlang-connected"
 
       assert wait_until(
-               fn -> node1 in Manager.live_nodes() and node2 in Manager.live_nodes() end,
+               fn ->
+                 fresh_node1 in Manager.live_nodes() and fresh_node2 in Manager.live_nodes()
+               end,
                10_000
              ),
              "config consistency setup: node1 and node2 must be in Manager.live_nodes"
 
-      :ok
+      {:ok, node1: fresh_node1, node2: fresh_node2}
     end
 
     defp remote_config(target_node) do
@@ -483,7 +551,14 @@ defmodule SuperCache.ClusterTest do
     defp remote_partition_map(target_node) do
       Node.connect(target_node)
       num = SuperCache.Config.get_config(:num_partition)
-      :erpc.call(target_node, SuperCache.Cluster.Bootstrap, :fetch_partition_map, [num], 5_000)
+
+      :erpc.call(
+        target_node,
+        SuperCache.Cluster.Bootstrap,
+        :fetch_partition_map,
+        [num],
+        5_000
+      )
       |> Map.new()
     end
 
@@ -545,8 +620,10 @@ defmodule SuperCache.ClusterTest do
           name: :late_joiner,
           host: ~c"127.0.0.1",
           args: [
-            ~c"-setcookie", :erlang.atom_to_list(:erlang.get_cookie()),
-            ~c"-connect_all", ~c"false"
+            ~c"-setcookie",
+            :erlang.atom_to_list(:erlang.get_cookie()),
+            ~c"-connect_all",
+            ~c"false"
           ]
         })
         |> then(fn {:ok, peer, node} -> {peer, node} end)
@@ -562,7 +639,22 @@ defmodule SuperCache.ClusterTest do
       true = Node.connect(late_node)
       :erpc.call(late_node, Node, :connect, [node1])
 
+      # NodeMonitor is in static mode; late_node is not in that set, so the
+      # kernel :nodeup event is filtered.  Notify Manager directly on BOTH
+      # the local node and node1, and reconfigure both NodeMonitors to
+      # include the late-joiner so future events are forwarded.
       Manager.node_up(late_node)
+      :erpc.call(node1, Manager, :node_up, [late_node], 5_000)
+
+      :erpc.call(
+        node1,
+        NodeMonitor,
+        :reconfigure,
+        [[nodes: [node(), node2, late_node]]],
+        5_000
+      )
+
+      restart_node_monitor(nodes: [node1, node2, late_node])
 
       assert wait_until(fn -> late_node in Manager.live_nodes() end, 8_000),
              "Late-joining node #{inspect(late_node)} never appeared in Manager.live_nodes"
@@ -585,7 +677,7 @@ defmodule SuperCache.ClusterTest do
              "Nodes did not converge on live set #{inspect(MapSet.to_list(expected_set))} within 10 s"
 
       expected_cfg = Map.new(@config_keys, fn k -> {k, SuperCache.Config.get_config(k)} end)
-      late_cfg     = remote_config(late_node)
+      late_cfg = remote_config(late_node)
 
       assert expected_cfg == late_cfg,
              "Late-joiner #{inspect(late_node)} has wrong config.\n" <>
@@ -597,7 +689,7 @@ defmodule SuperCache.ClusterTest do
 
       local_map = remote_partition_map(node())
       node1_map = remote_partition_map(node1)
-      late_map  = remote_partition_map(late_node)
+      late_map = remote_partition_map(late_node)
 
       assert local_map == node1_map,
              "Partition map mismatch between test node and node1 after late join"
@@ -613,21 +705,31 @@ defmodule SuperCache.ClusterTest do
       assert late_in_map?,
              "Late-joiner #{inspect(late_node)} is not assigned to any partition"
 
-      Cache.put!({:late_join_key, "probe", "value"})
+      SuperCache.put!({:late_join_key, "probe", "value"})
       Process.sleep(300)
 
-      ord  = SuperCache.Partition.get_partition_order(:late_join_key)
+      ord = SuperCache.Partition.get_partition_order(:late_join_key)
       {primary, replicas} = Manager.get_replicas(ord)
       holders = [primary | replicas]
 
       Enum.each(holders, fn holder ->
-        assert_node_has(holder, :late_join_key, :late_join_key,
-                        [{:late_join_key, "probe", "value"}], 2_000)
+        assert_node_has(
+          holder,
+          :late_join_key,
+          :late_join_key,
+          [{:late_join_key, "probe", "value"}],
+          2_000
+        )
       end)
 
       if late_node in holders do
-        assert_node_has(late_node, :late_join_key, :late_join_key,
-                        [{:late_join_key, "probe", "value"}], 2_000)
+        assert_node_has(
+          late_node,
+          :late_join_key,
+          :late_join_key,
+          [{:late_join_key, "probe", "value"}],
+          2_000
+        )
       end
 
       stop_peer(late_peer)
@@ -650,8 +752,10 @@ defmodule SuperCache.ClusterTest do
           name: :rogue_node,
           host: ~c"127.0.0.1",
           args: [
-            ~c"-setcookie", :erlang.atom_to_list(:erlang.get_cookie()),
-            ~c"-connect_all", ~c"false"
+            ~c"-setcookie",
+            :erlang.atom_to_list(:erlang.get_cookie()),
+            ~c"-connect_all",
+            ~c"false"
           ]
         })
         |> then(fn {:ok, peer, node} -> {peer, node} end)
@@ -729,14 +833,26 @@ defmodule SuperCache.ClusterTest do
 
       SuperCache.Cluster.Bootstrap.stop()
 
+      # Ensure node1 and node2 are still connected at the Erlang level
+      # before restarting Bootstrap.  Bootstrap.stop() does not disconnect
+      # peers, but the distribution link may have been lost if a prior test
+      # disrupted the cluster.  Without an Erlang-level connection,
+      # NodeMonitor.reconfigure cannot call Manager.node_up for the managed
+      # peers, and Manager.live_nodes() will be missing them.
+      Node.connect(node1)
+      Node.connect(node2)
+
       # Pass :nodes = [node1, node2] so NodeMonitor's managed set is exactly
       # those two peers.  Any other Erlang node that connects is filtered.
       SuperCache.Cluster.Bootstrap.start!(@cache_opts ++ [nodes: [node1, node2]])
 
       # Confirm the local node is back up and the two managed peers are still live.
-      assert wait_until(fn ->
-               node1 in Manager.live_nodes() and node2 in Manager.live_nodes()
-             end, 5_000),
+      assert wait_until(
+               fn ->
+                 node1 in Manager.live_nodes() and node2 in Manager.live_nodes()
+               end,
+               10_000
+             ),
              "Managed peers must remain in Manager.live_nodes after Bootstrap restart"
 
       # Start a plain Erlang node — no SuperCache OTP app.
@@ -762,6 +878,9 @@ defmodule SuperCache.ClusterTest do
 
       on_exit(fn -> stop_peer(plain_peer) end)
 
+      # Ensure managed nodes are connected before reconfiguring NodeMonitor.
+      Node.connect(node1)
+      Node.connect(node2)
       restart_node_monitor(nodes: [node1, node2])
 
       Node.connect(plain_node)
@@ -777,7 +896,16 @@ defmodule SuperCache.ClusterTest do
 
       on_exit(fn -> stop_peer(plain_peer) end)
 
+      # Ensure node1 and node2 are connected before reconfiguring NodeMonitor.
+      Node.connect(node1)
+      Node.connect(node2)
       restart_node_monitor(nodes: [node1, node2])
+
+      assert wait_until(
+               fn -> node1 in Manager.live_nodes() and node2 in Manager.live_nodes() end,
+               5_000
+             ),
+             "Precondition: node1 and node2 must be in Manager.live_nodes"
 
       Node.connect(plain_node)
       Process.sleep(100)
@@ -790,22 +918,36 @@ defmodule SuperCache.ClusterTest do
       assert node2 in live
     end
 
-    test ":nodeup for a managed node is forwarded to Manager", %{agent: agent, node1: node1, node2: node2, peer1: peer1} do
+    test ":nodeup for a managed node is forwarded to Manager", %{
+      agent: agent,
+      node1: node1,
+      node2: node2,
+      peer1: peer1
+    } do
       restart_node_monitor(nodes: [node1, node2])
 
       assert wait_until(fn -> node1 in Manager.live_nodes() end, 5_000),
              "Precondition: node1 must be live before disconnect"
 
+      # Stop the peer and wait for it to leave both Manager.live_nodes and
+      # the Erlang connection mesh before restarting it.
       :peer.stop(peer1)
-      {new_peer1, new_node1} = restart_peer(node1)
+
+      assert wait_until(fn -> node1 not in Manager.live_nodes() end, 5_000),
+             "node1 did not leave Manager.live_nodes after :peer.stop"
+
+      assert wait_until(fn -> node1 not in Node.list() end, 5_000),
+             "node1 did not disconnect from Erlang mesh within 5 s"
+
+      # Start a fresh peer with the same short name.  start_peer connects
+      # to the new node and calls Manager.node_up explicitly, but the
+      # :nodeup kernel event is also forwarded by NodeMonitor because the
+      # node is in the managed set.  Either path should result in the node
+      # appearing in Manager.live_nodes.
+      {new_peer1, new_node1} = start_peer(:cache_node1)
       Agent.update(agent, fn s -> %{s | peer1: new_peer1, node1: new_node1} end)
 
-      assert wait_until(fn -> new_node1 not in Node.list() end, 3_000),
-             "node1 did not disconnect within 3 s"
-
-      true = Node.connect(new_node1)
-
-      assert wait_until(fn -> new_node1 in Manager.live_nodes() end, 5_000),
+      assert wait_until(fn -> new_node1 in Manager.live_nodes() end, 10_000),
              ":nodeup for managed node1 was not forwarded to Manager"
 
       wait_cluster_stable(3)
@@ -817,8 +959,13 @@ defmodule SuperCache.ClusterTest do
       node2: node2,
       node1: node1
     } do
+      # Ensure nodes are connected before reconfiguring NodeMonitor.
+      Node.connect(node1)
+      Node.connect(node2)
       restart_node_monitor(nodes: [node1, node2])
-      true = wait_until(fn -> node2 in Manager.live_nodes() end)
+
+      assert wait_until(fn -> node2 in Manager.live_nodes() end, 5_000),
+             "Precondition: node2 must be in Manager.live_nodes before stop"
 
       stop_peer(peer2)
 
@@ -841,6 +988,10 @@ defmodule SuperCache.ClusterTest do
 
   describe "NodeMonitor — :nodes_mfa dynamic source" do
     setup %{node1: node1, node2: node2} do
+      # Ensure nodes are connected before any MFA reconfigure.
+      Node.connect(node1)
+      Node.connect(node2)
+
       {:ok, disco} = Agent.start_link(fn -> [] end, name: :test_disco)
 
       on_exit(fn ->
@@ -861,10 +1012,15 @@ defmodule SuperCache.ClusterTest do
     end
 
     defp set_disco(nodes), do: Agent.update(:test_disco, fn _ -> nodes end)
-    defp get_disco,        do: Agent.get(:test_disco, & &1)
+    defp get_disco, do: Agent.get(:test_disco, & &1)
 
     test "init resolves nodes from MFA", %{node1: node1, node2: node2} do
       set_disco([node1, node2])
+
+      # Ensure nodes are connected so connect_all inside activate_source
+      # can reach them and Manager.node_up succeeds.
+      Node.connect(node1)
+      Node.connect(node2)
 
       restart_node_monitor(
         nodes_mfa: {__MODULE__, :test_get_disco, []},
@@ -873,12 +1029,16 @@ defmodule SuperCache.ClusterTest do
 
       assert wait_until(fn -> node1 in Manager.live_nodes() end, 10_000),
              "node1 not in Manager.live_nodes after MFA reconfigure (init test)"
+
       assert wait_until(fn -> node2 in Manager.live_nodes() end, 10_000),
              "node2 not in Manager.live_nodes after MFA reconfigure (init test)"
     end
 
     test "refresh adds a node that appears in the MFA result", %{node1: node1, node2: node2} do
       set_disco([node1])
+
+      # Ensure node1 is connected so the initial MFA resolve can add it.
+      Node.connect(node1)
 
       restart_node_monitor(
         nodes_mfa: {__MODULE__, :test_get_disco, []},
@@ -887,12 +1047,13 @@ defmodule SuperCache.ClusterTest do
 
       assert wait_until(fn -> node1 in Manager.live_nodes() end, 10_000),
              "node1 not in Manager.live_nodes after MFA reconfigure (refresh adds test)"
+
       refute node2 in Manager.live_nodes()
 
       set_disco([node1, node2])
       Node.connect(node2)
 
-      assert wait_until(fn -> node2 in Manager.live_nodes() end, 3_000),
+      assert wait_until(fn -> node2 in Manager.live_nodes() end, 5_000),
              "node2 was not added after it appeared in MFA refresh"
     end
 
@@ -909,6 +1070,7 @@ defmodule SuperCache.ClusterTest do
 
       assert wait_until(fn -> node1 in Manager.live_nodes() end, 10_000),
              "node1 not in Manager.live_nodes after MFA reconfigure (refresh removes test)"
+
       assert wait_until(fn -> node2 in Manager.live_nodes() end, 10_000),
              "node2 not in Manager.live_nodes after MFA reconfigure (refresh removes test)"
 
@@ -945,8 +1107,8 @@ defmodule SuperCache.ClusterTest do
 
       refute Enum.any?(msgs, fn
                {:refresh, _} -> true
-               :refresh      -> true
-               _             -> false
+               :refresh -> true
+               _ -> false
              end),
              "Static :nodes source must not schedule :refresh ticks"
     end

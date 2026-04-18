@@ -28,15 +28,15 @@ defmodule SuperCache.Stack do
   require SuperCache.Log
 
   alias SuperCache.{Storage, Partition, Config}
-  alias SuperCache.Cluster.{Manager, Replicator, ThreePhaseCommit}
+  alias SuperCache.Cluster.DistributedHelpers
 
   ## ── Public API ──────────────────────────────────────────────────────────────
 
   @doc "Push `value` onto `stack_name`. Creates the stack if it does not exist."
   @spec push(any, any) :: true
   def push(stack_name, value) do
-    if distributed?() do
-      route_write(stack_name, :dist_push, [stack_name, value])
+    if Config.distributed?() do
+      DistributedHelpers.route_write(__MODULE__, :dist_push, [stack_name, value], idx(stack_name))
     else
       local_push(Partition.get_partition(stack_name), stack_name, value)
     end
@@ -45,8 +45,13 @@ defmodule SuperCache.Stack do
   @doc "Pop and return the top value. Returns `default` (`nil`) when empty."
   @spec pop(any, any) :: any
   def pop(stack_name, default \\ nil) do
-    if distributed?() do
-      route_write(stack_name, :dist_pop, [stack_name, default])
+    if Config.distributed?() do
+      DistributedHelpers.route_write(
+        __MODULE__,
+        :dist_pop,
+        [stack_name, default],
+        idx(stack_name)
+      )
     else
       local_pop(Partition.get_partition(stack_name), stack_name, default)
     end
@@ -61,8 +66,8 @@ defmodule SuperCache.Stack do
   """
   @spec count(any, keyword) :: non_neg_integer
   def count(stack_name, opts \\ []) do
-    if distributed?() do
-      route_read(stack_name, :dist_count, [stack_name], opts)
+    if Config.distributed?() do
+      DistributedHelpers.route_read(__MODULE__, :dist_count, [stack_name], idx(stack_name), opts)
     else
       local_count(stack_name)
     end
@@ -71,8 +76,8 @@ defmodule SuperCache.Stack do
   @doc "Drain all items top-first. Returns `[]` for an empty stack."
   @spec get_all(any) :: list
   def get_all(stack_name) do
-    if distributed?() do
-      route_write(stack_name, :dist_get_all, [stack_name])
+    if Config.distributed?() do
+      DistributedHelpers.route_write(__MODULE__, :dist_get_all, [stack_name], idx(stack_name))
     else
       local_drain(Partition.get_partition(stack_name), stack_name)
     end
@@ -227,7 +232,7 @@ defmodule SuperCache.Stack do
           {:put, {{:stack, stack_name, next}, value}}
         ]
 
-        apply_write(idx(stack_name), partition, ops)
+        DistributedHelpers.apply_write(idx(stack_name), partition, ops)
         unlock(partition, stack_name)
         true
     end
@@ -264,7 +269,7 @@ defmodule SuperCache.Stack do
                ]}
           end
 
-        apply_write(idx(stack_name), partition, ops)
+        DistributedHelpers.apply_write(idx(stack_name), partition, ops)
         unlock(partition, stack_name)
         value
     end
@@ -290,7 +295,7 @@ defmodule SuperCache.Stack do
           end)
 
         reset_ops = [{:put, {{:stack, :counter, stack_name}, 0}}]
-        apply_write(idx(stack_name), partition, del_ops ++ reset_ops)
+        DistributedHelpers.apply_write(idx(stack_name), partition, del_ops ++ reset_ops)
         unlock(partition, stack_name)
         values
     end
@@ -298,7 +303,10 @@ defmodule SuperCache.Stack do
 
   defp dist_init(stack_name) do
     part = Partition.get_partition(stack_name)
-    apply_write(idx(stack_name), part, [{:put, {{:stack, :counter, stack_name}, 0}}])
+
+    DistributedHelpers.apply_write(idx(stack_name), part, [
+      {:put, {{:stack, :counter, stack_name}, 0}}
+    ])
   end
 
   ## ── Private — shared helpers ─────────────────────────────────────────────────
@@ -306,107 +314,5 @@ defmodule SuperCache.Stack do
   defp lock(partition, name), do: Storage.put({{:stack, :updating, name}, true}, partition)
   defp unlock(partition, name), do: Storage.delete({:stack, :updating, name}, partition)
 
-  defp distributed?(), do: Config.get_config(:cluster, :local) == :distributed
   defp idx(name), do: Partition.get_partition_order(name)
-
-  defp apply_write(idx, partition, ops) do
-    case Manager.replication_mode() do
-      :strong ->
-        case ThreePhaseCommit.commit(idx, ops) do
-          :ok ->
-            :ok
-
-          {:error, r} ->
-            Logger.error("super_cache, stack, 3pc failed: #{inspect(r)}")
-            {:error, r}
-        end
-
-      _ ->
-        Enum.each(ops, fn
-          {:put, r} ->
-            Storage.put(r, partition)
-            Replicator.replicate(idx, :put, r)
-
-          {:delete, k} ->
-            Storage.delete(k, partition)
-            Replicator.replicate(idx, :delete, k)
-
-          {:delete_match, p} ->
-            Storage.delete_match(p, partition)
-            Replicator.replicate(idx, :delete_match, p)
-
-          {:delete_all, _} ->
-            Storage.delete_all(partition)
-            Replicator.replicate(idx, :delete_all, nil)
-        end)
-
-        :ok
-    end
-  end
-
-  defp route_write(stack_name, fun, args) do
-    {primary, _} = Manager.get_replicas(idx(stack_name))
-
-    if primary == node() do
-      apply(__MODULE__, fun, args)
-    else
-      SuperCache.Log.debug(fn ->
-        "super_cache, stack #{inspect(stack_name)}, fwd #{fun} → #{inspect(primary)}"
-      end)
-
-      :erpc.call(primary, __MODULE__, fun, args, 5_000)
-    end
-  end
-
-  defp route_read(stack_name, fun, args, opts) do
-    mode = Keyword.get(opts, :read_mode, :local)
-    eff = if mode == :local and not has_partition?(stack_name), do: :primary, else: mode
-
-    case eff do
-      :local ->
-        apply(__MODULE__, fun, args)
-
-      :primary ->
-        {primary, _} = Manager.get_replicas(idx(stack_name))
-
-        if primary == node(),
-          do: apply(__MODULE__, fun, args),
-          else: :erpc.call(primary, __MODULE__, fun, args, 5_000)
-
-      :quorum ->
-        {primary, replicas} = Manager.get_replicas(idx(stack_name))
-
-        results =
-          [primary | replicas]
-          |> Task.async_stream(
-            fn
-              n when n == node() -> apply(__MODULE__, fun, args)
-              n -> :erpc.call(n, __MODULE__, fun, args, 5_000)
-            end,
-            timeout: 5_000,
-            on_timeout: :kill_task
-          )
-          |> Enum.flat_map(fn
-            {:ok, r} -> [r]
-            _ -> []
-          end)
-
-        majority = div(length(results), 2) + 1
-
-        case Enum.find(Enum.frequencies(results), fn {_, c} -> c >= majority end) do
-          {result, _} ->
-            result
-
-          nil ->
-            if primary == node(),
-              do: apply(__MODULE__, fun, args),
-              else: :erpc.call(primary, __MODULE__, fun, args, 5_000)
-        end
-    end
-  end
-
-  defp has_partition?(name) do
-    {p, rs} = Manager.get_replicas(idx(name))
-    node() in [p | rs]
-  end
 end

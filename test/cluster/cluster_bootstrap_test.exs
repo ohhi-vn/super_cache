@@ -71,13 +71,13 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
   # this test suite.  Any deviation from these values in a joiner's
   # Bootstrap.start!/1 call should be rejected once a seeded peer is live.
   @base_opts [
-    key_pos:            0,
-    partition_pos:      0,
-    cluster:            :distributed,
+    key_pos: 0,
+    partition_pos: 0,
+    cluster: :distributed,
     replication_factor: 2,
-    num_partition:      8,
-    table_type:         :set,
-    replication_mode:   :async
+    num_partition: 8,
+    table_type: :set,
+    replication_mode: :async
   ]
 
   # The six structural keys Bootstrap.verify_cluster_config!/1 checks.
@@ -90,7 +90,6 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
     :replication_factor,
     :replication_mode
   ]
-
 
   # ── Setup ─────────────────────────────────────────────────────────────────────
 
@@ -128,10 +127,60 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
     {peer, node}
   end
 
+  # Like start_seeded_peer/2, but isolates the peer from the test runner
+  # before bootstrapping so that verify_cluster_config!/1 does not see the
+  # test runner in Manager.live_nodes().
+  #
+  # The :erpc.call inside start_blank_peer creates an Erlang distribution
+  # connection between the test runner and the new peer.  The peer's
+  # NodeMonitor (in :all mode) forwards the :nodeup to Manager, so the
+  # test runner ends up in Manager.live_nodes().  If the peer then calls
+  # Bootstrap.start!/1 with different structural opts (e.g. num_partition:
+  # 4 vs 8), verify_cluster_config! detects the mismatch and raises
+  # before the test can reach the joiner.
+  #
+  # Strategy:
+  #   1. Reconfigure the peer's NodeMonitor to an empty managed set so
+  #      future :nodeup/:nodedown events are filtered.
+  #   2. Remove the test runner from the peer's Manager.live_nodes().
+  #   3. Bootstrap with `nodes: []` so the NodeMonitor stays empty even
+  #      if :erpc.call temporarily reconnects us.
+  defp start_isolated_seeded_peer(name, opts) do
+    {peer, n} = start_blank_peer(name)
+
+    # Step 1 — shrink the managed set to empty so future kernel events
+    # are ignored by NodeMonitor.
+    :erpc.call(n, NodeMonitor, :reconfigure, [[nodes: []]], 5_000)
+
+    # Step 2 — remove the test runner from the peer's Manager.live_nodes()
+    # so verify_cluster_config! has no peers to check against.
+    :erpc.call(n, Manager, :node_down, [node()], 5_000)
+
+    # Wait until the cast is processed and the test runner is gone.
+    wait_until(
+      fn ->
+        try do
+          node() not in :erpc.call(n, Manager, :live_nodes, [], 3_000)
+        catch
+          _, _ -> false
+        end
+      end,
+      3_000
+    )
+
+    # Step 3 — bootstrap with an empty managed set.  Even if the
+    # :erpc.call above reconnected the test runner at the Erlang level,
+    # the NodeMonitor will filter the :nodeup because the managed set is
+    # empty.
+    isolated_opts = Keyword.put(opts, :nodes, [])
+    :erpc.call(n, Bootstrap, :start!, [isolated_opts], 15_000)
+    {peer, n}
+  end
+
   # Start a `:peer` node with the OTP app running but `Bootstrap.start!/1`
   # NOT called.
   defp start_blank_peer(name) do
-    cookie    = :erlang.get_cookie()
+    cookie = :erlang.get_cookie()
     code_path = :code.get_path()
 
     {:ok, peer, node} =
@@ -139,8 +188,10 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
         name: name,
         host: ~c"127.0.0.1",
         args: [
-          ~c"-setcookie", :erlang.atom_to_list(cookie),
-          ~c"-connect_all", ~c"false"
+          ~c"-setcookie",
+          :erlang.atom_to_list(cookie),
+          ~c"-connect_all",
+          ~c"false"
         ]
       })
 
@@ -162,8 +213,10 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
         name: name,
         host: ~c"127.0.0.1",
         args: [
-          ~c"-setcookie", :erlang.atom_to_list(cookie),
-          ~c"-connect_all", ~c"false"
+          ~c"-setcookie",
+          :erlang.atom_to_list(cookie),
+          ~c"-connect_all",
+          ~c"false"
         ]
       })
 
@@ -239,7 +292,9 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
 
     Stream.repeatedly(fn -> fun.() end)
     |> Enum.find(fn
-      true -> true
+      true ->
+        true
+
       _ ->
         if System.monotonic_time(:millisecond) >= deadline, do: throw(:timeout)
         Process.sleep(100)
@@ -281,7 +336,7 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
 
       for key <- @config_keys do
         expected = Keyword.get(@base_opts, key)
-        got      = Map.get(cfg, key)
+        got = Map.get(cfg, key)
 
         assert got == expected,
                "export_config key #{inspect(key)}: expected #{inspect(expected)}, got #{inspect(got)}"
@@ -290,18 +345,21 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
 
     test ":started is NOT included (liveness flag, not structural config)", %{node: node} do
       cfg = :erpc.call(node, Bootstrap, :export_config, [], 5_000)
+
       refute Map.has_key?(cfg, :started),
              ":started must not appear in export_config — it is a liveness flag"
     end
 
     test ":cluster is NOT included (always :distributed in this module)", %{node: node} do
       cfg = :erpc.call(node, Bootstrap, :export_config, [], 5_000)
+
       refute Map.has_key?(cfg, :cluster),
              ":cluster must not appear in export_config"
     end
 
     test ":table_prefix is NOT included (crash-detectable before verify)", %{node: node} do
       cfg = :erpc.call(node, Bootstrap, :export_config, [], 5_000)
+
       refute Map.has_key?(cfg, :table_prefix),
              ":table_prefix must not appear in export_config"
     end
@@ -369,7 +427,9 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
 
       bad_opts = Keyword.delete(@base_opts, :key_pos)
 
-      msg = erpc_argument_error(fn -> :erpc.call(node, Bootstrap, :start!, [bad_opts], 15_000) end)
+      msg =
+        erpc_argument_error(fn -> :erpc.call(node, Bootstrap, :start!, [bad_opts], 15_000) end)
+
       assert msg =~ ":key_pos",
              "Error must mention :key_pos, got: #{msg}"
     end
@@ -380,7 +440,9 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
 
       bad_opts = Keyword.delete(@base_opts, :partition_pos)
 
-      msg = erpc_argument_error(fn -> :erpc.call(node, Bootstrap, :start!, [bad_opts], 15_000) end)
+      msg =
+        erpc_argument_error(fn -> :erpc.call(node, Bootstrap, :start!, [bad_opts], 15_000) end)
+
       assert msg =~ ":partition_pos",
              "Error must mention :partition_pos, got: #{msg}"
     end
@@ -391,7 +453,9 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
 
       bad_opts = Keyword.put(@base_opts, :replication_mode, :lazy)
 
-      msg = erpc_argument_error(fn -> :erpc.call(node, Bootstrap, :start!, [bad_opts], 15_000) end)
+      msg =
+        erpc_argument_error(fn -> :erpc.call(node, Bootstrap, :start!, [bad_opts], 15_000) end)
+
       assert msg =~ ":replication_mode",
              "Error must mention :replication_mode, got: #{msg}"
     end
@@ -408,7 +472,8 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
       {peer, node} = start_blank_peer(:val_sync)
       on_exit(fn -> stop_peer(peer) end)
 
-      opts = @base_opts  # must match primary node config
+      # must match primary node config
+      opts = @base_opts
       assert :ok == :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
     end
 
@@ -416,7 +481,8 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
       {peer, node} = start_blank_peer(:val_strong)
       on_exit(fn -> stop_peer(peer) end)
 
-      opts = @base_opts  # must match primary node config
+      # must match primary node config
+      opts = @base_opts
       assert :ok == :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
     end
 
@@ -522,12 +588,13 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
         |> Keyword.put(:nodes, [:"a@127.0.0.1"])
         |> Keyword.put(:nodes_mfa, {Node, :list, []})
 
-      msg = erpc_argument_error(fn ->
-        :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
-      end)
+      msg =
+        erpc_argument_error(fn ->
+          :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
+        end)
 
       # Both keys must be named so the operator knows which pair conflicts.
-      assert msg =~ ":nodes",     "Error must mention :nodes, got: #{msg}"
+      assert msg =~ ":nodes", "Error must mention :nodes, got: #{msg}"
       assert msg =~ ":nodes_mfa", "Error must mention :nodes_mfa, got: #{msg}"
     end
 
@@ -537,9 +604,10 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
 
       opts = Keyword.put(@base_opts, :nodes, ["not_an_atom"])
 
-      msg = erpc_argument_error(fn ->
-        :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
-      end)
+      msg =
+        erpc_argument_error(fn ->
+          :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
+        end)
 
       assert msg =~ ":nodes",
              "Error must mention :nodes, got: #{msg}"
@@ -551,9 +619,10 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
 
       opts = Keyword.put(@base_opts, :nodes, :"a@127.0.0.1")
 
-      msg = erpc_argument_error(fn ->
-        :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
-      end)
+      msg =
+        erpc_argument_error(fn ->
+          :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
+        end)
 
       assert msg =~ ":nodes",
              "Error must mention :nodes, got: #{msg}"
@@ -565,9 +634,10 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
 
       opts = Keyword.put(@base_opts, :nodes_mfa, :bad_value)
 
-      msg = erpc_argument_error(fn ->
-        :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
-      end)
+      msg =
+        erpc_argument_error(fn ->
+          :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
+        end)
 
       assert msg =~ ":nodes_mfa",
              "Error must mention :nodes_mfa, got: #{msg}"
@@ -579,9 +649,10 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
 
       opts = Keyword.put(@base_opts, :nodes_mfa, {Node, :list, :not_a_list})
 
-      msg = erpc_argument_error(fn ->
-        :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
-      end)
+      msg =
+        erpc_argument_error(fn ->
+          :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
+        end)
 
       assert msg =~ ":nodes_mfa",
              "Error must mention :nodes_mfa, got: #{msg}"
@@ -596,9 +667,10 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
         |> Keyword.put(:nodes, [:"a@127.0.0.1"])
         |> Keyword.put(:refresh_ms, 0)
 
-      msg = erpc_argument_error(fn ->
-        :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
-      end)
+      msg =
+        erpc_argument_error(fn ->
+          :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
+        end)
 
       assert msg =~ ":refresh_ms",
              "Error must mention :refresh_ms, got: #{msg}"
@@ -613,9 +685,10 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
         |> Keyword.put(:nodes, [:"a@127.0.0.1"])
         |> Keyword.put(:refresh_ms, -1_000)
 
-      msg = erpc_argument_error(fn ->
-        :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
-      end)
+      msg =
+        erpc_argument_error(fn ->
+          :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
+        end)
 
       assert msg =~ ":refresh_ms",
              "Error must mention :refresh_ms, got: #{msg}"
@@ -630,9 +703,10 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
         |> Keyword.put(:nodes, [:"a@127.0.0.1"])
         |> Keyword.put(:refresh_ms, 5.0)
 
-      msg = erpc_argument_error(fn ->
-        :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
-      end)
+      msg =
+        erpc_argument_error(fn ->
+          :erpc.call(node, Bootstrap, :start!, [opts], 15_000)
+        end)
 
       assert msg =~ ":refresh_ms",
              "Error must mention :refresh_ms, got: #{msg}"
@@ -648,7 +722,8 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
       bad_opts =
         @base_opts
         |> Keyword.put(:nodes, [:"a@127.0.0.1"])
-        |> Keyword.put(:nodes_mfa, {Node, :list, []})  # mutually exclusive
+        # mutually exclusive
+        |> Keyword.put(:nodes_mfa, {Node, :list, []})
 
       try do
         :erpc.call(node, Bootstrap, :start!, [bad_opts], 15_000)
@@ -703,7 +778,7 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
     test ":nodes forwarded — managed node IS added to Manager after connect" do
       # Symmetric complement of the previous test: a node that IS in the
       # :nodes list must be added to Manager when it connects.
-      {seed_peer, seed_node}   = start_seeded_peer(:ns_fwd_seed)
+      {seed_peer, seed_node} = start_seeded_peer(:ns_fwd_seed)
       {joiner_peer, joiner_node} = start_blank_peer(:ns_fwd_joiner)
 
       on_exit(fn ->
@@ -737,7 +812,7 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
       # Use Node.list/0 as the MFA.  On a freshly started blank peer with no
       # other Erlang connections, Node.list() returns [].  We then connect a
       # seeded peer and verify that the subsequent refresh tick picks it up.
-      {seed_peer, seed_node}   = start_seeded_peer(:ns_mfa_fwd_seed)
+      {seed_peer, seed_node} = start_seeded_peer(:ns_mfa_fwd_seed)
       {joiner_peer, joiner_node} = start_blank_peer(:ns_mfa_fwd_joiner)
 
       on_exit(fn ->
@@ -777,7 +852,7 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
       # :all mode — every Erlang :nodeup event is forwarded to Manager.
       # We verify this by connecting a seeded peer and checking it is added
       # without any explicit reconfigure call.
-      {seed_peer, seed_node}   = start_seeded_peer(:ns_all_seed)
+      {seed_peer, seed_node} = start_seeded_peer(:ns_all_seed)
       {joiner_peer, joiner_node} = start_blank_peer(:ns_all_joiner)
 
       on_exit(fn ->
@@ -852,14 +927,17 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
       :erpc.call(joiner_node, Node, :connect, [seed_node1], 5_000)
       :erpc.call(joiner_node, Node, :connect, [seed_node2], 5_000)
 
-      assert wait_until(fn ->
-               try do
-                 live = :erpc.call(joiner_node, Manager, :live_nodes, [], 3_000)
-                 seed_node1 in live and seed_node2 in live
-               catch
-                 _, _ -> false
-               end
-             end, 8_000),
+      assert wait_until(
+               fn ->
+                 try do
+                   live = :erpc.call(joiner_node, Manager, :live_nodes, [], 3_000)
+                   seed_node1 in live and seed_node2 in live
+                 catch
+                   _, _ -> false
+                 end
+               end,
+               8_000
+             ),
              "Joiner Manager never reached both seeded peers"
 
       assert :ok == :erpc.call(joiner_node, Bootstrap, :start!, [@base_opts], 15_000)
@@ -897,6 +975,7 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
              "Test precondition failed"
 
       opts = Keyword.put(@base_opts, :nodes, [seed_node])
+
       assert :ok == :erpc.call(joiner_node, Bootstrap, :start!, [opts], 15_000),
              "Presence of :nodes in opts must not affect config verification"
 
@@ -948,7 +1027,7 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
     end
 
     test "raises ArgumentError when :replication_mode differs" do
-      wrong_opts = @base_opts  # must match primary node config
+      wrong_opts = Keyword.put(@base_opts, :replication_mode, :sync)
       msg = assert_mismatch_raises(:mm_rm_seed, :mm_rm_joiner, wrong_opts)
 
       assert msg =~ "replication_mode",
@@ -1077,8 +1156,14 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
 
     test "only the disagreeing peer appears in the error — agreeing peers are not listed" do
       {seed_ok_peer, seed_ok_node} = start_seeded_peer(:mm_agree_ok_seed)
-      {seed_bad_peer, seed_bad_node} =
-        start_seeded_peer(:mm_agree_bad_seed, Keyword.put(@base_opts, :num_partition, 4))
+
+      # Use start_isolated_seeded_peer so the bad seed bootstraps without
+      # the test runner in its Manager.live_nodes().  Otherwise
+      # verify_cluster_config! detects the mismatch (local=4, peer=8) and
+      # raises before the joiner even enters the picture.
+      bad_opts = Keyword.put(@base_opts, :num_partition, 4)
+      {seed_bad_peer, seed_bad_node} = start_isolated_seeded_peer(:mm_agree_bad_seed, bad_opts)
+
       {joiner_peer, joiner_node} = start_blank_peer(:mm_agree_joiner)
 
       on_exit(fn ->
@@ -1091,14 +1176,17 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
       :erpc.call(joiner_node, Node, :connect, [seed_ok_node], 5_000)
       :erpc.call(joiner_node, Node, :connect, [seed_bad_node], 5_000)
 
-      assert wait_until(fn ->
-               try do
-                 live = :erpc.call(joiner_node, Manager, :live_nodes, [], 3_000)
-                 seed_ok_node in live and seed_bad_node in live
-               catch
-                 _, _ -> false
-               end
-             end, 8_000),
+      assert wait_until(
+               fn ->
+                 try do
+                   live = :erpc.call(joiner_node, Manager, :live_nodes, [], 3_000)
+                   seed_ok_node in live and seed_bad_node in live
+                 catch
+                   _, _ -> false
+                 end
+               end,
+               8_000
+             ),
              "Joiner never saw both seed peers as live"
 
       msg =
@@ -1133,14 +1221,17 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
       :erpc.call(joiner_node, Node, :connect, [seed1_node], 5_000)
       :erpc.call(joiner_node, Node, :connect, [seed2_node], 5_000)
 
-      assert wait_until(fn ->
-               try do
-                 live = :erpc.call(joiner_node, Manager, :live_nodes, [], 3_000)
-                 seed1_node in live and seed2_node in live
-               catch
-                 _, _ -> false
-               end
-             end, 8_000),
+      assert wait_until(
+               fn ->
+                 try do
+                   live = :erpc.call(joiner_node, Manager, :live_nodes, [], 3_000)
+                   seed1_node in live and seed2_node in live
+                 catch
+                   _, _ -> false
+                 end
+               end,
+               8_000
+             ),
              "Joiner never saw both seeds as live — test precondition failed"
 
       stop_peer(seed2_peer)

@@ -65,7 +65,13 @@ defmodule SuperCache.Cluster.ThreePhaseCommitTest do
     # Start the full application to ensure all dependencies are available
     {:ok, _} = Application.ensure_all_started(:super_cache)
 
-    if SuperCache.started?(), do: SuperCache.Cluster.Bootstrap.stop()
+    # Use SuperCache.stop() (not Cluster.Bootstrap.stop()) so that both
+    # local-mode and distributed-mode ETS tables are properly cleaned up.
+    # A previous test may have started the cache in local mode, and
+    # Cluster.Bootstrap.stop() only tears down distributed-mode resources,
+    # leaving local-mode ETS tables behind — causing "table name already
+    # exists" on the subsequent start!.
+    if SuperCache.started?(), do: SuperCache.stop()
     Process.sleep(50)
     SuperCache.Cluster.Bootstrap.start!(@cache_opts)
     on_exit(fn -> SuperCache.Cluster.Bootstrap.stop() end)

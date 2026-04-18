@@ -1,4 +1,3 @@
-
 # =============================================================================
 # lib/super_cache.ex
 #
@@ -119,11 +118,15 @@ defmodule SuperCache do
   """
   @spec put!(tuple) :: true
   def put!(data) when is_tuple(data) do
-    if distributed?() do
+    if Config.distributed?() do
       Router.route_put!(data)
     else
       partition = data |> Config.get_partition!() |> Partition.get_partition()
-      SuperCache.Log.debug(fn -> "super_cache, put key=#{inspect(Config.get_key!(data))} partition=#{inspect(partition)}" end)
+
+      SuperCache.Log.debug(fn ->
+        "super_cache, put key=#{inspect(Config.get_key!(data))} partition=#{inspect(partition)}"
+      end)
+
       Storage.put(data, partition)
     end
   end
@@ -139,15 +142,17 @@ defmodule SuperCache do
   """
   @spec lazy_put(tuple) :: :ok
   def lazy_put(data) when is_tuple(data) do
-    if distributed?() and SuperCache.Cluster.Manager.replication_mode() == :strong do
-      Logger.warning("super_cache, lazy_put called in :strong replication mode — falling back to put!")
+    if Config.distributed?() and SuperCache.Cluster.Manager.replication_mode() == :strong do
+      Logger.warning(
+        "super_cache, lazy_put called in :strong replication mode — falling back to put!"
+      )
+
       put!(data)
       :ok
     else
       Buffer.enqueue(data)
     end
   end
-
 
   @doc """
   Store multiple tuples in a single batch operation.
@@ -167,7 +172,7 @@ defmodule SuperCache do
   def put_batch!([]), do: :ok
 
   def put_batch!(data_list) when is_list(data_list) do
-    if distributed?() do
+    if Config.distributed?() do
       Router.route_put_batch!(data_list)
     else
       # Route each record to its correct partition based on its own key.
@@ -203,12 +208,16 @@ defmodule SuperCache do
   """
   @spec get!(tuple, keyword) :: [tuple]
   def get!(data, opts \\ []) when is_tuple(data) do
-    if distributed?() do
+    if Config.distributed?() do
       Router.route_get!(data, opts)
     else
-      key       = Config.get_key!(data)
+      key = Config.get_key!(data)
       partition = data |> Config.get_partition!() |> Partition.get_partition()
-      SuperCache.Log.debug(fn -> "super_cache, get key=#{inspect(key)} partition=#{inspect(partition)}" end)
+
+      SuperCache.Log.debug(fn ->
+        "super_cache, get key=#{inspect(key)} partition=#{inspect(partition)}"
+      end)
+
       Storage.get(key, partition)
     end
   end
@@ -226,7 +235,7 @@ defmodule SuperCache do
   """
   @spec get_by_key_partition!(any, any, keyword) :: [tuple]
   def get_by_key_partition!(key, partition_data, opts \\ []) do
-    if distributed?() do
+    if Config.distributed?() do
       Router.route_get_by_key_partition!(key, partition_data, opts)
     else
       Storage.get(key, Partition.get_partition(partition_data))
@@ -245,7 +254,8 @@ defmodule SuperCache do
 
   @doc "Non-raising variant of `get_same_key_partition!/2`."
   @spec get_same_key_partition(any, keyword) :: [tuple] | {:error, Exception.t()}
-  def get_same_key_partition(key, opts \\ []), do: safe(fn -> get_same_key_partition!(key, opts) end)
+  def get_same_key_partition(key, opts \\ []),
+    do: safe(fn -> get_same_key_partition!(key, opts) end)
 
   @doc """
   Retrieve records matching an ETS match pattern (binding lists).
@@ -258,10 +268,12 @@ defmodule SuperCache do
   """
   @spec get_by_match!(any, tuple, keyword) :: [[any]]
   def get_by_match!(partition_data, pattern, opts \\ []) when is_tuple(pattern) do
-    if distributed?() do
+    if Config.distributed?() do
       Router.route_get_by_match!(partition_data, pattern, opts)
     else
-      reduce_partitions(partition_data, [], fn p, acc -> Storage.get_by_match(pattern, p) ++ acc end)
+      reduce_partitions(partition_data, [], fn p, acc ->
+        Storage.get_by_match(pattern, p) ++ acc
+      end)
     end
   end
 
@@ -286,16 +298,19 @@ defmodule SuperCache do
   """
   @spec get_by_match_object!(any, tuple, keyword) :: [tuple]
   def get_by_match_object!(partition_data, pattern, opts \\ []) when is_tuple(pattern) do
-    if distributed?() do
+    if Config.distributed?() do
       Router.route_get_by_match_object!(partition_data, pattern, opts)
     else
-      reduce_partitions(partition_data, [], fn p, acc -> Storage.get_by_match_object(pattern, p) ++ acc end)
+      reduce_partitions(partition_data, [], fn p, acc ->
+        Storage.get_by_match_object(pattern, p) ++ acc
+      end)
     end
   end
 
   @doc "Scan all partitions. Equivalent to `get_by_match_object!(:_, pattern, [])`."
   @spec get_by_match_object!(tuple) :: [tuple]
-  def get_by_match_object!(pattern) when is_tuple(pattern), do: get_by_match_object!(:_, pattern, [])
+  def get_by_match_object!(pattern) when is_tuple(pattern),
+    do: get_by_match_object!(:_, pattern, [])
 
   @doc "Non-raising variant of `get_by_match_object!/2`."
   @spec get_by_match_object(any, tuple, keyword) :: [tuple] | {:error, Exception.t()}
@@ -312,7 +327,7 @@ defmodule SuperCache do
   """
   @spec scan!(any, (any, any -> any), any) :: any
   def scan!(partition_data, fun, acc) when is_function(fun, 2) do
-    if distributed?() do
+    if Config.distributed?() do
       Router.route_scan!(partition_data, fun, acc)
     else
       reduce_partitions(partition_data, acc, fn p, a -> Storage.scan(fun, a, p) end)
@@ -338,10 +353,10 @@ defmodule SuperCache do
   """
   @spec delete!(tuple) :: :ok
   def delete!(data) when is_tuple(data) do
-    if distributed?() do
+    if Config.distributed?() do
       Router.route_delete!(data)
     else
-      key       = Config.get_key!(data)
+      key = Config.get_key!(data)
       partition = data |> Config.get_partition!() |> Partition.get_partition()
       Storage.delete(key, partition)
       :ok
@@ -359,7 +374,7 @@ defmodule SuperCache do
   """
   @spec delete_all() :: :ok
   def delete_all() do
-    if distributed?() do
+    if Config.distributed?() do
       Router.route_delete_all()
     else
       Partition.get_all_partition() |> List.flatten() |> Enum.each(&Storage.delete_all/1)
@@ -371,7 +386,7 @@ defmodule SuperCache do
   """
   @spec delete_by_match!(any, tuple) :: :ok
   def delete_by_match!(partition_data, pattern) when is_tuple(pattern) do
-    if distributed?() do
+    if Config.distributed?() do
       Router.route_delete_match!(partition_data, pattern)
     else
       resolve_partitions(partition_data) |> Enum.each(&Storage.delete_match(pattern, &1))
@@ -391,7 +406,7 @@ defmodule SuperCache do
   @doc "Delete by explicit `key` and `partition_data`."
   @spec delete_by_key_partition!(any, any) :: :ok
   def delete_by_key_partition!(key, partition_data) do
-    if distributed?() do
+    if Config.distributed?() do
       Router.route_delete_by_key_partition!(key, partition_data)
     else
       Storage.delete(key, Partition.get_partition(partition_data))
@@ -484,7 +499,8 @@ defmodule SuperCache do
       SuperCache.put_partition_by_idx!({:user, 1, "Alice"}, idx)
   """
   @spec put_partition_by_idx!(tuple, non_neg_integer) :: true
-  def put_partition_by_idx!(data, partition_idx) when is_tuple(data) and is_integer(partition_idx) do
+  def put_partition_by_idx!(data, partition_idx)
+      when is_tuple(data) and is_integer(partition_idx) do
     partition = Partition.get_partition_by_idx(partition_idx)
     Storage.put(data, partition)
   end
@@ -545,31 +561,36 @@ defmodule SuperCache do
   """
   @spec cluster_stats() :: map
   def cluster_stats() do
-    if distributed?() do
+    if Config.distributed?() do
       SuperCache.Cluster.Stats.cluster() |> Map.merge(gather_node_stats())
     else
-      base  = stats()
+      base = stats()
       total = Keyword.get(base, :total, 0)
 
       %{
-        nodes:              [node()],
-        node_count:         1,
+        nodes: [node()],
+        node_count: 1,
         replication_factor: 1,
-        replication_mode:   :none,
-        num_partitions:     Partition.get_num_partition(),
-        total_records:      total,
-        node_stats:         %{node() => [partition_count: length(base) - 1, record_count: total]},
-        unreachable_nodes:  []
+        replication_mode: :none,
+        num_partitions: Partition.get_num_partition(),
+        total_records: total,
+        node_stats: %{node() => [partition_count: length(base) - 1, record_count: total]},
+        unreachable_nodes: []
       }
     end
   end
 
   ## ── Private ──────────────────────────────────────────────────────────────────
 
-  @doc false
-  def distributed?(), do: Config.get_config(:cluster, :local) == :distributed
+  @doc """
+  Returns `true` when SuperCache is running in distributed mode.
 
-  defp resolve_partitions(:_),   do: List.flatten(Partition.get_all_partition())
+  Delegates to `Config.distributed?/0` for zero-cost persistent_term reads.
+  """
+  @spec distributed?() :: boolean
+  def distributed?, do: Config.distributed?()
+
+  defp resolve_partitions(:_), do: List.flatten(Partition.get_all_partition())
   defp resolve_partitions(data), do: [Partition.get_partition(data)]
 
   defp reduce_partitions(partition_data, acc, fun) do
@@ -584,19 +605,20 @@ defmodule SuperCache do
       |> Task.async_stream(
         fn n ->
           try do
-            s     = :erpc.call(n, __MODULE__, :stats, [], 5_000)
+            s = :erpc.call(n, __MODULE__, :stats, [], 5_000)
             total = Keyword.get(s, :total, 0)
             {n, [partition_count: length(s) - 1, record_count: total]}
           catch
             _, reason -> {n, {:unreachable, reason}}
           end
         end,
-        timeout: 8_000, on_timeout: :kill_task
+        timeout: 8_000,
+        on_timeout: :kill_task
       )
       |> Enum.reduce({%{}, []}, fn
         {:ok, {n, {:unreachable, _}}}, {s, bad} -> {s, [n | bad]}
-        {:ok, {n, info}},             {s, bad}  -> {Map.put(s, n, info), bad}
-        {:exit, _},                   {s, bad}  -> {s, bad}
+        {:ok, {n, info}}, {s, bad} -> {Map.put(s, n, info), bad}
+        {:exit, _}, {s, bad} -> {s, bad}
       end)
 
     %{node_stats: node_stats, unreachable_nodes: unreachable}

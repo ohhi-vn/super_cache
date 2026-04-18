@@ -53,11 +53,12 @@ defmodule SuperCache.Cluster.WAL do
 
   @table __MODULE__
   @ack_table :"#{@table}_acks"
-  @seq_key {__MODULE__, :seq}
+  # Counter key stored in the WAL ETS table for atomic sequence generation.
+  # Uses a tuple key so it never collides with integer sequence numbers.
+  @seq_key {:seq, :counter}
 
   @default_majority_timeout 2_000
   @default_cleanup_interval 5_000
-
 
   # ── Public API ───────────────────────────────────────────────────────────────
 
@@ -92,12 +93,14 @@ defmodule SuperCache.Cluster.WAL do
     if replicas == [] do
       # No replicas — apply locally and return immediately
       apply_local(partition_idx, ops)
-      :ok
     else
       t0 = System.monotonic_time(:microsecond)
 
       # Apply locally first (write-ahead)
-      apply_local(partition_idx, ops)
+      case apply_local(partition_idx, ops) do
+        {:error, _} = err -> err
+        :ok -> :ok
+      end
 
       # Get next sequence number
       seq = next_seq()
@@ -236,29 +239,34 @@ defmodule SuperCache.Cluster.WAL do
 
   @impl true
   def init(_opts) do
-    table = :ets.new(@table, [
-      :ordered_set,
-      :public,
-      :named_table,
-      {:read_concurrency, true},
-      {:write_concurrency, true}
-    ])
+    table =
+      :ets.new(@table, [
+        :ordered_set,
+        :public,
+        :named_table,
+        {:read_concurrency, true},
+        {:write_concurrency, true}
+      ])
 
-    ack_table = :ets.new(@ack_table, [
-      :set,
-      :public,
-      :named_table,
-      {:read_concurrency, true},
-      {:write_concurrency, true}
-    ])
+    ack_table =
+      :ets.new(@ack_table, [
+        :set,
+        :public,
+        :named_table,
+        {:read_concurrency, true},
+        {:write_concurrency, true}
+      ])
 
-    # Initialize sequence counter
-    :persistent_term.put(@seq_key, 0)
+    # Initialize sequence counter in ETS for atomic increment.
+    :ets.insert(@table, {@seq_key, 0})
 
     # Start periodic cleanup
     schedule_cleanup()
 
-    Logger.info("super_cache, wal, ETS tables ready (wal: #{inspect(table)}, acks: #{inspect(ack_table)})")
+    Logger.info(
+      "super_cache, wal, ETS tables ready (wal: #{inspect(table)}, acks: #{inspect(ack_table)})"
+    )
+
     {:ok, %{}}
   end
 
@@ -279,21 +287,29 @@ defmodule SuperCache.Cluster.WAL do
 
   # ── Private ──────────────────────────────────────────────────────────────────
 
+  # Atomic sequence number generation using :ets.update_counter/4.
+  # Unlike the previous persistent_term read+write approach, this is
+  # race-condition-free: two concurrent callers will always get distinct
+  # sequence numbers because update_counter is an atomic ETS operation.
   defp next_seq() do
-    current = :persistent_term.get(@seq_key, 0)
-    :persistent_term.put(@seq_key, current + 1)
-    current + 1
+    :ets.update_counter(@table, @seq_key, {2, 1}, {@seq_key, 0})
   end
 
   defp apply_local(partition_idx, ops) do
     partition = Partition.get_partition_by_idx(partition_idx)
 
-    Enum.each(ops, fn
-      {:put, record} -> Storage.put(record, partition)
-      {:delete, key} -> Storage.delete(key, partition)
-      {:delete_match, pattern} -> Storage.delete_match(pattern, partition)
-      {:delete_all, _} -> Storage.delete_all(partition)
-    end)
+    if partition == nil do
+      {:error, :invalid_partition}
+    else
+      Enum.each(ops, fn
+        {:put, record} -> Storage.put(record, partition)
+        {:delete, key} -> Storage.delete(key, partition)
+        {:delete_match, pattern} -> Storage.delete_match(pattern, partition)
+        {:delete_all, _} -> Storage.delete_all(partition)
+      end)
+
+      :ok
+    end
   end
 
   defp async_replicate(seq, partition_idx, ops, replicas) do
@@ -311,7 +327,8 @@ defmodule SuperCache.Cluster.WAL do
   end
 
   defp await_majority(seq, required) do
-    timeout = Application.get_env(:super_cache, :wal, [])[:majority_timeout] || @default_majority_timeout
+    timeout =
+      Application.get_env(:super_cache, :wal, [])[:majority_timeout] || @default_majority_timeout
 
     # Check if majority already reached (fast path)
     case :ets.lookup(@ack_table, seq) do
@@ -333,7 +350,9 @@ defmodule SuperCache.Cluster.WAL do
   end
 
   defp schedule_cleanup() do
-    interval = Application.get_env(:super_cache, :wal, [])[:cleanup_interval] || @default_cleanup_interval
+    interval =
+      Application.get_env(:super_cache, :wal, [])[:cleanup_interval] || @default_cleanup_interval
+
     Process.send_after(self(), :cleanup, interval)
   end
 

@@ -95,7 +95,11 @@ defmodule SuperCache.Storage do
         "super_cache, storage, deleting table #{inspect(name)}"
       end)
 
-      EtsHolder.delete_table(EtsHolder, name)
+      try do
+        EtsHolder.delete_table(EtsHolder, name)
+      catch
+        :exit, _ -> :ok
+      end
     end
 
     Logger.info("super_cache, storage, #{num} partition(s) deleted")

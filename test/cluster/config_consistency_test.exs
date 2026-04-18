@@ -38,16 +38,58 @@ defmodule SuperCache.Cluster.ConfigConsistencyTest do
 
   # Each test in this file connects to peers directly via :erpc; make sure
   # they are reachable and in Manager before every test runs.
-  setup %{node1: node1, node2: node2} do
+  setup %{agent: agent} do
+    # Always read fresh refs from the agent — a prior test (e.g. the
+    # late-joining test) may have restarted a peer and updated the agent.
+    %{node1: node1, node2: node2} = Agent.get(agent, & &1)
+
     # Re-establish the static list so node_up events flow to Manager even if
     # a prior test left the monitor in a different mode.
     restart_node_monitor(nodes: [node1, node2])
 
-    assert wait_until(fn -> node1 in Node.list() and node2 in Node.list() end, 10_000),
+    # Reconnect at the Erlang level in case the distribution link was lost.
+    Node.connect(node1)
+    Node.connect(node2)
+
+    # If a peer is dead (e.g. a prior test stopped it and failed before
+    # restoring it), restart it and update the agent.
+    for {name, node_ref, peer_key, node_key} <- [
+          {:cfg_peer1, node1, :peer1, :node1},
+          {:cfg_peer2, node2, :peer2, :node2}
+        ] do
+      peer_alive =
+        try do
+          :erpc.call(node_ref, :erlang, :node, [], 2_000)
+          true
+        catch
+          _, _ -> false
+        end
+
+      unless peer_alive do
+        {new_peer, new_node} = restart_peer(name)
+        Agent.update(agent, &Map.put(&1, peer_key, new_peer))
+        Agent.update(agent, &Map.put(&1, node_key, new_node))
+      end
+    end
+
+    # Re-read fresh refs in case restart_peer updated them.
+    %{node1: fresh_node1, node2: fresh_node2} = Agent.get(agent, & &1)
+
+    # Reconnect with the (possibly new) nodes.
+    Node.connect(fresh_node1)
+    Node.connect(fresh_node2)
+    restart_node_monitor(nodes: [fresh_node1, fresh_node2])
+
+    assert wait_until(
+             fn -> fresh_node1 in Node.list() and fresh_node2 in Node.list() end,
+             10_000
+           ),
            "node1 and node2 must be Erlang-connected"
 
     assert wait_until(
-             fn -> node1 in Manager.live_nodes() and node2 in Manager.live_nodes() end,
+             fn ->
+               fresh_node1 in Manager.live_nodes() and fresh_node2 in Manager.live_nodes()
+             end,
              10_000
            ),
            "node1 and node2 must be in Manager.live_nodes"
@@ -57,7 +99,7 @@ defmodule SuperCache.Cluster.ConfigConsistencyTest do
              "live_nodes: #{inspect(Manager.live_nodes())}"
 
     # Verify both peers are reachable at the :erpc level.
-    for peer <- [node1, node2] do
+    for peer <- [fresh_node1, fresh_node2] do
       try do
         :erpc.call(peer, SuperCache.Cluster.Bootstrap, :running?, [], 5_000)
       catch
@@ -66,7 +108,7 @@ defmodule SuperCache.Cluster.ConfigConsistencyTest do
       end
     end
 
-    :ok
+    {:ok, node1: fresh_node1, node2: fresh_node2}
   end
 
   # ── Private helpers ───────────────────────────────────────────────────────────
@@ -135,8 +177,10 @@ defmodule SuperCache.Cluster.ConfigConsistencyTest do
         name: :cfg_late_joiner,
         host: ~c"127.0.0.1",
         args: [
-          ~c"-setcookie", :erlang.atom_to_list(:erlang.get_cookie()),
-          ~c"-connect_all", ~c"false"
+          ~c"-setcookie",
+          :erlang.atom_to_list(:erlang.get_cookie()),
+          ~c"-connect_all",
+          ~c"false"
         ]
       })
 
@@ -154,8 +198,24 @@ defmodule SuperCache.Cluster.ConfigConsistencyTest do
 
     # NodeMonitor is in static mode with managed = [node1, node2]; late_node
     # is not in that set, so the kernel :nodeup event is filtered.  Notify
-    # Manager directly — identical pattern to restart_peer/1.
+    # Manager directly on BOTH the local node and node1 — identical pattern
+    # to restart_peer/1.  Without notifying node1, the convergence check
+    # below will fail because node1 never sees the late-joiner.
     Manager.node_up(late_node)
+    :erpc.call(node1, Manager, :node_up, [late_node], 5_000)
+
+    # Also reconfigure node1's NodeMonitor to include the late-joiner so
+    # it forwards future :nodeup/:nodedown events for it.
+    :erpc.call(
+      node1,
+      NodeMonitor,
+      :reconfigure,
+      [[nodes: [node(), node2, late_node]]],
+      5_000
+    )
+
+    # Reconfigure the local NodeMonitor to include the late-joiner as well.
+    restart_node_monitor(nodes: [node1, node2, late_node])
 
     assert wait_until(fn -> late_node in Manager.live_nodes() end, 8_000),
            "Late-joining node #{inspect(late_node)} never appeared in Manager.live_nodes"
@@ -181,7 +241,7 @@ defmodule SuperCache.Cluster.ConfigConsistencyTest do
 
     # 1. Config keys must match the reference node exactly.
     expected_cfg = Map.new(@config_keys, fn k -> {k, SuperCache.Config.get_config(k)} end)
-    late_cfg     = remote_config(late_node)
+    late_cfg = remote_config(late_node)
 
     assert expected_cfg == late_cfg,
            "Late-joiner #{inspect(late_node)} has wrong config.\n" <>
@@ -195,7 +255,7 @@ defmodule SuperCache.Cluster.ConfigConsistencyTest do
     # 3. Partition map must be identical on all three nodes.
     local_map = remote_partition_map(node())
     node1_map = remote_partition_map(node1)
-    late_map  = remote_partition_map(late_node)
+    late_map = remote_partition_map(late_node)
 
     assert local_map == node1_map,
            "Partition map mismatch between test node and node1 after late join"
@@ -241,10 +301,15 @@ defmodule SuperCache.Cluster.ConfigConsistencyTest do
     # ── Restore two-node cluster for subsequent tests ──────────────────────────
     stop_peer(late_peer)
 
-    # NodeMonitor is in static mode; late_node is not managed, so :nodedown is
-    # filtered.  Notify Manager directly to avoid waiting for health-check
-    # retry exhaustion (~5 s).
+    # NodeMonitor is in static mode; late_node is not in the original managed
+    # set, so :nodedown is filtered.  Notify Manager directly on both the
+    # local node and node1 to avoid waiting for health-check retry exhaustion.
     Manager.node_down(late_node)
+    :erpc.call(node1, Manager, :node_down, [late_node], 5_000)
+
+    # Restore the NodeMonitor managed sets to the original 2-peer config.
+    restart_node_monitor(nodes: [node1, node2])
+    :erpc.call(node1, NodeMonitor, :reconfigure, [[nodes: [node(), node2]]], 5_000)
 
     assert wait_until(fn -> late_node not in Manager.live_nodes() end, 8_000),
            "late_node did not leave Manager.live_nodes within 8 s"
@@ -252,6 +317,7 @@ defmodule SuperCache.Cluster.ConfigConsistencyTest do
     {new_peer2, new_node2} = restart_peer(:cfg_peer2)
     Agent.update(agent, fn s -> %{s | peer2: new_peer2, node2: new_node2} end)
     restart_node_monitor(nodes: [node1, new_node2])
+    :erpc.call(node1, NodeMonitor, :reconfigure, [[nodes: [node(), new_node2]]], 5_000)
     wait_cluster_stable(3)
   end
 
@@ -266,8 +332,10 @@ defmodule SuperCache.Cluster.ConfigConsistencyTest do
         name: :cfg_rogue_node,
         host: ~c"127.0.0.1",
         args: [
-          ~c"-setcookie", :erlang.atom_to_list(:erlang.get_cookie()),
-          ~c"-connect_all", ~c"false"
+          ~c"-setcookie",
+          :erlang.atom_to_list(:erlang.get_cookie()),
+          ~c"-connect_all",
+          ~c"false"
         ]
       })
 

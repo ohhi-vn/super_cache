@@ -70,9 +70,21 @@ defmodule SuperCache.Cluster.NodeFailureTest do
     {new_peer1, new_node1} = restart_peer(:failure_peer1)
     Agent.update(agent, fn s -> %{s | peer1: new_peer1, node1: new_node1} end)
 
-    # Allow the full sync to complete.
-    Process.sleep(2_000)
+    # Wait for the full sync to deliver data to the rejoined node.
+    # After rejoin the partition map is rebuilt, so recompute the primary
+    # for each key — the old primary may no longer be correct.  Use
+    # assert_node_has (which polls) instead of a fixed sleep so the test
+    # is resilient to variable sync latency.
+    {new_primary1, _} =
+      Manager.get_replicas(SuperCache.Partition.get_partition_order(:sync_key1))
 
+    {new_primary2, _} =
+      Manager.get_replicas(SuperCache.Partition.get_partition_order(:sync_key2))
+
+    assert_node_has(new_primary1, :sync_key1, :sync_key1, [{:sync_key1, "data1"}], 5_000)
+    assert_node_has(new_primary2, :sync_key2, :sync_key2, [{:sync_key2, "data2"}], 5_000)
+
+    # Cross-check via the public API as well.
     assert [{:sync_key1, "data1"}] == Cache.get!({:sync_key1, nil}, read_mode: :primary)
     assert [{:sync_key2, "data2"}] == Cache.get!({:sync_key2, nil}, read_mode: :primary)
 

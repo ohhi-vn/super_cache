@@ -115,6 +115,10 @@ defmodule SuperCache.Bootstrap do
     result
   end
 
+  def start!(opts) do
+    raise ArgumentError, "options must be a keyword list, got: #{inspect(opts)}"
+  end
+
   @doc """
   Stop SuperCache and release all ETS resources.
 

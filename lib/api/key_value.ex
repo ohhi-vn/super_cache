@@ -61,7 +61,7 @@ defmodule SuperCache.KeyValue do
   require SuperCache.Log
 
   alias SuperCache.{Storage, Partition, Config}
-  alias SuperCache.Cluster.{Manager, Replicator, ThreePhaseCommit, Router}
+  alias SuperCache.Cluster.{Manager, Replicator, Router, DistributedHelpers}
 
   ## ── Public API ──────────────────────────────────────────────────────────────
 
@@ -81,8 +81,8 @@ defmodule SuperCache.KeyValue do
   def add(kv_name, key, value) do
     SuperCache.Log.debug(fn -> "super_cache, kv #{inspect(kv_name)}, add key=#{inspect(key)}" end)
 
-    if distributed?() do
-      route_write(kv_name, :local_put, [kv_name, key, value])
+    if Config.distributed?() do
+      DistributedHelpers.route_write(__MODULE__, :local_put, [kv_name, key, value], idx(kv_name))
     else
       local_put_local(kv_name, key, value)
     end
@@ -98,8 +98,14 @@ defmodule SuperCache.KeyValue do
   """
   @spec get(any, any, any, keyword) :: any
   def get(kv_name, key, default \\ nil, opts \\ []) do
-    if distributed?() do
-      route_read(kv_name, :local_get, [kv_name, key, default], opts)
+    if Config.distributed?() do
+      DistributedHelpers.route_read(
+        __MODULE__,
+        :local_get,
+        [kv_name, key, default],
+        idx(kv_name),
+        opts
+      )
     else
       local_get(kv_name, key, default)
     end
@@ -114,8 +120,14 @@ defmodule SuperCache.KeyValue do
   """
   @spec get_all(any, any, keyword) :: [any]
   def get_all(kv_name, key, opts \\ []) do
-    if distributed?() do
-      route_read(kv_name, :local_get_all, [kv_name, key], opts)
+    if Config.distributed?() do
+      DistributedHelpers.route_read(
+        __MODULE__,
+        :local_get_all,
+        [kv_name, key],
+        idx(kv_name),
+        opts
+      )
     else
       local_get_all(kv_name, key)
     end
@@ -141,8 +153,13 @@ defmodule SuperCache.KeyValue do
       "super_cache, kv #{inspect(kv_name)}, update key=#{inspect(key)}"
     end)
 
-    if distributed?() do
-      route_write(kv_name, :local_update, [kv_name, key, value])
+    if Config.distributed?() do
+      DistributedHelpers.route_write(
+        __MODULE__,
+        :local_update,
+        [kv_name, key, value],
+        idx(kv_name)
+      )
     else
       local_update_local(kv_name, key, value)
     end
@@ -166,8 +183,13 @@ defmodule SuperCache.KeyValue do
   """
   @spec update(any, any, any, (any -> any)) :: any
   def update(kv_name, key, default, fun) when is_function(fun, 1) do
-    if distributed?() do
-      route_write(kv_name, :local_update_fun, [kv_name, key, default, fun])
+    if Config.distributed?() do
+      DistributedHelpers.route_write(
+        __MODULE__,
+        :local_update_fun,
+        [kv_name, key, default, fun],
+        idx(kv_name)
+      )
     else
       local_update_fun_local(kv_name, key, default, fun)
     end
@@ -187,8 +209,13 @@ defmodule SuperCache.KeyValue do
   """
   @spec increment(any, any, number, number) :: number
   def increment(kv_name, key, default \\ 0, step \\ 1) do
-    if distributed?() do
-      route_write(kv_name, :local_increment, [kv_name, key, default, step])
+    if Config.distributed?() do
+      DistributedHelpers.route_write(
+        __MODULE__,
+        :local_increment,
+        [kv_name, key, default, step],
+        idx(kv_name)
+      )
     else
       local_increment_local(kv_name, key, default, step)
     end
@@ -213,8 +240,13 @@ defmodule SuperCache.KeyValue do
       "super_cache, kv #{inspect(kv_name)}, replace key=#{inspect(key)}"
     end)
 
-    if distributed?() do
-      route_write(kv_name, :local_replace, [kv_name, key, value])
+    if Config.distributed?() do
+      DistributedHelpers.route_write(
+        __MODULE__,
+        :local_replace,
+        [kv_name, key, value],
+        idx(kv_name)
+      )
     else
       local_replace_local(kv_name, key, value)
     end
@@ -222,8 +254,8 @@ defmodule SuperCache.KeyValue do
 
   @spec keys(any, keyword) :: [any]
   def keys(kv_name, opts \\ []) do
-    if distributed?() do
-      route_read(kv_name, :local_keys, [kv_name], opts)
+    if Config.distributed?() do
+      DistributedHelpers.route_read(__MODULE__, :local_keys, [kv_name], idx(kv_name), opts)
     else
       local_keys(kv_name)
     end
@@ -231,8 +263,8 @@ defmodule SuperCache.KeyValue do
 
   @spec values(any, keyword) :: [any]
   def values(kv_name, opts \\ []) do
-    if distributed?() do
-      route_read(kv_name, :local_values, [kv_name], opts)
+    if Config.distributed?() do
+      DistributedHelpers.route_read(__MODULE__, :local_values, [kv_name], idx(kv_name), opts)
     else
       local_values(kv_name)
     end
@@ -240,8 +272,8 @@ defmodule SuperCache.KeyValue do
 
   @spec count(any, keyword) :: non_neg_integer
   def count(kv_name, opts \\ []) do
-    if distributed?() do
-      route_read(kv_name, :local_count, [kv_name], opts)
+    if Config.distributed?() do
+      DistributedHelpers.route_read(__MODULE__, :local_count, [kv_name], idx(kv_name), opts)
     else
       local_count(kv_name)
     end
@@ -249,8 +281,8 @@ defmodule SuperCache.KeyValue do
 
   @spec to_list(any, keyword) :: [{any, any}]
   def to_list(kv_name, opts \\ []) do
-    if distributed?() do
-      route_read(kv_name, :local_to_list, [kv_name], opts)
+    if Config.distributed?() do
+      DistributedHelpers.route_read(__MODULE__, :local_to_list, [kv_name], idx(kv_name), opts)
     else
       local_to_list(kv_name)
     end
@@ -262,8 +294,8 @@ defmodule SuperCache.KeyValue do
       "super_cache, kv #{inspect(kv_name)}, remove key=#{inspect(key)}"
     end)
 
-    if distributed?() do
-      route_write(kv_name, :local_delete, [kv_name, key])
+    if Config.distributed?() do
+      DistributedHelpers.route_write(__MODULE__, :local_delete, [kv_name, key], idx(kv_name))
     else
       Storage.delete({:kv, kv_name, key}, Partition.get_partition(kv_name))
       :ok
@@ -272,8 +304,8 @@ defmodule SuperCache.KeyValue do
 
   @spec remove_all(any) :: :ok
   def remove_all(kv_name) do
-    if distributed?() do
-      route_write(kv_name, :local_delete_all, [kv_name])
+    if Config.distributed?() do
+      DistributedHelpers.route_write(__MODULE__, :local_delete_all, [kv_name], idx(kv_name))
     else
       SuperCache.delete_by_match!(kv_name, {{:kv, kv_name, :_}, :_})
     end
@@ -299,7 +331,7 @@ defmodule SuperCache.KeyValue do
         {{:kv, kv_name, key}, value}
       end)
 
-    if distributed?() do
+    if Config.distributed?() do
       SuperCache.put_batch!(records)
     else
       partition = Partition.get_partition(kv_name)
@@ -321,7 +353,7 @@ defmodule SuperCache.KeyValue do
   """
   @spec remove_batch(any, [any]) :: :ok
   def remove_batch(kv_name, keys) when is_list(keys) do
-    if distributed?() do
+    if Config.distributed?() do
       Enum.each(keys, fn key ->
         ets_key = {:kv, kv_name, key}
         Router.route_delete_by_key_partition!(ets_key, kv_name)
@@ -351,7 +383,7 @@ defmodule SuperCache.KeyValue do
         # in the tuple {{:kv, kv_name, key}, value}.
         case Manager.replication_mode() do
           :strong ->
-            apply_write(idx(kv_name), partition, [{:put, {ets_key, value}}])
+            DistributedHelpers.apply_write(idx(kv_name), partition, [{:put, {ets_key, value}}])
 
           _ ->
             Storage.update_element(ets_key, partition, {2, value}, {ets_key, value})
@@ -360,7 +392,7 @@ defmodule SuperCache.KeyValue do
 
       _ ->
         # :bag / :duplicate_bag — insert adds a new record (duplicates ok)
-        apply_write(idx(kv_name), partition, [{:put, {ets_key, value}}])
+        DistributedHelpers.apply_write(idx(kv_name), partition, [{:put, {ets_key, value}}])
     end
 
     true
@@ -368,13 +400,16 @@ defmodule SuperCache.KeyValue do
 
   @doc false
   def local_delete(kv_name, key) do
-    apply_write(idx(kv_name), Partition.get_partition(kv_name), [{:delete, {:kv, kv_name, key}}])
+    DistributedHelpers.apply_write(idx(kv_name), Partition.get_partition(kv_name), [
+      {:delete, {:kv, kv_name, key}}
+    ])
+
     :ok
   end
 
   @doc false
   def local_delete_all(kv_name) do
-    apply_write(idx(kv_name), Partition.get_partition(kv_name), [
+    DistributedHelpers.apply_write(idx(kv_name), Partition.get_partition(kv_name), [
       {:delete_match, {{:kv, kv_name, :_}, :_}}
     ])
 
@@ -390,7 +425,7 @@ defmodule SuperCache.KeyValue do
       t when t in [:set, :ordered_set] ->
         case Manager.replication_mode() do
           :strong ->
-            apply_write(idx(kv_name), partition, [{:put, {ets_key, value}}])
+            DistributedHelpers.apply_write(idx(kv_name), partition, [{:put, {ets_key, value}}])
 
           _ ->
             Storage.update_element(ets_key, partition, {2, value}, {ets_key, value})
@@ -399,7 +434,7 @@ defmodule SuperCache.KeyValue do
 
       _ ->
         # :bag / :duplicate_bag — delete all + insert (not atomic)
-        apply_write(idx(kv_name), partition, [
+        DistributedHelpers.apply_write(idx(kv_name), partition, [
           {:delete, ets_key},
           {:put, {ets_key, value}}
         ])
@@ -425,7 +460,7 @@ defmodule SuperCache.KeyValue do
       t when t in [:set, :ordered_set] ->
         case Manager.replication_mode() do
           :strong ->
-            apply_write(idx(kv_name), partition, [{:put, {ets_key, new_value}}])
+            DistributedHelpers.apply_write(idx(kv_name), partition, [{:put, {ets_key, new_value}}])
 
           _ ->
             Storage.update_element(ets_key, partition, {2, new_value}, {ets_key, new_value})
@@ -433,7 +468,7 @@ defmodule SuperCache.KeyValue do
         end
 
       _ ->
-        apply_write(idx(kv_name), partition, [
+        DistributedHelpers.apply_write(idx(kv_name), partition, [
           {:delete, ets_key},
           {:put, {ets_key, new_value}}
         ])
@@ -460,7 +495,9 @@ defmodule SuperCache.KeyValue do
               end
 
             new_value = current + step
-            apply_write(idx(kv_name), partition, [{:put, {ets_key, new_value}}])
+
+            DistributedHelpers.apply_write(idx(kv_name), partition, [{:put, {ets_key, new_value}}])
+
             new_value
 
           _ ->
@@ -488,7 +525,7 @@ defmodule SuperCache.KeyValue do
         # Same as local_update for set tables (atomic upsert)
         case Manager.replication_mode() do
           :strong ->
-            apply_write(idx(kv_name), partition, [{:put, {ets_key, value}}])
+            DistributedHelpers.apply_write(idx(kv_name), partition, [{:put, {ets_key, value}}])
 
           _ ->
             Storage.update_element(ets_key, partition, {2, value}, {ets_key, value})
@@ -497,7 +534,7 @@ defmodule SuperCache.KeyValue do
 
       _ ->
         # :bag / :duplicate_bag — delete all records for key, then insert new one
-        apply_write(idx(kv_name), partition, [
+        DistributedHelpers.apply_write(idx(kv_name), partition, [
           {:delete, ets_key},
           {:put, {ets_key, value}}
         ])
@@ -542,7 +579,6 @@ defmodule SuperCache.KeyValue do
 
   ## ── Private ──────────────────────────────────────────────────────────────────
 
-  defp distributed?(), do: Config.get_config(:cluster, :local) == :distributed
   defp idx(name), do: Partition.get_partition_order(name)
   defp table_type(), do: Config.get_config(:table_type, :set)
 
@@ -650,138 +686,5 @@ defmodule SuperCache.KeyValue do
     end
 
     :ok
-  end
-
-  defp apply_write(idx, partition, ops) do
-    case Manager.replication_mode() do
-      :strong ->
-        ThreePhaseCommit.commit(idx, ops)
-
-      _ ->
-        Enum.each(ops, fn
-          {:put, r} ->
-            Storage.put(r, partition)
-            Replicator.replicate(idx, :put, r)
-
-          {:delete, k} ->
-            Storage.delete(k, partition)
-            Replicator.replicate(idx, :delete, k)
-
-          {:delete_match, p} ->
-            Storage.delete_match(p, partition)
-            Replicator.replicate(idx, :delete_match, p)
-
-          {:delete_all, _} ->
-            Storage.delete_all(partition)
-            Replicator.replicate(idx, :delete_all, nil)
-        end)
-
-        :ok
-    end
-  end
-
-  defp route_write(kv_name, fun, args) do
-    {primary, _} = Manager.get_replicas(idx(kv_name))
-
-    if primary == node() do
-      apply(__MODULE__, fun, args)
-    else
-      SuperCache.Log.debug(fn ->
-        "super_cache, kv #{inspect(kv_name)}, fwd #{fun} → #{inspect(primary)}"
-      end)
-
-      :erpc.call(primary, __MODULE__, fun, args, 5_000)
-    end
-  end
-
-  defp route_read(kv_name, fun, args, opts) do
-    mode = Keyword.get(opts, :read_mode, :local)
-    eff = if mode == :local and not has_partition?(kv_name), do: :primary, else: mode
-
-    case eff do
-      :local -> apply(__MODULE__, fun, args)
-      :primary -> read_from_primary(kv_name, fun, args)
-      :quorum -> read_from_quorum(kv_name, fun, args)
-    end
-  end
-
-  defp has_partition?(name) do
-    {p, rs} = Manager.get_replicas(idx(name))
-    node() in [p | rs]
-  end
-
-  defp read_from_primary(kv_name, fun, args) do
-    {primary, _} = Manager.get_replicas(idx(kv_name))
-
-    if primary == node(),
-      do: apply(__MODULE__, fun, args),
-      else: :erpc.call(primary, __MODULE__, fun, args, 5_000)
-  end
-
-  defp read_from_quorum(kv_name, fun, args) do
-    {primary, replicas} = Manager.get_replicas(idx(kv_name))
-    nodes = [primary | replicas]
-    total = length(nodes)
-    required = div(total, 2) + 1
-
-    # Launch all reads as independent tasks for early termination.
-    tasks =
-      Enum.map(nodes, fn n ->
-        Task.async(fn ->
-          if n == node(),
-            do: apply(__MODULE__, fun, args),
-            else: :erpc.call(n, __MODULE__, fun, args, 5_000)
-        end)
-      end)
-
-    # Await tasks one-by-one, returning as soon as any result reaches majority.
-    # This avoids waiting for slow replicas once quorum is satisfied.
-    await_quorum(tasks, required, %{}, primary, fun, args)
-  end
-
-  # No tasks left — return most frequent result or fall back to primary.
-  defp await_quorum([], _required, counts, primary, fun, args) do
-    case map_max(counts) do
-      {result, _count} ->
-        result
-
-      nil ->
-        if primary == node(),
-          do: apply(__MODULE__, fun, args),
-          else: :erpc.call(primary, __MODULE__, fun, args, 5_000)
-    end
-  end
-
-  defp await_quorum([task | rest], required, counts, primary, fun, args) do
-    result =
-      case Task.yield(task, 5_000) || Task.shutdown(task, :brutal_kill) do
-        {:ok, val} -> val
-        _ -> nil
-      end
-
-    new_counts =
-      if result != nil do
-        Map.update(counts, result, 1, &(&1 + 1))
-      else
-        counts
-      end
-
-    # Check if any result has reached quorum — early termination.
-    if quorum_reached?(new_counts, required) do
-      Enum.each(rest, &Task.shutdown(&1, :brutal_kill))
-      {winner, _} = Enum.max_by(new_counts, fn {_, c} -> c end)
-      winner
-    else
-      await_quorum(rest, required, new_counts, primary, fun, args)
-    end
-  end
-
-  # Returns {result, count} for the most frequent result, or nil if map is empty.
-  defp map_max(counts) when map_size(counts) == 0, do: nil
-  defp map_max(counts), do: Enum.max_by(counts, fn {_, c} -> c end)
-
-  # True if any result has reached the required quorum count.
-  defp quorum_reached?(counts, required) do
-    Enum.any?(counts, fn {_, count} -> count >= required end)
   end
 end
