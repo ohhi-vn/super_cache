@@ -361,6 +361,7 @@ defmodule SuperCache.KeyValue do
     else
       partition = Partition.get_partition(kv_name)
 
+      # Batch delete using delete_match
       Enum.each(keys, fn key ->
         :ets.delete(partition, {:kv, kv_name, key})
       end)

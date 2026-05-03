@@ -330,7 +330,7 @@ defmodule SuperCache.Cluster.ThreePhaseCommitTest do
 
   describe "3PC multi-node" do
     @moduletag :cluster
-  @moduletag :sequential
+    @moduletag :sequential
 
     setup do
       if node() == :nonode@nohost do

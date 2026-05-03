@@ -1,5 +1,3 @@
-
-
 defmodule SuperCache.Storage do
   @moduledoc """
   Thin wrapper around `:ets` that provides the read/write/delete primitives
@@ -44,6 +42,7 @@ defmodule SuperCache.Storage do
   require SuperCache.Log
 
   alias SuperCache.{EtsHolder, Config}
+  alias SuperCache.Storage.MatchSpec
   alias :ets, as: Ets
 
   ## Lifecycle ──────────────────────────────────────────────────────────────────
@@ -91,6 +90,7 @@ defmodule SuperCache.Storage do
 
     for order <- 0..(num - 1) do
       name = table_name(prefix, order)
+
       SuperCache.Log.debug(fn ->
         "super_cache, storage, deleting table #{inspect(name)}"
       end)
@@ -191,10 +191,13 @@ defmodule SuperCache.Storage do
   end
 
   @doc """
-  Pattern match using `:ets.match/2`.
+  Pattern match using compiled match spec via `:ets.select/2`.
 
   Returns a list of binding lists. Wildcards are `:_`; captures are
   `:"$1"`, `:"$2"`, etc.
+
+  Uses `MatchSpec.match/2` to create and compile the match spec,
+  which is more efficient than `:ets.match/2` for repeated queries.
 
   ## Examples
 
@@ -210,13 +213,27 @@ defmodule SuperCache.Storage do
       "super_cache, storage, match pattern=#{inspect(pattern)} in #{inspect(partition)}"
     end)
 
-    Ets.match(partition, pattern)
+    spec = MatchSpec.match(pattern, extract_bindings(pattern))
+    MatchSpec.select(partition, spec)
   end
 
+  # Extract bindings (:$1, :$2, etc.) from a pattern
+  defp extract_bindings(pattern) when is_tuple(pattern) do
+    pattern
+    |> Tuple.to_list()
+    |> Enum.filter(fn
+      x when is_atom(x) -> String.starts_with?(Atom.to_string(x), "$")
+      _ -> false
+    end)
+  end
+
+  defp extract_bindings(_), do: []
+
   @doc """
-  Pattern match using `:ets.match_object/2`.
+  Pattern match using compiled match spec via `:ets.select/2`.
 
   Returns full matching tuples rather than capture binding lists.
+  Uses `MatchSpec.match_object/1` to create and compile the match spec.
 
   ## Examples
 
@@ -232,7 +249,8 @@ defmodule SuperCache.Storage do
       "super_cache, storage, match_object pattern=#{inspect(pattern)} in #{inspect(partition)}"
     end)
 
-    Ets.match_object(partition, pattern)
+    spec = MatchSpec.match_object(pattern)
+    MatchSpec.select(partition, spec)
   end
 
   @doc """
@@ -256,6 +274,42 @@ defmodule SuperCache.Storage do
     end)
 
     Ets.foldl(fun, acc, partition)
+  end
+
+  ## Typed API ────────────────────────────────────────────────────────────────
+
+  @doc """
+  Typed version of `get/2` that returns records of a specific type.
+
+  Uses a callback module to define the record type and pattern matching.
+
+  ## Examples
+
+      defmodule MyRecord do
+        @type t :: {atom, integer, String.t()}
+        def pattern, do: {:"$1", :"$2", :"$3"}
+        def from_tuple(tuple), do: tuple
+      end
+
+      Storage.get_typed(MyRecord, :my_key, :my_table)
+  """
+  @spec get_typed(module, any, atom | :ets.tid()) :: [any]
+  def get_typed(type_module, key, partition) do
+    records = get(key, partition)
+    Enum.map(records, &type_module.from_tuple/1)
+  end
+
+  @doc """
+  Typed version of `get_by_match_object/2` that returns typed records.
+
+  ## Examples
+
+      Storage.get_by_match_object_typed(MyRecord, {:user, :_, :admin}, :my_table)
+  """
+  @spec get_by_match_object_typed(module, atom | tuple, atom | :ets.tid()) :: [any]
+  def get_by_match_object_typed(type_module, pattern, partition) do
+    records = get_by_match_object(pattern, partition)
+    Enum.map(records, &type_module.from_tuple/1)
   end
 
   @doc """
@@ -323,23 +377,25 @@ defmodule SuperCache.Storage do
   end
 
   @doc """
-  Delete all records matching `pattern` using `:ets.match_delete/2`.
+  Delete all records matching `pattern` using compiled match spec.
 
   Pattern semantics are the same as `get_by_match/2`.
+  Uses `MatchSpec.delete_match/1` to create and compile the match spec.
 
   ## Examples
 
       # Remove all expired sessions
       Storage.delete_match({:session, :_, :expired}, :my_table)
-      # => true
+      # => non_neg_integer (number of deleted records)
   """
-  @spec delete_match(atom | tuple, atom | :ets.tid()) :: true
+  @spec delete_match(atom | tuple, atom | :ets.tid()) :: non_neg_integer
   def delete_match(pattern, partition) do
     SuperCache.Log.debug(fn ->
       "super_cache, storage, delete_match pattern=#{inspect(pattern)} in #{inspect(partition)}"
     end)
 
-    Ets.match_delete(partition, pattern)
+    spec = MatchSpec.delete_match(pattern)
+    MatchSpec.select_delete(partition, spec)
   end
 
   ## Stats ──────────────────────────────────────────────────────────────────────

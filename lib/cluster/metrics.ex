@@ -37,8 +37,10 @@ defmodule SuperCache.Cluster.Metrics do
 
   use GenServer, restart: :permanent, shutdown: 5_000
 
-  @table    __MODULE__
+  @table __MODULE__
   @max_samples 256
+
+  alias SuperCache.Storage.MatchSpec
 
   # ── Lifecycle ────────────────────────────────────────────────────────────────
 
@@ -46,13 +48,14 @@ defmodule SuperCache.Cluster.Metrics do
 
   @impl true
   def init(_opts) do
-    @table = :ets.new(@table, [
-      :set,
-      :public,
-      :named_table,
-      {:write_concurrency, true},
-      {:read_concurrency, true}
-    ])
+    @table =
+      :ets.new(@table, [
+        :set,
+        :public,
+        :named_table,
+        {:write_concurrency, true},
+        {:read_concurrency, true}
+      ])
 
     {:ok, %{}}
   end
@@ -65,18 +68,23 @@ defmodule SuperCache.Cluster.Metrics do
     :ets.update_counter(@table, {namespace, field}, {2, 1}, {{namespace, field}, 0})
   end
 
-  @doc "Return all counters for `namespace` as `%{field => count}`."
+  @doc "Return all counters for `namespace` as `%{field => count}`.\n  Uses compiled match spec for better performance.\n  "
   @spec get_all(term) :: map
   def get_all(namespace) do
-    :ets.match(@table, {{namespace, :"$1"}, :"$2"})
+    spec = MatchSpec.match({{namespace, :"$1"}, :"$2"}, [:"$1", :"$2"])
+
+    MatchSpec.select(@table, spec)
     |> Map.new(fn [field, count] -> {field, count} end)
   end
 
-  @doc "Reset all counters and latency samples for `namespace`."
+  @doc "Reset all counters and latency samples for `namespace`.\n  Uses compiled match specs for better performance.\n  "
   @spec reset(term) :: :ok
   def reset(namespace) do
-    :ets.match_delete(@table, {{namespace, :_}, :_})
-    :ets.match_delete(@table, {{:latency, namespace}, :_})
+    spec1 = MatchSpec.delete_match({{namespace, :_}, :_})
+    spec2 = MatchSpec.delete_match({{:latency, namespace}, :_})
+
+    MatchSpec.select_delete(@table, spec1)
+    MatchSpec.select_delete(@table, spec2)
     :ok
   end
 
@@ -98,7 +106,7 @@ defmodule SuperCache.Cluster.Metrics do
   def get_latency_samples(key) do
     case :ets.lookup(@table, {:latency, key}) do
       [{_, samples}] -> samples
-      []             -> []
+      [] -> []
     end
   end
 
@@ -111,7 +119,7 @@ defmodule SuperCache.Cluster.Metrics do
     existing =
       case :ets.lookup(@table, ets_key) do
         [{_, s}] -> s
-        []       -> []
+        [] -> []
       end
 
     updated =

@@ -43,13 +43,14 @@ defmodule SuperCache.Cluster.TxnRegistry do
 
   @impl true
   def init(_opts) do
-    @table = :ets.new(@table, [
-      :set,
-      :public,
-      :named_table,
-      {:read_concurrency, true},
-      {:write_concurrency, true}
-    ])
+    @table =
+      :ets.new(@table, [
+        :set,
+        :public,
+        :named_table,
+        {:read_concurrency, true},
+        {:write_concurrency, true}
+      ])
 
     Logger.info("super_cache, txn_registry, ETS table #{inspect(@table)} ready")
     {:ok, %{}}
@@ -66,12 +67,12 @@ defmodule SuperCache.Cluster.TxnRegistry do
   @spec register(binary, non_neg_integer, list, [node]) :: :ok
   def register(txn_id, partition_idx, ops, replicas) do
     entry = %{
-      txn_id:        txn_id,
+      txn_id: txn_id,
       partition_idx: partition_idx,
-      ops:           ops,
-      replicas:      replicas,
-      state:         :prepared,
-      inserted_at:   System.monotonic_time(:millisecond)
+      ops: ops,
+      replicas: replicas,
+      state: :prepared,
+      inserted_at: System.monotonic_time(:millisecond)
     }
 
     :ets.insert(@table, {txn_id, entry})
@@ -89,7 +90,7 @@ defmodule SuperCache.Cluster.TxnRegistry do
   def get(txn_id) do
     case :ets.lookup(@table, txn_id) do
       [{^txn_id, entry}] -> entry
-      []                 -> nil
+      [] -> nil
     end
   end
 

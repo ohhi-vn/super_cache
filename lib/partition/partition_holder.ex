@@ -33,6 +33,7 @@ defmodule SuperCache.Partition.Holder do
   require SuperCache.Log
 
   alias SuperCache.Config
+  alias SuperCache.Storage.MatchSpec
 
   ## ── Public API ───────────────────────────────────────────────────────────────
 
@@ -99,12 +100,15 @@ defmodule SuperCache.Partition.Holder do
   Return all registered partition ETS table atoms.
 
   Filters out non-partition entries (such as `:num_partition`).
+  Uses compiled match spec for better performance.
   """
   @spec get_all() :: [atom]
   def get_all() do
-    :ets.match(__MODULE__, {:"$1", :"$2"})
-    |> Enum.filter(fn [k, _v] -> is_integer(k) end)
-    |> Enum.map(fn [_k, v] -> v end)
+    spec = MatchSpec.match_object({:"$1", :"$2"})
+
+    MatchSpec.select(__MODULE__, spec)
+    |> Enum.filter(fn {k, _v} -> is_integer(k) end)
+    |> Enum.map(fn {_k, v} -> v end)
   end
 
   @doc """
