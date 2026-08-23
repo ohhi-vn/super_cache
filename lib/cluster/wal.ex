@@ -96,48 +96,66 @@ defmodule SuperCache.Cluster.WAL do
     else
       t0 = System.monotonic_time(:microsecond)
 
-      # Apply locally first (write-ahead)
+      # Apply locally first (write-ahead). Abort when the local apply fails —
+      # continuing would replicate an entry that was never applied here.
       case apply_local(partition_idx, ops) do
-        {:error, _} = err -> err
-        :ok -> :ok
-      end
-
-      # Get next sequence number
-      seq = next_seq()
-
-      # Write to WAL
-      wal_entry = %{
-        seq: seq,
-        partition_idx: partition_idx,
-        ops: ops,
-        timestamp: System.monotonic_time(:millisecond)
-      }
-
-      :ets.insert(@table, {seq, wal_entry})
-
-      # Initialize ack tracking
-      required = div(length(replicas), 2) + 1
-      :ets.insert(@ack_table, {seq, %{acked: 0, required: required, replicas: replicas}})
-
-      # Async replicate to all replicas
-      async_replicate(seq, partition_idx, ops, replicas)
-
-      # Wait for majority ack
-      result = await_majority(seq, required)
-
-      elapsed = System.monotonic_time(:microsecond) - t0
-
-      case result do
-        :ok ->
-          Metrics.increment({:wal, :committed}, :calls)
-          Metrics.push_latency({:wal_latency_us, :commit}, elapsed)
-          :ok
-
         {:error, _} = err ->
           Metrics.increment({:wal, :failed}, :calls)
-          Metrics.push_latency({:wal_latency_us, :commit_failed}, elapsed)
           err
+
+        :ok ->
+          result = commit_with_replicas(partition_idx, ops, replicas)
+          elapsed = System.monotonic_time(:microsecond) - t0
+
+          case result do
+            :ok ->
+              Metrics.increment({:wal, :committed}, :calls)
+              Metrics.push_latency({:wal_latency_us, :commit}, elapsed)
+              :ok
+
+            {:error, _} = err ->
+              Metrics.increment({:wal, :failed}, :calls)
+              Metrics.push_latency({:wal_latency_us, :commit_failed}, elapsed)
+              err
+          end
       end
+    end
+  end
+
+  defp commit_with_replicas(partition_idx, ops, replicas) do
+    # Get next sequence number
+    seq = next_seq()
+
+    # Write to WAL
+    wal_entry = %{
+      seq: seq,
+      partition_idx: partition_idx,
+      ops: ops,
+      timestamp: System.monotonic_time(:millisecond)
+    }
+
+    :ets.insert(@table, {seq, wal_entry})
+
+    # Initialize ack tracking: `{seq, required, waiter}` plus an atomic
+    # counter row so concurrent replica acks can never lose counts.
+    required = div(length(replicas), 2) + 1
+    waiter = self()
+
+    :ets.insert(@ack_table, [{seq, required, waiter}, {{seq, :count}, 0}])
+
+    # Async replicate to all replicas
+    async_replicate(seq, partition_idx, ops, replicas)
+
+    # Wait for majority ack
+    case await_majority(seq, required) do
+      :ok ->
+        :ok
+
+      {:error, _} = err ->
+        # Timed out — remove our tracking rows so they cannot leak.
+        :ets.delete(@ack_table, seq)
+        :ets.delete(@ack_table, {seq, :count})
+        err
     end
   end
 
@@ -145,17 +163,24 @@ defmodule SuperCache.Cluster.WAL do
   Handle replication acknowledgment from a replica.
 
   Called via `:erpc.cast` on the primary node when a replica has applied the WAL entry.
+
+  The ack count is incremented atomically (`:ets.update_counter/4`) so
+  concurrent replica acks can never lose counts, and the majority
+  notification is delivered to the committing process (recorded in the ack
+  row) rather than to this module's GenServer.
   """
   @spec ack(non_neg_integer, node) :: :ok
   def ack(seq, _replica_node) do
     case :ets.lookup(@ack_table, seq) do
-      [{^seq, %{acked: acked, required: required} = state}] ->
-        new_acked = acked + 1
-        :ets.insert(@ack_table, {seq, %{state | acked: new_acked}})
+      [{^seq, required, waiter}] ->
+        count = :ets.update_counter(@ack_table, {seq, :count}, {2, 1}, {{seq, :count}, 0})
 
-        if new_acked >= required do
-          # Majority reached — notify waiting process
-          send(__MODULE__, {:majority_reached, seq})
+        if count >= required do
+          # Majority reached — wake the committer and clean up the rows so no
+          # later ack can double-notify.
+          :ets.delete(@ack_table, seq)
+          :ets.delete(@ack_table, {seq, :count})
+          send(waiter, {:majority_reached, seq})
         end
 
         :ok
@@ -200,7 +225,9 @@ defmodule SuperCache.Cluster.WAL do
   """
   @spec recover() :: :ok
   def recover() do
-    entries = :ets.tab2list(@table)
+    # Skip the `{{:seq, :counter}, n}` bookkeeping row — only map-valued rows
+    # are real WAL entries.
+    entries = Enum.filter(:ets.tab2list(@table), fn {_k, v} -> is_map(v) end)
     count = length(entries)
 
     if count > 0 do
@@ -225,12 +252,12 @@ defmodule SuperCache.Cluster.WAL do
   ## Example
 
       WAL.stats()
-      # => %{pending: 42, committed: 1000}
+      # => %{pending: 42, acks_pending: 2}
   """
   @spec stats() :: %{pending: non_neg_integer, acks_pending: non_neg_integer}
   def stats() do
     %{
-      pending: :ets.info(@table, :size),
+      pending: max(0, :ets.info(@table, :size) - 1),
       acks_pending: :ets.info(@ack_table, :size)
     }
   end
@@ -271,9 +298,10 @@ defmodule SuperCache.Cluster.WAL do
   end
 
   @impl true
-  def handle_info({:majority_reached, seq}, state) do
-    # Clean up ack entry once majority is reached
-    :ets.delete(@ack_table, seq)
+  def handle_info({:majority_reached, _seq}, state) do
+    # Safety net: majority notifications are delivered directly to the
+    # committing process by ack/2, which also removes the tracking rows.
+    # Anything still arriving here is stale — nothing to clean.
     {:noreply, state}
   end
 
@@ -326,16 +354,13 @@ defmodule SuperCache.Cluster.WAL do
     end)
   end
 
-  defp await_majority(seq, required) do
+  defp await_majority(seq, _required) do
     timeout =
       Application.get_env(:super_cache, :wal, [])[:majority_timeout] || @default_majority_timeout
 
-    # Check if majority already reached (fast path)
+    # If the tracking row is already gone, majority was reached and cleaned up.
     case :ets.lookup(@ack_table, seq) do
-      [{^seq, %{acked: acked}}] when acked >= required ->
-        :ok
-
-      [{^seq, _}] ->
+      [_row] ->
         # Wait for notification or timeout
         receive do
           {:majority_reached, ^seq} -> :ok
@@ -357,17 +382,13 @@ defmodule SuperCache.Cluster.WAL do
   end
 
   defp cleanup_old_entries() do
-    # Remove entries older than 10 seconds
+    # Remove WAL entries older than 10 seconds. The sequence-counter row
+    # ({@seq_key, integer}) is skipped by the `is_map` guard.
     cutoff = System.monotonic_time(:millisecond) - 10_000
 
-    # Delete old WAL entries
     :ets.select_delete(@table, [
-      {{:"$1", :"$2"}, [{:<, {:map_get, :timestamp, :"$2"}, cutoff}], [true]}
-    ])
-
-    # Delete old ack entries
-    :ets.select_delete(@ack_table, [
-      {{:"$1", :"$2"}, [{:<, {:map_get, :timestamp, :"$2"}, cutoff}], [true]}
+      {{:"$1", :"$2"},
+       [{:andalso, {:is_map, :"$2"}, {:<, {:map_get, :timestamp, :"$2"}, cutoff}}], [true]}
     ])
   end
 end

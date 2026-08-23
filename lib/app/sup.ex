@@ -76,21 +76,37 @@ defmodule SuperCache.Sup do
   end
 
   @doc """
-  Terminates a child process identified by `pid` or `name`.
+  Terminates a child process identified by `pid`.
+
+  A registered atom name may be passed and is resolved via `Process.whereis/1`
+  first (`DynamicSupervisor` can only terminate children by pid).
   """
   @spec stop_worker(pid() | atom()) :: :ok | {:error, term}
-  def stop_worker(pid_or_name) do
-    case DynamicSupervisor.terminate_child(__MODULE__, pid_or_name) do
+  def stop_worker(pid_or_name)
+
+  def stop_worker(name) when is_atom(name) do
+    case Process.whereis(name) do
+      nil ->
+        Logger.warning("super_cache, supervisor, cannot stop unknown worker #{inspect(name)}")
+        {:error, :not_found}
+
+      pid ->
+        stop_worker(pid)
+    end
+  end
+
+  def stop_worker(pid) do
+    case DynamicSupervisor.terminate_child(__MODULE__, pid) do
       :ok ->
         SuperCache.Log.debug(fn ->
-          "super_cache, supervisor, stopped child #{inspect(pid_or_name)}"
+          "super_cache, supervisor, stopped child #{inspect(pid)}"
         end)
 
         :ok
 
       {:error, reason} ->
         Logger.warning(
-          "super_cache, supervisor, failed to stop child #{inspect(pid_or_name)}: #{inspect(reason)}"
+          "super_cache, supervisor, failed to stop child #{inspect(pid)}: #{inspect(reason)}"
         )
 
         {:error, reason}

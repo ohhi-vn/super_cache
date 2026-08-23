@@ -46,6 +46,13 @@ defmodule SuperCache.Cluster.WALTest do
       :error, :badarg -> :ok
     end
 
+    # Restore the sequence-counter bookkeeping row the runtime always keeps.
+    try do
+      :ets.insert(SuperCache.Cluster.WAL, {{:seq, :counter}, 0})
+    catch
+      :error, :badarg -> :ok
+    end
+
     try do
       :ets.delete_all_objects(SuperCache.Cluster.WAL_acks)
     catch
@@ -269,25 +276,32 @@ defmodule SuperCache.Cluster.WALTest do
     end
 
     test "ack increments the acked count" do
-      # Create a WAL entry by committing with a mock ack table entry
-      # This simulates what happens during distributed replication
       seq = 1
 
-      # Manually insert an ack tracking entry
-      :ets.insert(SuperCache.Cluster.WAL_acks, {seq, %{acked: 0, required: 2, replicas: []}})
+      # Manually insert ack tracking rows (new atomic shape)
+      :ets.insert(SuperCache.Cluster.WAL_acks, [{seq, 2, self()}, {{seq, :count}, 0}])
 
-      # Ack it
+      # Ack it — required is 2, so one ack must NOT reach majority
       WAL.ack(seq, node())
 
-      # Verify ack count was incremented
-      case :ets.lookup(SuperCache.Cluster.WAL_acks, seq) do
-        [{^seq, %{acked: acked}}] ->
-          assert acked == 1
+      case :ets.lookup(SuperCache.Cluster.WAL_acks, {seq, :count}) do
+        [{{^seq, :count}, count}] ->
+          assert count == 1
 
         [] ->
-          # Entry was cleaned up (majority reached) — also acceptable
-          :ok
+          flunk("counter row should still exist before majority")
       end
+    end
+
+    test "reaching majority notifies the waiter and cleans up rows" do
+      seq = 2
+      :ets.insert(SuperCache.Cluster.WAL_acks, [{seq, 2, self()}, {{seq, :count}, 0}])
+
+      WAL.ack(seq, :r1@host)
+      WAL.ack(seq, :r2@host)
+
+      assert_receive {:majority_reached, ^seq}, 1_000
+      refute :ets.member(SuperCache.Cluster.WAL_acks, seq)
     end
   end
 
@@ -446,24 +460,17 @@ defmodule SuperCache.Cluster.WALTest do
     test "multiple acks for the same seq" do
       seq = 42
 
-      # Insert an ack entry
-      :ets.insert(SuperCache.Cluster.WAL_acks, {seq, %{acked: 0, required: 3, replicas: []}})
+      # Insert an ack entry (required: 3)
+      :ets.insert(SuperCache.Cluster.WAL_acks, [{seq, 3, self()}, {{seq, :count}, 0}])
 
       # Ack multiple times
       WAL.ack(seq, :node1@host)
       WAL.ack(seq, :node2@host)
       WAL.ack(seq, :node3@host)
 
-      # After 3 acks (>= required), the entry should be cleaned up
-      # or the acked count should be 3
-      case :ets.lookup(SuperCache.Cluster.WAL_acks, seq) do
-        [] ->
-          # Entry was cleaned up — majority reached
-          :ok
-
-        [{^seq, %{acked: acked}}] ->
-          assert acked == 3
-      end
+      # After 3 acks (>= required), rows must be cleaned up and waiter notified
+      assert_receive {:majority_reached, ^seq}, 1_000
+      refute :ets.member(SuperCache.Cluster.WAL_acks, seq)
     end
 
     test "WAL handles rapid start/stop cycles" do
@@ -475,6 +482,142 @@ defmodule SuperCache.Cluster.WALTest do
 
       # Should not crash
       assert WAL.stats().pending >= 0
+    end
+  end
+
+  # ── Replicated commits (fake replicas — erpc fails fast) ─────────────────────
+
+  describe "commit/2 with replicas" do
+    setup do
+      # Plant a partition map giving partition 0 two fake replicas so commit
+      # takes the replicated path. Original map restored afterwards.
+      pt_key = {SuperCache.Cluster.Manager, :partition_map}
+      original = :persistent_term.get(pt_key, nil)
+      :persistent_term.put(pt_key, %{0 => {node(), [:"wal_fake1@host", :"wal_fake2@host"]}})
+
+      on_exit(fn ->
+        if original, do: :persistent_term.put(pt_key, original), else: :persistent_term.erase(pt_key)
+      end)
+
+      :ok
+    end
+
+    test "returns error when the local apply fails (invalid partition)" do
+      assert {:error, :invalid_partition} = WAL.commit(999_999, [{:put, {:x, 1}}])
+    end
+
+    test "times out when no replica acks arrive" do
+      Application.put_env(:super_cache, :wal, majority_timeout: 100)
+
+      try do
+        assert {:error, :majority_timeout} = WAL.commit(0, [{:put, {:wal_timeout_key, 1}}])
+      after
+        Application.delete_env(:super_cache, :wal)
+      end
+
+      # Local write still happened (write-ahead) and tracking rows were cleaned.
+      assert [{:wal_timeout_key, 1}] == Storage.get(:wal_timeout_key, Partition.get_partition_by_idx(0))
+    end
+
+    test "succeeds when replicas ack before the timeout" do
+      test_pid = self()
+
+      # Committer runs in a separate process; we ack from this one once the
+      # ack rows appear. required = div(2,2)+1 = 2.
+      spawn(fn ->
+        send(test_pid, {:result, WAL.commit(0, [{:put, {:wal_ack_key, 7}}])})
+      end)
+
+      pair =
+        Enum.reduce_while(1..200, nil, fn _i, acc ->
+          case :ets.match(SuperCache.Cluster.WAL_acks, {:"$1", :_, :"$2"}) do
+            [[seq, waiter]] when is_integer(seq) and is_pid(waiter) -> {:halt, {seq, waiter}}
+            [] -> Process.sleep(10) && {:cont, acc}
+          end
+        end)
+
+      assert {seq, waiter} = pair
+      assert waiter != self()
+
+      WAL.ack(seq, :wal_fake1@host)
+      WAL.ack(seq, :wal_fake2@host)
+
+      assert_receive {:result, :ok}, 2_000
+
+      # Ack rows are cleaned up after majority; local write applied.
+      refute :ets.member(SuperCache.Cluster.WAL_acks, seq)
+      assert [{:wal_ack_key, 7}] == Storage.get(:wal_ack_key, Partition.get_partition_by_idx(0))
+    end
+
+    test "replicate_and_ack/3 applies locally and acks the primary" do
+      partition = Partition.get_partition_by_idx(0)
+
+      WAL.replicate_and_ack(777, 0, [{:put, {:wal_raa_key, "applied"}}])
+      assert [{:wal_raa_key, "applied"}] == Storage.get(:wal_raa_key, partition)
+    end
+  end
+
+  # ── Recovery & cleanup edge cases ────────────────────────────────────────────
+
+  describe "recover/0 edge cases" do
+    test "ignores the sequence-counter bookkeeping row" do
+      # Seed ONLY the bookkeeping row shape that used to crash recover/0.
+      :ets.insert(SuperCache.Cluster.WAL, {{:seq, :counter}, 123})
+
+      assert :ok = WAL.recover()
+    end
+
+    test "replays seeded uncommitted entries" do
+      partition = Partition.get_partition_by_idx(3)
+      Storage.delete_all(partition)
+
+      entry = %{
+        seq: 90_001,
+        partition_idx: 3,
+        ops: [{:put, {:wal_recover_key, "v"}}],
+        timestamp: System.monotonic_time(:millisecond)
+      }
+
+      :ets.insert(SuperCache.Cluster.WAL, {90_001, entry})
+
+      assert :ok = WAL.recover()
+      assert [{:wal_recover_key, "v"}] == Storage.get(:wal_recover_key, partition)
+    end
+  end
+
+  describe "cleanup" do
+    test ":cleanup message deletes old entries but keeps the counter row" do
+      old_ts = System.monotonic_time(:millisecond) - 60_000
+
+      :ets.insert(
+        SuperCache.Cluster.WAL,
+        {88_001, %{seq: 88_001, partition_idx: 0, ops: [], timestamp: old_ts}}
+      )
+
+      :ets.insert(
+        SuperCache.Cluster.WAL,
+        {88_002, %{seq: 88_002, partition_idx: 0, ops: [], timestamp: System.monotonic_time(:millisecond)}}
+      )
+
+      send(WAL, :cleanup)
+      Process.sleep(50)
+
+      refute :ets.member(SuperCache.Cluster.WAL, 88_001)
+      assert :ets.member(SuperCache.Cluster.WAL, 88_002)
+      assert :ets.member(SuperCache.Cluster.WAL, {:seq, :counter})
+    end
+  end
+
+  describe "stats/0 pending accounting" do
+    test "pending excludes the sequence-counter row" do
+      base = WAL.stats().pending
+
+      :ets.insert(
+        SuperCache.Cluster.WAL,
+        {95_001, %{seq: 95_001, partition_idx: 0, ops: [], timestamp: System.monotonic_time(:millisecond)}}
+      )
+
+      assert WAL.stats().pending == base + 1
     end
   end
 end

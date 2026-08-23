@@ -204,6 +204,10 @@ defmodule SuperCache.Cluster.Bootstrap do
   """
   @spec stop() :: :ok
   def stop() do
+    # Mark not-running first so buffer streams observe the shutdown and exit
+    # quietly instead of resurrecting queues during teardown.
+    Config.set_config(:started, false)
+
     Buffer.stop()
 
     case Config.get_config(:num_partition) do
@@ -212,7 +216,6 @@ defmodule SuperCache.Cluster.Bootstrap do
     end
 
     Partition.stop()
-    Config.set_config(:started, false)
     :ok
   end
 

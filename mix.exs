@@ -4,7 +4,7 @@ defmodule SuperCache.MixProject do
   def project do
     [
       app: :super_cache,
-      version: "1.4.0",
+      version: "1.5.0",
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -19,7 +19,14 @@ defmodule SuperCache.MixProject do
       description: description(),
       package: package(),
       aliases: aliases(),
-      usage_rules: usage_rules()
+      test_coverage: [
+        ignore_modules: [
+          # Dev-only mix task and test-support module — not library code.
+          Mix.Tasks.BenchmarkEts,
+          SuperCache.ClusterCase,
+          TelemetryStub
+        ]
+      ]
     ]
   end
 
@@ -43,11 +50,12 @@ defmodule SuperCache.MixProject do
     [
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       {:benchee, "~> 1.5", only: :dev},
+      {:excoveralls, "~> 0.18", only: :test},
 
-      # support AI in dev env.
-      {:tidewave, "~> 0.5", only: [:dev]},
-      {:usage_rules, "~> 1.2", only: [:dev]},
-      {:bandit, "~> 1.10", only: :dev}
+      # Code quality
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:ex_dna, "~> 1.5", only: [:dev, :test], runtime: false}
     ]
   end
 
@@ -57,6 +65,18 @@ defmodule SuperCache.MixProject do
 
   defp package() do
     [
+      # Ship the AI-agent skills and their AGENTS.md entry point so consuming
+      # applications can copy them straight out of their deps checkout.
+      files: [
+        "lib",
+        "mix.exs",
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE",
+        ".formatter.exs",
+        "AGENTS.md",
+        "skills"
+      ],
       maintainers: ["Manh Van Vu"],
       licenses: ["MIT"],
       links: %{
@@ -100,18 +120,8 @@ defmodule SuperCache.MixProject do
     end)
   end
 
-  defp usage_rules do
-    [
-      file: "AGENTS.md",
-      usage_rules: :all
-    ]
-  end
-
   defp aliases() do
     [
-      tidewave:
-        "run --no-halt -e 'Agent.start(fn -> Bandit.start_link(plug: Tidewave, port: 4000) end)'",
-
       # Normal unit tests — no distribution required.
       test: ["test --exclude cluster"],
 
@@ -119,7 +129,12 @@ defmodule SuperCache.MixProject do
       # VM flags (--name, --cookie) must be passed via --erl to the runtime,
       # not directly to mix test which does not understand them.
       "test.cluster": [
-        "cmd elixir --name primary@127.0.0.1 --cookie test_secret -S mix test --only cluster"
+        "cmd elixir --name primary@127.0.0.1 --cookie test_secret -S mix test --only cluster",
+
+        # Testing & Coverage
+        coveralls: ["test --cover", "coveralls.html"],
+        # Code Quality
+        quality: ["format --check-formatted", "credo --strict", "dialyzer"]
       ]
     ]
   end

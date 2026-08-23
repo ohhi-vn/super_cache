@@ -484,6 +484,33 @@ SuperCache.Log.enable(false)
 - [Distributed Guide](guides/Distributed.md) — Detailed distributed mode documentation
 - [Developer Guide](guides/Developer.md) — Development, testing, benchmarking, and contribution guide
 
+## AI Agent Skills
+
+Machine-readable skill files live under [`skills/`](skills/) so AI coding
+agents (OpenCode, Claude Code, Cursor, …) can use SuperCache correctly in
+applications that depend on it:
+
+| Skill | Purpose |
+|-------|---------|
+| `skills/super-cache/SKILL.md` | Lifecycle, the tuple record model & key-collision trap, core CRUD, batch ops |
+| `skills/super-cache-collections/SKILL.md` | `KeyValue`, `Queue`, `Stack`, `Struct` APIs and their draining gotchas |
+| `skills/super-cache-distributed/SKILL.md` | Cluster setup, replication modes, read consistency, node lifecycle, health |
+
+Install into a consuming app by copying the folders you need:
+
+```bash
+# From a clone of this repository:
+cp -r skills/super-cache* /path/to/your_app/.opencode/skills/
+
+# Or straight from your hex deps checkout:
+cp -r deps/super_cache/skills/* /path/to/your_app/.opencode/skills/
+```
+
+The folders ship in the hex package, so `deps/super_cache/skills/` exists
+after `mix deps.get`.
+
+[`AGENTS.md`](AGENTS.md) gives a one-screen summary for any agent that reads it.
+
 ## Testing
 
 ```bash

@@ -67,7 +67,14 @@ defmodule SuperCache.Cluster.Stats do
   @spec cluster() :: map
   def cluster() do
     parts = partitions()
-    total = parts |> Enum.map(& &1.local_record_count) |> Enum.sum()
+
+    # A missing table reports its size as :undefined — count only real sizes
+    # so a torn-down partition cannot crash the summary with an ArithmeticError.
+    total =
+      parts
+      |> Enum.map(& &1.local_record_count)
+      |> Enum.filter(&is_integer/1)
+      |> Enum.sum()
 
     %{
       nodes:              Manager.live_nodes(),
@@ -361,10 +368,10 @@ defmodule SuperCache.Cluster.Stats do
   @doc """
   Record a completed API call.
 
-  Called by `SuperCache.Cluster.Router` and `SuperCache.Cluster.Replicator`
-  after each operation.
+  `key` is the bare operation atom (e.g. `:put`) so counters line up with
+  what `api/0` reports — do NOT pass `{:api, :put}` here.
 
-      Stats.record({:api, :put}, %{latency_us: 210, error: false})
+      Stats.record(:put, %{latency_us: 210, error: false})
   """
   @spec record(term, map) :: :ok
   def record(key, %{latency_us: lat, error: err}) do

@@ -29,9 +29,9 @@ defmodule SuperCache.Log do
 
       SuperCache.Log.enable(true)
 
-  All internal logging calls are routed through this module so that when
-  debug is disabled, no message strings are built and no function calls
-  are made — the macro expands to `:ok`.
+  All internal logging calls are routed through this module. When debug is
+  disabled, no message strings are built — the check is a single inlined
+  `:persistent_term` read.
 
   ## Examples
 
@@ -91,8 +91,11 @@ defmodule SuperCache.Log do
   Emit a debug log if debug logging is enabled.
 
   Accepts a string, iodata, or a zero-arity anonymous function (lazy
-  evaluation).  When disabled, this macro expands to `:ok` so no work
-  is performed.
+  evaluation — the function is only called when debug is enabled, so no
+  string is built otherwise).
+
+  The check is a single inlined `:persistent_term` read; the runtime toggle
+  (`enable/1`) takes effect immediately for all compiled callers.
 
   ## Examples
 
@@ -102,16 +105,15 @@ defmodule SuperCache.Log do
       SuperCache.Log.debug(fn -> "data: \#{inspect(large_struct)}" end)
   """
   defmacro debug(chardata_or_fun) do
-    if @enable_debug_log do
-      quote do
-        if SuperCache.Log.enabled?() do
-          Logger.debug(unquote(chardata_or_fun))
-        end
+    # Always honour the runtime toggle (`enabled?/0` falls back to the
+    # compile-time setting by default). The compile-time flag therefore
+    # controls the *default*, while remaining overridable without a rebuild.
+    # Cost when disabled: one inlined `persistent_term` read — no string is
+    # ever built.
+    quote do
+      if SuperCache.Log.enabled?() do
+        Logger.debug(unquote(chardata_or_fun))
       end
-    else
-      # Compile-time elimination — expands to :ok with zero runtime overhead.
-      # No function call, no string building, no branch prediction miss.
-      quote do: :ok
     end
   end
 

@@ -90,22 +90,18 @@ defmodule SuperCache.Storage.MatchSpec do
   end
 
   @doc """
-  Compile a match spec for repeated use.
+  Compile a match spec via `:ets.match_spec_compile/1`.
 
-  Compiled match specs are more efficient when the same query is
-  executed multiple times.
+  **Deprecated / broken on OTP 28+**: as of stdlib 8.x, `:ets.select/2`
+  rejects compiled match-spec references ("not a valid match specification"),
+  so the returned value cannot be used on those releases. On older OTP
+  releases the compiled reference worked and could be more efficient when
+  the same query ran repeatedly.
 
-  Note: In Erlang/Elixir, `:ets.select/2` can accept either:
-  - A match spec (list) directly
-  - A compiled match spec (reference) from `:ets.match_spec_compile/1`
-
-  ## Example
-
-      spec = MatchSpec.match({:"$1", :_}, [:"$1"])
-      compiled = MatchSpec.compile(spec)
-
-      # Later, use with :ets.select(table, compiled)
+  Prefer passing the uncompiled spec from `match/2` or `match_object/1`
+  directly to `select/2` — this is what all SuperCache internals do.
   """
+  @deprecated "Broken on OTP 28+ (:ets.select/2 rejects compiled refs); pass the plain spec to select/2 instead"
   @spec compile(match_spec) :: :ets.comp_match_spec() | match_spec
   def compile(spec) when is_list(spec) do
     :ets.match_spec_compile(spec)

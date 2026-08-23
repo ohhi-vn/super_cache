@@ -150,7 +150,12 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
 
     # Step 1 — shrink the managed set to empty so future kernel events
     # are ignored by NodeMonitor.
-    :erpc.call(n, NodeMonitor, :reconfigure, [[nodes: []]], 5_000)
+    #
+    # NOTE: the module must be fully qualified here. This file does NOT alias
+    # SuperCache.Cluster.NodeMonitor, so a bare `NodeMonitor` compiles to the
+    # atom :"Elixir.NodeMonitor", which does not exist on the remote node
+    # (:undef).
+    :erpc.call(n, SuperCache.Cluster.NodeMonitor, :reconfigure, [[nodes: []]], 5_000)
 
     # Step 2 — remove the test runner from the peer's Manager.live_nodes()
     # so verify_cluster_config! has no peers to check against.

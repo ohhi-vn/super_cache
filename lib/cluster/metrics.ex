@@ -82,9 +82,12 @@ defmodule SuperCache.Cluster.Metrics do
   def reset(namespace) do
     spec1 = MatchSpec.delete_match({{namespace, :_}, :_})
     spec2 = MatchSpec.delete_match({{:latency, namespace}, :_})
+    # Latency buffers are usually keyed `{namespace, op}` — clear those too.
+    spec3 = MatchSpec.delete_match({{:latency, {namespace, :_}}, :_})
 
     MatchSpec.select_delete(@table, spec1)
     MatchSpec.select_delete(@table, spec2)
+    MatchSpec.select_delete(@table, spec3)
     :ok
   end
 

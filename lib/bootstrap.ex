@@ -149,6 +149,11 @@ defmodule SuperCache.Bootstrap do
     elapsed = System.monotonic_time(:millisecond) - t0
     Logger.info("super_cache, bootstrap, stopped successfully in #{elapsed}ms")
     result
+  catch
+    # Tolerate a dead supervision tree — stop/0 on a stopped system is :ok.
+    :exit, _reason ->
+      Logger.warning("super_cache, bootstrap, stop called while application is down")
+      :ok
   end
 
   # ── Private — local-mode lifecycle ───────────────────────────────────────────
@@ -188,6 +193,10 @@ defmodule SuperCache.Bootstrap do
   defp local_stop() do
     Logger.info("super_cache, bootstrap, stopping local mode components...")
 
+    # Mark not-running first so buffer streams observe the shutdown and exit
+    # quietly instead of resurrecting queues during teardown.
+    Config.set_config(:started, false)
+
     # Stop in reverse dependency order
     Buffer.stop()
     SuperCache.Log.debug(fn -> "super_cache, bootstrap, buffers stopped" end)
@@ -212,7 +221,6 @@ defmodule SuperCache.Bootstrap do
     Partition.stop()
     SuperCache.Log.debug(fn -> "super_cache, bootstrap, partition registry cleared" end)
 
-    Config.set_config(:started, false)
     Logger.info("super_cache, bootstrap, local mode stopped")
     :ok
   end

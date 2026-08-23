@@ -121,11 +121,11 @@ SuperCache is built on a layered architecture designed for high performance and 
 | Module | Path | Responsibility |
 |--------|------|----------------|
 | `SuperCache.Cluster.Bootstrap` | `lib/cluster/cluster_bootstrap.ex` | Distributed mode bootstrap. Handles node connection, config verification across peers, partition map building, and component initialization. |
-| `SuperCache.Cluster.Manager` | `lib/cluster/manager.ex` | Cluster membership and partition → primary/replica mapping. Stores partition map in `:persistent_term` for zero-cost reads. Partition assignment: sorted node list rotated by partition index. |
+| `SuperCache.Cluster.Manager` | `lib/cluster/manager.ex` | Cluster membership and partition → primary/replica mapping. Stores partition map in `:persistent_term` for zero-cost reads. Partition assignment: sorted node list rotated by partition index. On membership changes, rebuilds the map and **reconciles ownership**: nodes that gain partitions pull them from previous holders. |
 | `SuperCache.Cluster.NodeMonitor` | `lib/cluster/node_monitor.ex` | Monitors declared nodes and notifies Manager when they join/leave. Supports three sources: static `:nodes`, dynamic `:nodes_mfa`, or legacy all-node watching. |
 | `SuperCache.Cluster.HealthMonitor` | `lib/cluster/health_monitor.ex` | Continuous health checking via periodic checks of connectivity (RTT), replication lag (probe-based), partition balance, and error rates. Emits `:telemetry` events. |
 | `SuperCache.Cluster.Router` | `lib/cluster/router.ex` | Distributed request router. Routes reads/writes to correct nodes. Handles read-your-writes consistency, quorum reads with early termination, and primary routing. |
-| `SuperCache.Cluster.Replicator` | `lib/cluster/replicator.ex` | Replication engine with three modes: `:async` (fire-and-forget via Task.Supervisor pool), `:sync` (adaptive quorum), `:strong` (WAL-based). Handles bulk partition transfers. |
+| `SuperCache.Cluster.Replicator` | `lib/cluster/replicator.ex` | Replication engine with three modes: `:async` (fire-and-forget via a supervision-tree-owned Task.Supervisor pool), `:sync` (adaptive quorum), `:strong` (WAL-based). Handles bulk partition transfers. |
 | `SuperCache.Cluster.WAL` | `lib/cluster/wal.ex` | Write-Ahead Log for strong consistency. Replaces heavy 3PC with ~200µs latency. Write to local ETS → append to WAL → async replicate → return on majority ack. |
 | `SuperCache.Cluster.ThreePhaseCommit` | `lib/cluster/three_phase_commit.ex` | Legacy three-phase commit protocol (PREPARE → PRE_COMMIT → COMMIT). Replaced by WAL but still available for backwards compatibility. |
 | `SuperCache.Cluster.TxnRegistry` | `lib/cluster/tnx_registry.ex` | In-memory transaction log for 3PC protocol. Uses `:public` ETS table for lock-free reads. Tracks transaction states: `:prepared` → `:pre_committed` → `:committed`/`:aborted`. |
@@ -263,24 +263,31 @@ mix test --max-failures 3
 
 ### Cluster Tests
 
+Cluster tests spawn real peer nodes via `:peer` and therefore **require a
+distributed VM** — run them through the alias (which sets `--name`/`--cookie`)
+or pass the flags yourself:
+
 ```bash
-# Run only cluster tests
-mix test test/cluster/
-
-# Run with specific seed for reproducibility
-mix test test/cluster/ --seed 12345
-
-# Run via alias (sets up proper VM flags)
+# Run only cluster tests (recommended — sets up proper VM flags)
 mix test.cluster
+
+# Equivalent manual invocation
+elixir --name primary@127.0.0.1 --cookie test_secret -S mix test --only cluster
+
+# Run with a specific seed for reproducibility
+mix test.cluster --seed 12345
 ```
 
-> **Note:** Cluster tests can be flaky due to timing and shared node config. Use `--exclude cluster` for fast local development.
+> **Note:** Each test file boots its own peer pair and every test drains
+> cluster convergence before it starts (`SuperCache.ClusterCase.await_convergence/1`),
+> so suites are stable despite ExUnit's randomized order. Use
+> `--exclude cluster` for fast local development without distribution.
 
 ### Test Structure
 
 | Directory | Tests | Description |
 |-----------|-------|-------------|
-| `test/` | 9 files | Core single-node tests (ETS, KV, Queue, Stack, Struct, Partition, Storage) |
+| `test/` | 30 files | Core single-node tests (ETS, KV, Queue, Stack, Struct, Partition, Storage, coverage rounds) |
 | `test/cluster/` | 9 files | Cluster integration tests (bootstrap, node failure, health monitor, 3PC, RYW) |
 | `test/distributed/` | 6 files | Distributed API tests (batch writes, KV, main API, Queue, Stack, Struct) |
 | `test/support/` | 1 file | `ClusterCase` - Shared ExUnit case template for cluster tests |

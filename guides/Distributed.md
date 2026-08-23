@@ -92,7 +92,7 @@ SuperCache offers three replication modes, each trading off latency vs. durabili
 
 ### Async Mode
 
-Fire-and-forget replication via a `Task.Supervisor` worker pool. The primary applies the write locally and immediately returns `:ok`. Replication happens in the background.
+Fire-and-forget replication via a `Task.Supervisor` worker pool. The primary applies the write locally and immediately returns `:ok`. Replication happens in the background. The pool is a permanent child of the application supervision tree, so replica delivery is never tied to the lifetime of whichever process happened to trigger a write.
 
 ```elixir
 config :super_cache,
@@ -290,12 +290,12 @@ SuperCache.Cluster.HealthMonitor.force_check()
 |--------|---------|
 | `:healthy` | All checks passing, cluster operating normally |
 | `:degraded` | Some checks failing, cluster still functional |
-| `:critical` | Major issues detected, data integrity at risk |
+| `:unhealthy` | Major issues detected, data integrity at risk |
 | `:unknown` | Unable to determine health (node unreachable) |
 
 ### Telemetry Events
 
-Health data is emitted via `:telemetry` events:
+Health data is emitted via `:telemetry` events (the dependency is **optional** — when `:telemetry` is not available the emissions are skipped):
 - `[:super_cache, :health, :check]` — Periodic health check results
 - `[:super_cache, :health, :alert]` — Threshold violations
 
@@ -310,6 +310,7 @@ Nodes are added automatically via `:nodeup` events. The cluster manager:
 2. Verifies SuperCache is running on it (via health check)
 3. Rebuilds the partition map
 4. Triggers full sync for owned partitions
+5. **Pulls migrated data** — partitions that moved to *existing* nodes after the rebuild are fetched from their previous holders, so every owner receives its records (not just the joiner)
 
 You can also manually notify the cluster:
 
@@ -323,12 +324,17 @@ Nodes are removed automatically via `:nodedown` events. The cluster manager:
 1. Detects the disconnected node
 2. Rebuilds the partition map without it
 3. Reassigns partitions to remaining nodes
+4. Survivors that gain ownership of a dead node's partitions pull the latest snapshot from any remaining holder (typically the old replica)
 
 Manual removal:
 
 ```elixir
 SuperCache.Cluster.Manager.node_down(:"old_node@10.0.0.2")
 ```
+
+> **Note**: Ownership reconciliation is best-effort. If no previous holder of a
+> partition is reachable, nothing can be pulled and the partition starts empty
+> on its new owner — writes will repopulate it.
 
 ### Full Sync
 
@@ -352,27 +358,42 @@ The `Cluster.NodeMonitor` watches declared nodes and notifies the Manager when t
 
 ### Static Node List
 
+Pass the managed set to `Bootstrap.start!/1` (or reconfigure later):
+
 ```elixir
-config :super_cache, :node_monitor,
-  source: :nodes,
+SuperCache.Cluster.Bootstrap.start!(
+  key_pos: 0,
+  partition_pos: 0,
+  cluster: :distributed,
+  replication_factor: 2,
+  num_partition: 8,
   nodes: [:"node1@10.0.0.1", :"node2@10.0.0.2"]
+)
 ```
 
 ### Dynamic Node Discovery (MFA)
 
 ```elixir
-config :super_cache, :node_monitor,
-  source: :nodes_mfa,
+SuperCache.Cluster.Bootstrap.start!(
+  key_pos: 0,
+  partition_pos: 0,
+  cluster: :distributed,
+  replication_factor: 2,
+  num_partition: 8,
   nodes_mfa: {MyApp.NodeDiscovery, :list_nodes, []},
   refresh_ms: 30_000
+)
 ```
 
 ### Reconfigure at Runtime
 
 ```elixir
+SuperCache.Cluster.NodeMonitor.reconfigure(nodes: [:"new_node@10.0.0.3"])
+
+# Switch to a dynamic discovery source:
 SuperCache.Cluster.NodeMonitor.reconfigure(
-  source: :nodes,
-  nodes: [:"new_node@10.0.0.3"]
+  nodes_mfa: {MyApp.NodeDiscovery, :list_nodes, []},
+  refresh_ms: 30_000
 )
 ```
 
@@ -504,19 +525,28 @@ SuperCache.Cluster.Stats.record_tpc(event, opts)
 
 ### Cluster.DistributedStore
 
-Shared routing helpers used by all distributed high-level stores (KeyValue, Queue, Stack, Struct).
+Shared routing helpers used by distributed high-level stores (KeyValue, Queue, Stack, Struct).
+
+- **Concrete-key helpers** (`route_put/2`, `route_delete/2`, `local_get/2`,
+  `local_insert_new/2`, `local_take/2`) resolve the partition from the record
+  or record key itself, so writes, reads and deletes for the same key always
+  land on the same table.
+- **Pattern helpers** (`local_match/2`, `route_delete_match/2`) cannot hash a
+  match pattern (wildcards change the term), so they scope to a namespace: the
+  partition is derived from the namespace argument and all records for one
+  store must embed that namespace in their key.
 
 ```elixir
 # Write helpers
 SuperCache.Cluster.DistributedStore.route_put(ets_key, value)
-SuperCache.Cluster.DistributedStore.route_delete(ets_key, namespace)
+SuperCache.Cluster.DistributedStore.route_delete(ets_key, _namespace_ignored)
 SuperCache.Cluster.DistributedStore.route_delete_match(namespace, pattern)
 
 # Read helpers (always local)
-SuperCache.Cluster.DistributedStore.local_get(ets_key, namespace)
+SuperCache.Cluster.DistributedStore.local_get(ets_key, _namespace_ignored)
 SuperCache.Cluster.DistributedStore.local_match(namespace, pattern)
-SuperCache.Cluster.DistributedStore.local_insert_new(record, namespace)
-SuperCache.Cluster.DistributedStore.local_take(ets_key, namespace)
+SuperCache.Cluster.DistributedStore.local_insert_new(record, _namespace_ignored)
+SuperCache.Cluster.DistributedStore.local_take(ets_key, _namespace_ignored)
 ```
 
 ## Troubleshooting

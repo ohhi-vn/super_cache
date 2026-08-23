@@ -51,6 +51,12 @@ defmodule SuperCache.Application do
       # Cluster components — always started; idle in local mode.
       {SuperCache.Cluster.Manager,     []},
       {SuperCache.Cluster.NodeMonitor, []},
+      # Replication worker pool — must be owned by the supervision tree.  A
+      # lazily-started Task.Supervisor would be linked to whichever transient
+      # process triggered the first replicated write (e.g. an :erpc executor
+      # handling a forwarded write), and its death would silently kill
+      # in-flight replications.
+      {Task.Supervisor,                [name: SuperCache.Cluster.Replicator.Pool]},
       # 3PC transaction log — must start before Bootstrap.
       {SuperCache.Cluster.TxnRegistry, []},
       # WAL for fast strong consistency — replaces heavy 3PC.

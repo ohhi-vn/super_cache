@@ -195,15 +195,32 @@ defmodule SuperCache.Cluster.DistributedHelpers do
   Reads from the primary replica for the given partition.
 
   If the current node is the primary, the function is applied locally.
-  Otherwise, an `:erpc.call` is made to the primary node.
+  Otherwise an `:erpc.call` is made to the primary node. When the primary
+  cannot be reached, the read **falls back to the local replica** (stale
+  data allowed) with a warning rather than crashing the caller — reads
+  follow eventual-consistency semantics.
   """
   @spec read_primary(module(), atom(), [term()], non_neg_integer()) :: term()
   def read_primary(caller, fun, args, partition_idx) do
     {primary, _} = Manager.get_replicas(partition_idx)
 
-    if primary == node(),
-      do: apply(caller, fun, args),
-      else: :erpc.call(primary, caller, fun, args, 5_000)
+    if primary == node() do
+      apply(caller, fun, args)
+    else
+      try do
+        :erpc.call(primary, caller, fun, args, 5_000)
+      catch
+        kind, reason ->
+          Logger.warning(
+            "super_cache, distributed_helpers, primary read failed " <>
+              "(partition=#{partition_idx}, primary=#{inspect(primary)}): " <>
+              inspect({kind, reason}) <>
+              " — falling back to the local replica (stale reads possible)"
+          )
+
+          apply(caller, fun, args)
+      end
+    end
   end
 
   # ── Quorum read ──────────────────────────────────────────────────────────────

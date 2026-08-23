@@ -15,6 +15,10 @@ defmodule SuperCache.Cluster.Manager do
      `Replicator.push_partition/2` for every partition that this node owns
      (as primary or replica) so the joining node receives a consistent
      snapshot.
+  4. **Ownership reconciliation** — whenever membership changes the partition
+     assignment, nodes that *gain* responsibility for partitions they did not
+     hold before pull those partitions from their previous holders, so records
+     follow the map instead of stranding on old owners.
 
   ## Cold-start behaviour
 
@@ -50,6 +54,7 @@ defmodule SuperCache.Cluster.Manager do
   require SuperCache.Log
 
   alias SuperCache.{Config, Partition}
+  alias SuperCache.Cluster.Replicator
 
   @pt_key {__MODULE__, :partition_map}
 
@@ -136,12 +141,12 @@ defmodule SuperCache.Cluster.Manager do
       new_node == node() ->
         # Our own node is always considered live; no health-check needed.
         updated = Enum.uniq([new_node | nodes])
-        :persistent_term.put(@pt_key, build_partition_map(updated))
+        update_partition_map(updated)
         {:noreply, %{state | nodes: updated}}
 
       node_running?(new_node) ->
         updated = Enum.uniq([new_node | nodes])
-        :persistent_term.put(@pt_key, build_partition_map(updated))
+        update_partition_map(updated)
         spawn(fn -> sync_to_node(new_node) end)
         Logger.info("super_cache, cluster_manager, node up: #{inspect(new_node)}")
         {:noreply, %{state | nodes: updated}}
@@ -163,7 +168,7 @@ defmodule SuperCache.Cluster.Manager do
       # Always keep node() in the list even if it receives its own nodedown
       # (should not happen, but defensive).
       updated = nodes |> List.delete(dead_node) |> ensure_self()
-      :persistent_term.put(@pt_key, build_partition_map(updated))
+      update_partition_map(updated)
       Logger.warning("super_cache, cluster_manager, node down: #{inspect(dead_node)}")
       {:noreply, %{state | nodes: updated}}
     else
@@ -193,7 +198,7 @@ defmodule SuperCache.Cluster.Manager do
 
       node_running?(target) ->
         updated = Enum.uniq([target | nodes])
-        :persistent_term.put(@pt_key, build_partition_map(updated))
+        update_partition_map(updated)
         spawn(fn -> sync_to_node(target) end)
 
         Logger.info(
@@ -226,6 +231,69 @@ defmodule SuperCache.Cluster.Manager do
   def handle_info(_msg, state), do: {:noreply, state}
 
   # ── Private ──────────────────────────────────────────────────────────────────
+
+  # Publish a new partition map and reconcile data ownership.
+  #
+  # Whenever membership changes the partition assignment shifts: partitions
+  # this node did not hold before may become its responsibility while the
+  # records still live on the previous holders.  `sync_to_node/1` only pushes
+  # data to *joining* nodes, so without reconciliation those records would
+  # never reach nodes that gained ownership after a join or a leave.
+  defp update_partition_map(nodes) do
+    old_map = :persistent_term.get(@pt_key, %{})
+    new_map = build_partition_map(nodes)
+    :persistent_term.put(@pt_key, new_map)
+
+    spawn(fn -> reconcile_ownership(old_map, new_map) end)
+    :ok
+  end
+
+  # Pull partitions this node newly holds from their previous holders.
+  # Runs outside the GenServer so slow transfers never block membership
+  # handling.  Best-effort: if no previous holder is reachable there is
+  # nothing to pull from.
+  defp reconcile_ownership(old_map, new_map) do
+    me = node()
+    live = MapSet.new(Node.list())
+
+    Enum.each(new_map, fn {idx, {primary, replicas}} ->
+      holders_now = [primary | replicas]
+
+      {old_primary, old_replicas} = Map.get(old_map, idx, {nil, []})
+      holders_before = Enum.uniq([old_primary | old_replicas])
+
+      if me in holders_now and not (me in holders_before) do
+        donors =
+          holders_before
+          |> Enum.reject(&(&1 == me or is_nil(&1)))
+          |> Enum.filter(&MapSet.member?(live, &1))
+
+        case donors do
+          [] ->
+            SuperCache.Log.debug(fn ->
+              "super_cache, cluster_manager, no donor for partition #{idx} — " <>
+                "no previous holder is connected"
+            end)
+
+          [donor | _] ->
+            Logger.info(
+              "super_cache, cluster_manager, pulling partition #{idx} from " <>
+                "#{inspect(donor)} (ownership moved to #{inspect(me)})"
+            )
+
+            try do
+              :erpc.call(donor, Replicator, :push_partition, [idx, me], 15_000)
+            catch
+              kind, reason ->
+                Logger.warning(
+                  "super_cache, cluster_manager, failed to pull partition #{idx} from " <>
+                    "#{inspect(donor)}: #{inspect({kind, reason})}"
+                )
+            end
+        end
+      end
+    end)
+  end
 
   # Build %{partition_idx => {primary, [replicas]}}.
   # `nodes` is guaranteed non-empty (always contains at least node()).

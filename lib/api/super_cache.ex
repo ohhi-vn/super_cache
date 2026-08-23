@@ -102,7 +102,13 @@ defmodule SuperCache do
 
   @doc "Returns `true` when SuperCache is running and ready."
   @spec started?() :: boolean
-  def started?(), do: Config.get_config(:started, false)
+  def started?() do
+    # Never exits — safe to call before start!/0 or while the application
+    # supervision tree is down.
+    Config.get_config(:started, false)
+  catch
+    :exit, _ -> false
+  end
 
   @doc "Stop SuperCache and free all ETS memory."
   @spec stop() :: :ok
@@ -140,7 +146,7 @@ defmodule SuperCache do
 
   Falls back to `put!/1` with a warning when `:strong` replication is active.
   """
-  @spec lazy_put(tuple) :: :ok
+  @spec lazy_put(tuple) :: :ok | {:error, :not_started} | {:error, :process_down}
   def lazy_put(data) when is_tuple(data) do
     if Config.distributed?() and SuperCache.Cluster.Manager.replication_mode() == :strong do
       Logger.warning(
@@ -176,15 +182,14 @@ defmodule SuperCache do
       Router.route_put_batch!(data_list)
     else
       # Route each record to its correct partition based on its own key.
-      # Group by partition to minimize ETS table switches.
+      # Group by partition so each group inserts with a single ETS operation
+      # (`:ets.insert/2` accepts a list of tuples).
       data_list
       |> Enum.group_by(fn data ->
         data |> Config.get_partition!() |> Partition.get_partition()
       end)
       |> Enum.each(fn {partition, records} ->
-        Enum.each(records, fn data ->
-          Storage.put(data, partition)
-        end)
+        Storage.put(records, partition)
       end)
     end
 
@@ -271,6 +276,8 @@ defmodule SuperCache do
     if Config.distributed?() do
       Router.route_get_by_match!(partition_data, pattern, opts)
     else
+      # Prepending each partition's fresh result is linear and faster than
+      # flat_map for large scans.
       reduce_partitions(partition_data, [], fn p, acc ->
         Storage.get_by_match(pattern, p) ++ acc
       end)
@@ -545,11 +552,20 @@ defmodule SuperCache do
 
   @doc """
   Return local ETS record counts per partition plus `:total`.
+
+  Partitions whose table is missing report `:undefined` and are excluded
+  from the total rather than crashing with an arithmetic error.
   """
   @spec stats() :: keyword
   def stats() do
     entries = Partition.get_all_partition() |> List.flatten() |> Enum.map(&Storage.stats/1)
-    total = Enum.reduce(entries, 0, fn {_, n}, acc -> acc + n end)
+
+    total =
+      entries
+      |> Enum.map(fn {_, n} -> n end)
+      |> Enum.filter(&is_integer/1)
+      |> Enum.sum()
+
     entries ++ [total: total]
   end
 
@@ -628,7 +644,8 @@ defmodule SuperCache do
     fun.()
   rescue
     err ->
-      Logger.error(Exception.format(:error, err, __STACKTRACE__))
+      # Lazily formatted — no string is built when :error level is filtered out.
+      Logger.error(fn -> Exception.format(:error, err, __STACKTRACE__) end)
       {:error, err}
   end
 end

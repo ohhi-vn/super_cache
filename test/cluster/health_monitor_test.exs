@@ -320,73 +320,48 @@ defmodule SuperCache.Cluster.HealthMonitorTest do
 
   describe "configuration" do
     test "accepts custom interval_ms" do
-      pid =
+      # NOTE: no on_exit stop here. When the monitor is already running under
+      # SuperCache.Supervisor, start_link/1 returns that pid via
+      # {:already_started, pid} and stopping it would kill a supervised
+      # child — rapid restarts can then exceed the supervisor's restart
+      # intensity and take down the whole application. A standalone monitor
+      # (started because the supervised one was down) is linked to this test
+      # process and dies with it automatically.
+      _ =
         case HealthMonitor.start_link(interval_ms: 1_000) do
-          {:ok, pid} -> pid
-          {:error, {:already_started, pid}} -> pid
+          {:ok, _pid} -> :started
+          {:error, {:already_started, _pid}} -> :already_running
         end
-
-      on_exit(fn ->
-        try do
-          GenServer.stop(pid)
-        catch
-          _, _ -> :ok
-        end
-      end)
 
       assert :ok == HealthMonitor.force_check()
     end
 
     test "accepts custom latency threshold" do
-      pid =
+      _ =
         case HealthMonitor.start_link(latency_threshold_ms: 50) do
-          {:ok, pid} -> pid
-          {:error, {:already_started, pid}} -> pid
+          {:ok, _pid} -> :started
+          {:error, {:already_started, _pid}} -> :already_running
         end
-
-      on_exit(fn ->
-        try do
-          GenServer.stop(pid)
-        catch
-          _, _ -> :ok
-        end
-      end)
 
       assert :ok == HealthMonitor.force_check()
     end
 
     test "accepts custom replication lag threshold" do
-      pid =
+      _ =
         case HealthMonitor.start_link(replication_lag_threshold_ms: 100) do
-          {:ok, pid} -> pid
-          {:error, {:already_started, pid}} -> pid
+          {:ok, _pid} -> :started
+          {:error, {:already_started, _pid}} -> :already_running
         end
-
-      on_exit(fn ->
-        try do
-          GenServer.stop(pid)
-        catch
-          _, _ -> :ok
-        end
-      end)
 
       assert :ok == HealthMonitor.force_check()
     end
 
     test "accepts custom error rate threshold" do
-      pid =
+      _ =
         case HealthMonitor.start_link(error_rate_threshold: 0.1) do
-          {:ok, pid} -> pid
-          {:error, {:already_started, pid}} -> pid
+          {:ok, _pid} -> :started
+          {:error, {:already_started, _pid}} -> :already_running
         end
-
-      on_exit(fn ->
-        try do
-          GenServer.stop(pid)
-        catch
-          _, _ -> :ok
-        end
-      end)
 
       assert :ok == HealthMonitor.force_check()
     end

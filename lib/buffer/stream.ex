@@ -40,7 +40,8 @@ defmodule SuperCache.Internal.Stream do
   Creates a `Stream` that continuously pulls items from the given queue.
 
   The stream yields batches of items returned by `Queue.get/1`.
-  If the queue returns `{:error, :timeout}`, the stream halts.
+  When the queue process is no longer running, the stream halts cleanly
+  (the buffer runner decides whether to restart it).
 
   ## Examples
 
@@ -53,7 +54,14 @@ defmodule SuperCache.Internal.Stream do
       fn -> queue_ref end,
       fn q ->
         SuperCache.Log.debug(fn -> "get data from queue" end)
-        {Queue.get(q), q}
+
+        case Queue.get(q) do
+          [] ->
+            if Queue.down?(q), do: {:halt, q}, else: {[], q}
+
+          items ->
+            {items, q}
+        end
       end,
       fn _queue ->
         :ok

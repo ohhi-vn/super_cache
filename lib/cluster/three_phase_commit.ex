@@ -51,8 +51,10 @@ defmodule SuperCache.Cluster.ThreePhaseCommit do
     {_primary, replicas} = Manager.get_replicas(partition_idx)
 
     if replicas == [] do
-      apply_local(partition_idx, ops)
-      :ok
+      case apply_local(partition_idx, ops) do
+        :ok -> :ok
+        {:error, _} = err -> err
+      end
     else
       txn_id = generate_txn_id()
       TxnRegistry.register(txn_id, partition_idx, ops, replicas)
@@ -138,9 +140,17 @@ defmodule SuperCache.Cluster.ThreePhaseCommit do
           registered_ops
       end
 
-    apply_local(partition_idx, ops)
-    SuperCache.Log.debug(fn -> "super_cache, 3pc, txn=#{txn_id} ACK_COMMIT" end)
-    :ack_commit
+    case apply_local(partition_idx, ops) do
+      :ok ->
+        SuperCache.Log.debug(fn -> "super_cache, 3pc, txn=#{txn_id} ACK_COMMIT" end)
+        :ack_commit
+
+      {:error, _} = err ->
+        # Local apply impossible (e.g. unknown partition) — report failure so
+        # the coordinator does not count this replica as committed.
+        Logger.warning("super_cache, 3pc, txn=#{txn_id} COMMIT failed locally: #{inspect(err)}")
+        err
+    end
   end
 
   @doc false
@@ -189,9 +199,20 @@ defmodule SuperCache.Cluster.ThreePhaseCommit do
          :ok <- phase_pre_commit(txn_id, replicas),
          # Pass ops so replicas can fall back if their TxnRegistry entry is gone.
          :ok <- phase_commit(txn_id, partition_idx, ops, replicas) do
-      apply_local(partition_idx, ops)
-      Logger.info("super_cache, 3pc, txn=#{txn_id} committed on #{length(replicas) + 1} node(s)")
-      :ok
+      case apply_local(partition_idx, ops) do
+        :ok ->
+          Logger.info(
+            "super_cache, 3pc, txn=#{txn_id} committed on #{length(replicas) + 1} node(s)"
+          )
+
+          :ok
+
+        {:error, reason} ->
+          # Replicas committed but the local apply failed — surface it rather
+          # than silently reporting success with nothing applied here.
+          Logger.error("super_cache, 3pc, txn=#{txn_id} local apply failed: #{inspect(reason)}")
+          {:error, {:local_apply_failed, reason}}
+      end
     else
       {:error, reason} = err ->
         broadcast_abort(txn_id, replicas)
@@ -300,14 +321,31 @@ defmodule SuperCache.Cluster.ThreePhaseCommit do
   end
 
   defp apply_local(partition_idx, ops) do
-    partition = Partition.get_partition_by_idx(partition_idx)
+    with :ok <- validate_ops(ops),
+         %{} <- partition_ok(partition_idx) do
+      partition = Partition.get_partition_by_idx(partition_idx)
 
-    Enum.each(ops, fn
-      {:put, record} -> Storage.put(record, partition)
-      {:delete, key} -> Storage.delete(key, partition)
-      {:delete_match, pattern} -> Storage.delete_match(pattern, partition)
-      {:delete_all, _} -> Storage.delete_all(partition)
-    end)
+      Enum.each(ops, fn
+        {:put, record} -> Storage.put(record, partition)
+        {:delete, key} -> Storage.delete(key, partition)
+        {:delete_match, pattern} -> Storage.delete_match(pattern, partition)
+        {:delete_all, _} -> Storage.delete_all(partition)
+      end)
+
+      :ok
+    else
+      {:error, _} = err -> err
+      nil -> {:error, :invalid_partition}
+    end
+  end
+
+  # Returns nil when the partition index is unknown so the with-chain can
+  # convert it into a clean error instead of crashing on Storage calls.
+  defp partition_ok(partition_idx) do
+    case Partition.get_partition_by_idx(partition_idx) do
+      nil -> nil
+      _partition -> %{}
+    end
   end
 
   defp generate_txn_id do

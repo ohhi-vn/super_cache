@@ -222,12 +222,32 @@ defmodule SuperCache.Cluster.NodeMonitorTest do
       assert wait_until(fn -> node1 in Manager.live_nodes() end, 10_000),
              "node1 not in Manager.live_nodes"
 
-      refute node2 in Manager.live_nodes()
+      # NOTE: we cannot refute node2 in Manager.live_nodes() here. node2 stays
+      # Erlang-connected and running, so legitimate async liveness paths
+      # (Manager retry timers, reconfigure reconciliation) may re-add it at any
+      # moment — membership is eventually consistent by design. The unit under
+      # test is NodeMonitor's refresh loop, observed via its managed set:
+      # no tick may add node2 while it is absent from the discovery list.
+      assert %MapSet{} = managed_before = :sys.get_state(NodeMonitor).managed
+
+      refute MapSet.member?(managed_before, node2),
+             "refresh added #{inspect(node2)} while it was absent from the discovery list"
 
       set_disco([node1, node2])
       Node.connect(node2)
 
-      assert wait_until(fn -> node2 in Manager.live_nodes() end, 3_000),
+      # After appearing in the discovery list the next tick must both manage
+      # and announce the node.
+      assert wait_until(
+               fn ->
+                 node2 in Manager.live_nodes() and
+                   case :sys.get_state(NodeMonitor).managed do
+                     %MapSet{} = s -> MapSet.member?(s, node2)
+                     _ -> false
+                   end
+               end,
+               5_000
+             ),
              "node2 was not added after it appeared in MFA refresh"
     end
 

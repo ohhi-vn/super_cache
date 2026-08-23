@@ -234,7 +234,12 @@ defmodule SuperCache.EtsHolder do
   ## ── Private helpers ──────────────────────────────────────────────────────────
 
   defp clean_up(table_name) do
-    :ets.delete_all_objects(table_name)
+    # Tables can vanish out-of-band (e.g. tracked names from a previous
+    # lifecycle with more partitions) — clearing a missing table is a no-op.
+    case :ets.info(table_name) do
+      :undefined -> true
+      _ -> :ets.delete_all_objects(table_name)
+    end
   end
 
   defp create_table(table_name) do

@@ -349,6 +349,56 @@ defmodule SuperCache.ClusterCase do
   end
 
   @doc """
+  Wait until every Erlang-connected node's Manager reports exactly the set of
+  connected nodes.
+
+  Tests that mutate cluster topology (peer restarts, monitor reconfigures)
+  restore membership asynchronously, and a test starting inside that window
+  reads a stale partition map — writes are then routed/replicated per a
+  different map than the one the test asserts against.
+
+  Convergence is actively accelerated: on every pass each connected Manager is
+  nudged with idempotent `node_up` announcements for every connected node, so
+  health-checked membership settles in bounded time instead of whenever retry
+  timers happen to fire.  Returns `true` when converged, `false` on timeout.
+  """
+  @spec await_convergence(non_neg_integer) :: boolean
+  def await_convergence(timeout \\ 8_000) do
+    wait_until(
+      fn ->
+        connected = [node() | Node.list()] |> Enum.sort()
+
+        # Nudge every manager (including our own) with idempotent node_up for
+        # every connected node — this collapses the usually-async convergence
+        # into a couple of synchronous health checks.
+        Enum.each(connected, fn m ->
+          Enum.each(connected, fn n ->
+            if m == node() do
+              Manager.node_up(n)
+            else
+              try do
+                :erpc.call(m, Manager, :node_up, [n], 2_000)
+              catch
+                _, _ -> :ok
+              end
+            end
+          end)
+        end)
+
+        try do
+          Enum.all?(connected, fn n ->
+            :erpc.call(n, Manager, :live_nodes, [], 3_000) |> Enum.sort() == connected
+          end)
+        catch
+          _, _ -> false
+        end
+      end,
+      timeout,
+      250
+    )
+  end
+
+  @doc """
   Poll `fun` every `interval` ms until it returns a truthy value or
   `timeout` ms elapses.  Returns `true` on success, `false` on timeout.
   """
@@ -401,6 +451,7 @@ defmodule SuperCache.ClusterCase do
         %{node1: node1, node2: node2, peer1: peer1, peer2: peer2} =
           Agent.get(agent, & &1)
 
+        await_convergence()
         safe_delete_all()
         Process.sleep(100)
 

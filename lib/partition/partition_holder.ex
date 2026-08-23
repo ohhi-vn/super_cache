@@ -27,7 +27,9 @@ defmodule SuperCache.Partition.Holder do
       # => :"SuperCache.Storage.Ets_0"
   """
 
-  use GenServer, restart: :transient, shutdown: 1_000
+  # Permanent: the registry must survive crashes AND come back if stop/0 is
+  # ever called directly — a dead holder would brick every partition lookup.
+  use GenServer, restart: :permanent, shutdown: 1_000
 
   require Logger
   require SuperCache.Log

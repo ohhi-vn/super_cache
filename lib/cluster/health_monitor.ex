@@ -761,11 +761,13 @@ defmodule SuperCache.Cluster.HealthMonitor do
   # ── Private — Telemetry ──────────────────────────────────────────────────────
 
   defp emit_telemetry(event, metadata) do
-    # Try to emit telemetry if available, silently ignore if not
-    try do
-      :telemetry.execute([:super_cache, :health, event], %{}, metadata)
-    catch
-      _, _ -> :ok
+    # `:telemetry` is an optional dependency — emit only when the module and
+    # function are actually loaded. Handler exceptions still propagate to
+    # telemetry's own handler supervision rather than being swallowed here.
+    if Code.ensure_loaded?(:telemetry) and function_exported?(:telemetry, :execute, 3) do
+      apply(:telemetry, :execute, [[:super_cache, :health, event], %{}, metadata])
+    else
+      :ok
     end
   end
 end
