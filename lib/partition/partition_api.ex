@@ -159,7 +159,7 @@ defmodule SuperCache.Partition do
       # => [:"SuperCache.Storage.Ets_0", :"SuperCache.Storage.Ets_1", :"SuperCache.Storage.Ets_2"]
   """
   @spec get_all_partition() :: [atom]
-  def get_all_partition(), do: Holder.get_all()
+  def get_all_partition, do: Holder.get_all()
 
   @doc """
   Initialise the partition registry.
@@ -213,7 +213,7 @@ defmodule SuperCache.Partition do
   Called by `SuperCache.Bootstrap` during shutdown.
   """
   @spec stop() :: :ok
-  def stop() do
+  def stop do
     SuperCache.Log.debug(fn -> "super_cache, partition, clearing registry" end)
     :persistent_term.erase(@pt_num_partition)
     :persistent_term.erase(@pt_partitions)
@@ -234,7 +234,7 @@ defmodule SuperCache.Partition do
       # => 8
   """
   @spec get_num_partition() :: pos_integer
-  def get_num_partition() do
+  def get_num_partition do
     case :ets.lookup(Holder, :num_partition) do
       [{:num_partition, :config, num}] when is_integer(num) and num > 0 ->
         num
@@ -250,7 +250,7 @@ defmodule SuperCache.Partition do
   # Fast path: read num_partition from persistent_term (set during start/1).
   # Falls back to ETS lookup if not yet cached (early boot).
   @compile {:inline, fast_num_partition: 0}
-  defp fast_num_partition() do
+  defp fast_num_partition do
     case :persistent_term.get(@pt_num_partition, :__not_set__) do
       :__not_set__ ->
         n = get_num_partition()
@@ -274,7 +274,7 @@ defmodule SuperCache.Partition do
       # => 8  (on an 8-core machine)
   """
   @spec get_schedulers() :: pos_integer
-  def get_schedulers(), do: System.schedulers_online()
+  def get_schedulers, do: System.schedulers_online()
 
   # ─── Deprecated / backwards compatibility ───────────────────────────────────
 

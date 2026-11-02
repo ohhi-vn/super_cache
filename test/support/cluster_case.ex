@@ -26,7 +26,7 @@ defmodule SuperCache.ClusterCase do
 
   import ExUnit.Assertions
 
-  alias SuperCache.Cluster.{Manager, NodeMonitor}
+  alias SuperCache.Cluster.{Bootstrap, Manager, NodeMonitor}
 
   # Required here (not just in __using__) because safe_delete_all/0 calls
   # Logger.debug/1, which is a macro.  The require in __using__ only covers
@@ -39,12 +39,12 @@ defmodule SuperCache.ClusterCase do
   # omitted so NodeMonitor starts in legacy :all mode; individual tests that
   # need a restricted managed set call restart_node_monitor/1 explicitly.
   @cache_opts [
-    key_pos:            0,
-    partition_pos:      0,
-    cluster:            :distributed,
+    key_pos: 0,
+    partition_pos: 0,
+    cluster: :distributed,
     replication_factor: 2,
-    num_partition:      8,
-    table_type:         :set
+    num_partition: 8,
+    table_type: :set
   ]
 
   @doc "Return the base cache opts used by every cluster test file."
@@ -71,11 +71,11 @@ defmodule SuperCache.ClusterCase do
     {:ok, _} = Application.ensure_all_started(:super_cache)
 
     if SuperCache.started?() do
-      SuperCache.Cluster.Bootstrap.stop()
+      Bootstrap.stop()
       Process.sleep(100)
     end
 
-    SuperCache.Cluster.Bootstrap.start!(@cache_opts)
+    Bootstrap.start!(@cache_opts)
 
     {peer1, node1} = start_peer(peer1_name)
     {peer2, node2} = start_peer(peer2_name)
@@ -121,7 +121,7 @@ defmodule SuperCache.ClusterCase do
       stop_peer(state.peer2)
 
       try do
-        SuperCache.Cluster.Bootstrap.stop()
+        Bootstrap.stop()
       catch
         :exit, _ -> :ok
       end
@@ -141,7 +141,7 @@ defmodule SuperCache.ClusterCase do
   """
   @spec start_peer(atom) :: {pid, node}
   def start_peer(name) do
-    cookie    = :erlang.get_cookie()
+    cookie = :erlang.get_cookie()
     code_path = :code.get_path()
 
     {:ok, peer, node} =
@@ -149,8 +149,10 @@ defmodule SuperCache.ClusterCase do
         name: name,
         host: ~c"127.0.0.1",
         args: [
-          ~c"-setcookie", :erlang.atom_to_list(cookie),
-          ~c"-connect_all", ~c"false"
+          ~c"-setcookie",
+          :erlang.atom_to_list(cookie),
+          ~c"-connect_all",
+          ~c"false"
         ]
       })
 
@@ -180,8 +182,10 @@ defmodule SuperCache.ClusterCase do
         name: name,
         host: ~c"127.0.0.1",
         args: [
-          ~c"-setcookie", :erlang.atom_to_list(cookie),
-          ~c"-connect_all", ~c"false"
+          ~c"-setcookie",
+          :erlang.atom_to_list(cookie),
+          ~c"-connect_all",
+          ~c"false"
         ]
       })
 
@@ -191,11 +195,9 @@ defmodule SuperCache.ClusterCase do
   @doc "Stop a peer, swallowing any exit if it is already dead."
   @spec stop_peer(pid) :: :ok
   def stop_peer(peer) do
-    try do
-      :peer.stop(peer)
-    catch
-      :exit, _ -> :ok
-    end
+    :peer.stop(peer)
+  catch
+    :exit, _ -> :ok
   end
 
   @doc """
@@ -348,6 +350,18 @@ defmodule SuperCache.ClusterCase do
     )
   end
 
+  defp announce_node(manager, target) do
+    if manager == node() do
+      Manager.node_up(target)
+    else
+      try do
+        :erpc.call(manager, Manager, :node_up, [target], 2_000)
+      catch
+        _, _ -> :ok
+      end
+    end
+  end
+
   @doc """
   Wait until every Erlang-connected node's Manager reports exactly the set of
   connected nodes.
@@ -371,19 +385,7 @@ defmodule SuperCache.ClusterCase do
         # Nudge every manager (including our own) with idempotent node_up for
         # every connected node — this collapses the usually-async convergence
         # into a couple of synchronous health checks.
-        Enum.each(connected, fn m ->
-          Enum.each(connected, fn n ->
-            if m == node() do
-              Manager.node_up(n)
-            else
-              try do
-                :erpc.call(m, Manager, :node_up, [n], 2_000)
-              catch
-                _, _ -> :ok
-              end
-            end
-          end)
-        end)
+        Enum.each(connected, fn m -> Enum.each(connected, &announce_node(m, &1)) end)
 
         try do
           Enum.all?(connected, fn n ->
@@ -402,7 +404,7 @@ defmodule SuperCache.ClusterCase do
   Poll `fun` every `interval` ms until it returns a truthy value or
   `timeout` ms elapses.  Returns `true` on success, `false` on timeout.
   """
-  @spec wait_until((() -> boolean), non_neg_integer, non_neg_integer) :: boolean
+  @spec wait_until((-> boolean), non_neg_integer, non_neg_integer) :: boolean
   def wait_until(fun, timeout \\ 3_000, interval \\ 50) do
     deadline = System.monotonic_time(:millisecond) + timeout
     do_wait(fun, deadline, interval)

@@ -1,13 +1,12 @@
 defmodule SuperCache.MetricsTest do
   use ExUnit.Case, async: false
 
-  alias SuperCache.Cluster.Metrics
+  alias SuperCache.Cluster.{Metrics, Stats}
 
   @ns :metrics_test_ns
 
-  # push_latency/1 is fire-and-forget (cast) — wait until the GenServer has
-  # applied our writes before asserting.
-  defp settle, do: Process.sleep(30)
+  # Counters are atomic ETS updates; latency samples are caller-written.
+  defp settle, do: Process.sleep(10)
 
   setup do
     # Full isolation — the table also holds live system counters.
@@ -38,12 +37,14 @@ defmodule SuperCache.MetricsTest do
     assert %{calls: 2} == Metrics.get_all({@ns, :put})
   end
 
-  test "push_latency/2 stores samples newest-first" do
-    Metrics.push_latency({@ns, :op}, 100)
+  test "push_latency/2 stores samples newest-first and is synchronous" do
+    assert :ok = Metrics.push_latency({@ns, :op}, 100)
+    assert [100] == Metrics.get_latency_samples({@ns, :op})
+
     Metrics.push_latency({@ns, :op}, 200)
     Metrics.push_latency({@ns, :op}, 300)
-    settle()
 
+    # No GenServer cast or settle delay: the caller already wrote the samples.
     assert [300, 200, 100] == Metrics.get_latency_samples({@ns, :op})
   end
 
@@ -60,11 +61,79 @@ defmodule SuperCache.MetricsTest do
   test "latency ring buffer is capped at 256 newest samples" do
     for i <- 1..300, do: Metrics.push_latency({@ns, :capped}, i)
 
-    wait_until(fn -> length(Metrics.get_latency_samples({@ns, :capped})) == 256 end, 50)
     samples = Metrics.get_latency_samples({@ns, :capped})
 
+    assert length(samples) == 256
     assert hd(samples) == 300
     refute 1 in samples
+  end
+
+  test "concurrent writers keep the ring buffer bounded" do
+    writers =
+      for worker <- 1..8 do
+        Task.async(fn ->
+          for i <- 1..100 do
+            Metrics.push_latency({@ns, :concurrent}, worker * 1_000 + i)
+          end
+
+          :ok
+        end)
+      end
+
+    assert Enum.all?(Task.await_many(writers, 10_000), &(&1 == :ok))
+
+    samples = Metrics.get_latency_samples({@ns, :concurrent})
+
+    assert length(samples) == 256
+    assert Enum.all?(samples, &is_integer/1)
+    assert length(Enum.uniq(samples)) == length(samples)
+  end
+
+  test "latency reads do not depend on the GenServer processing messages" do
+    :ok = :sys.suspend(Metrics)
+
+    try do
+      Metrics.push_latency({@ns, :suspended}, 42)
+      assert [42] == Metrics.get_latency_samples({@ns, :suspended})
+    after
+      :sys.resume(Metrics)
+    end
+  end
+
+  test "reliability counters increase and appear in Stats" do
+    reliability = Stats.reliability()
+    overview = Stats.cluster()
+
+    assert Map.has_key?(overview, :reliability)
+    assert overview.reliability == reliability
+
+    before = reliability
+
+    Metrics.increment(:replication, :async_failures)
+    Metrics.increment(:replication, :async_drops)
+    Metrics.increment(:replication, :sync_failures)
+    Metrics.increment(:replication, :strong_failures)
+    Metrics.increment(:wal, :backpressure)
+    Metrics.increment(:read, :fallbacks)
+    Metrics.increment(:health, :timeouts)
+    Metrics.increment(:membership, :changes)
+    Metrics.increment(:handoff, :successes)
+    Metrics.increment(:handoff, :failures)
+    Metrics.increment(:handoff, :transfer_failures)
+
+    after_reliability = Stats.reliability()
+
+    assert after_reliability.async_failures == before.async_failures + 1
+    assert after_reliability.async_drops == before.async_drops + 1
+    assert after_reliability.sync_failures == before.sync_failures + 1
+    assert after_reliability.strong_failures == before.strong_failures + 1
+    assert after_reliability.wal_backpressure == before.wal_backpressure + 1
+    assert after_reliability.read_fallbacks == before.read_fallbacks + 1
+    assert after_reliability.health_timeouts == before.health_timeouts + 1
+    assert after_reliability.membership_changes == before.membership_changes + 1
+    assert after_reliability.handoff_successes == before.handoff_successes + 1
+    assert after_reliability.handoff_failures == before.handoff_failures + 1
+    assert after_reliability.transfer_failures == before.transfer_failures + 1
   end
 
   test "reset/1 clears counters and latency samples" do
@@ -81,11 +150,5 @@ defmodule SuperCache.MetricsTest do
     send(Metrics, :random_garbage)
     settle()
     assert Process.alive?(Process.whereis(Metrics))
-  end
-
-  defp wait_until(_fun, 0), do: flunk("condition not met")
-
-  defp wait_until(fun, tries) do
-    if fun.(), do: :ok, else: Process.sleep(20) && wait_until(fun, tries - 1)
   end
 end

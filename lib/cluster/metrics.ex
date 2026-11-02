@@ -17,9 +17,20 @@ defmodule SuperCache.Cluster.Metrics do
 
   ## Latency samples
 
-  Latency ring buffers are stored as `{:latency, key}` records holding a
-  list of the most recent `@max_samples` microsecond values.  The list is
-  bounded so memory usage is constant regardless of call volume.
+  Latency samples use a fixed-size ring buffer written directly by the
+  caller — `push_latency/2` performs one atomic counter update and one
+  `:ets.insert/2`, with no `GenServer` message and no intermediate list
+  allocation.  Each key stores at most 256 samples in slots
+  keyed `{:latency, key, slot}`; the oldest slot is overwritten when the
+  ring wraps, so memory per key is constant regardless of call volume.
+
+  Concurrent writers are safe: sequence numbers come from
+  `:ets.update_counter/4`, so each sample lands in its own slot and the
+  buffer never grows past the cap.  A write that races with another may
+  overwrite a slot, which only drops a sample; it cannot corrupt counters
+  or produce unbounded state.
+
+  `get_latency_samples/1` returns the retained values newest-first.
 
   ## Usage
 
@@ -62,10 +73,10 @@ defmodule SuperCache.Cluster.Metrics do
 
   # ── Counter API ───────────────────────────────────────────────────────────────
 
-  @doc "Atomically increment counter `field` under `namespace` by 1."
-  @spec increment(term, atom) :: integer
-  def increment(namespace, field) do
-    :ets.update_counter(@table, {namespace, field}, {2, 1}, {{namespace, field}, 0})
+  @doc "Atomically increment counter `field` under `namespace` by `amount` (default 1)."
+  @spec increment(term, atom, integer) :: integer
+  def increment(namespace, field, amount \\ 1) when is_integer(amount) do
+    :ets.update_counter(@table, {namespace, field}, {2, amount}, {{namespace, field}, 0})
   end
 
   @doc "Return all counters for `namespace` as `%{field => count}`.\n  Uses compiled match spec for better performance.\n  "
@@ -80,14 +91,21 @@ defmodule SuperCache.Cluster.Metrics do
   @doc "Reset all counters and latency samples for `namespace`.\n  Uses compiled match specs for better performance.\n  "
   @spec reset(term) :: :ok
   def reset(namespace) do
-    spec1 = MatchSpec.delete_match({{namespace, :_}, :_})
-    spec2 = MatchSpec.delete_match({{:latency, namespace}, :_})
-    # Latency buffers are usually keyed `{namespace, op}` — clear those too.
-    spec3 = MatchSpec.delete_match({{:latency, {namespace, :_}}, :_})
+    specs = [
+      # Counters.
+      MatchSpec.delete_match({{namespace, :_}, :_}),
+      # Ring-buffer slots, both `namespace` and `{namespace, op}` keys.
+      MatchSpec.delete_match({{:latency, namespace, :_}, :_}),
+      MatchSpec.delete_match({{:latency, {namespace, :_}, :_}, :_}),
+      # Sequence counters that place samples into slots.
+      MatchSpec.delete_match({{:latency_seq, namespace, :seq}, :_}),
+      MatchSpec.delete_match({{:latency_seq, {namespace, :_}, :seq}, :_}),
+      # Legacy list-shaped buffers from older releases.
+      MatchSpec.delete_match({{:latency, namespace}, :_}),
+      MatchSpec.delete_match({{:latency, {namespace, :_}}, :_})
+    ]
 
-    MatchSpec.select_delete(@table, spec1)
-    MatchSpec.select_delete(@table, spec2)
-    MatchSpec.select_delete(@table, spec3)
+    Enum.each(specs, &MatchSpec.select_delete(@table, &1))
     :ok
   end
 
@@ -96,45 +114,34 @@ defmodule SuperCache.Cluster.Metrics do
   @doc """
   Push a latency sample (microseconds) into the ring buffer for `key`.
 
-  The buffer is capped at #{@max_samples} entries; oldest samples are
-  dropped when the cap is reached.
+  The sample is written synchronously by the calling process.  The buffer
+  is capped at #{@max_samples} entries; oldest samples are dropped when the
+  cap is reached.
   """
   @spec push_latency(term, non_neg_integer) :: :ok
   def push_latency(key, value_us) when is_integer(value_us) do
-    GenServer.cast(__MODULE__, {:push_latency, key, value_us})
+    seq_key = {:latency_seq, key, :seq}
+    seq = :ets.update_counter(@table, seq_key, {2, 1}, {seq_key, 0})
+    slot = rem(seq, @max_samples)
+    :ets.insert(@table, {{:latency, key, slot}, {seq, value_us}})
+    :ok
   end
 
-  @doc "Return all latency samples for `key` (unordered)."
+  @doc "Return all retained latency samples for `key`, newest first."
   @spec get_latency_samples(term) :: [non_neg_integer]
   def get_latency_samples(key) do
-    case :ets.lookup(@table, {:latency, key}) do
-      [{_, samples}] -> samples
-      [] -> []
-    end
+    spec = MatchSpec.match({{:latency, key, :_}, {:"$1", :"$2"}}, [:"$1", :"$2"])
+
+    @table
+    |> MatchSpec.select(spec)
+    |> Enum.sort_by(fn [seq, _value] -> seq end, :desc)
+    |> Enum.map(fn [_seq, value] -> value end)
   end
 
   # ── GenServer callbacks ───────────────────────────────────────────────────────
 
   @impl true
-  def handle_cast({:push_latency, key, value}, state) do
-    ets_key = {:latency, key}
-
-    existing =
-      case :ets.lookup(@table, ets_key) do
-        [{_, s}] -> s
-        [] -> []
-      end
-
-    updated =
-      if length(existing) >= @max_samples do
-        [value | Enum.drop(existing, -1)]
-      else
-        [value | existing]
-      end
-
-    :ets.insert(@table, {ets_key, updated})
-    {:noreply, state}
-  end
+  def handle_cast(_msg, state), do: {:noreply, state}
 
   @impl true
   def handle_info(_msg, state), do: {:noreply, state}

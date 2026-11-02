@@ -53,10 +53,11 @@ defmodule SuperCache.Cluster.Manager do
   require Logger
   require SuperCache.Log
 
+  alias SuperCache.Cluster.{Metrics, Replicator}
   alias SuperCache.{Config, Partition}
-  alias SuperCache.Cluster.Replicator
 
   @pt_key {__MODULE__, :partition_map}
+  @transfers __MODULE__.Transfers
 
   # ── Public API ───────────────────────────────────────────────────────────────
 
@@ -72,7 +73,7 @@ defmodule SuperCache.Cluster.Manager do
 
   @doc "Trigger a full partition sync from this node to all peers."
   @spec full_sync() :: :ok
-  def full_sync(), do: GenServer.cast(__MODULE__, :full_sync)
+  def full_sync, do: GenServer.cast(__MODULE__, :full_sync)
 
   @doc """
   Return `{primary_node, [replica_nodes]}` for `partition_idx`.
@@ -88,7 +89,7 @@ defmodule SuperCache.Cluster.Manager do
 
   @doc "Return the current list of live nodes (includes this node)."
   @spec live_nodes() :: [node]
-  def live_nodes(), do: GenServer.call(__MODULE__, :live_nodes)
+  def live_nodes, do: GenServer.call(__MODULE__, :live_nodes)
 
   @doc """
   Return the cluster-wide replication mode configured via
@@ -108,14 +109,31 @@ defmodule SuperCache.Cluster.Manager do
       # => :async
   """
   @spec replication_mode() :: :async | :sync | :strong
-  def replication_mode() do
+  def replication_mode do
     Config.get_config(:replication_mode, :async)
+  end
+
+  @doc """
+  Return the configured replication factor (total copies, primary included).
+
+  Zero-cost read from `SuperCache.Config` — no GenServer hop.
+  Defaults to `2`.
+
+  ## Example
+
+      SuperCache.Cluster.Manager.replication_factor()
+      # => 2
+  """
+  @spec replication_factor() :: pos_integer()
+  def replication_factor do
+    Config.get_config(:replication_factor, 2)
   end
 
   # ── GenServer callbacks ──────────────────────────────────────────────────────
 
   @impl true
   def init(_opts) do
+    ensure_transfer_table()
     {:ok, %{nodes: []}, {:continue, :init}}
   end
 
@@ -243,6 +261,7 @@ defmodule SuperCache.Cluster.Manager do
     old_map = :persistent_term.get(@pt_key, %{})
     new_map = build_partition_map(nodes)
     :persistent_term.put(@pt_key, new_map)
+    Metrics.increment(:membership, :changes)
 
     spawn(fn -> reconcile_ownership(old_map, new_map) end)
     :ok
@@ -254,51 +273,65 @@ defmodule SuperCache.Cluster.Manager do
   # nothing to pull from.
   defp reconcile_ownership(old_map, new_map) do
     me = node()
-    live = MapSet.new(Node.list())
+    live = live_set()
 
     Enum.each(new_map, fn {idx, {primary, replicas}} ->
-      holders_now = [primary | replicas]
-
-      {old_primary, old_replicas} = Map.get(old_map, idx, {nil, []})
-      holders_before = Enum.uniq([old_primary | old_replicas])
-
-      if me in holders_now and not (me in holders_before) do
-        donors =
-          holders_before
-          |> Enum.reject(&(&1 == me or is_nil(&1)))
-          |> Enum.filter(&MapSet.member?(live, &1))
-
-        case donors do
-          [] ->
-            SuperCache.Log.debug(fn ->
-              "super_cache, cluster_manager, no donor for partition #{idx} — " <>
-                "no previous holder is connected"
-            end)
-
-          [donor | _] ->
-            Logger.info(
-              "super_cache, cluster_manager, pulling partition #{idx} from " <>
-                "#{inspect(donor)} (ownership moved to #{inspect(me)})"
-            )
-
-            try do
-              :erpc.call(donor, Replicator, :push_partition, [idx, me], 15_000)
-            catch
-              kind, reason ->
-                Logger.warning(
-                  "super_cache, cluster_manager, failed to pull partition #{idx} from " <>
-                    "#{inspect(donor)}: #{inspect({kind, reason})}"
-                )
-            end
-        end
-      end
+      reconcile_partition(idx, primary, replicas, old_map, me, live)
     end)
+  end
+
+  defp reconcile_partition(idx, primary, replicas, old_map, me, live) do
+    holders_now = [primary | replicas]
+    {old_primary, old_replicas} = Map.get(old_map, idx, {nil, []})
+    holders_before = Enum.uniq([old_primary | old_replicas])
+
+    if me in holders_now and me not in holders_before do
+      handle_donor(idx, select_donor(old_primary, old_replicas, me, live), me)
+    end
+  end
+
+  defp handle_donor(idx, nil, _me) do
+    SuperCache.Log.debug(fn ->
+      "super_cache, cluster_manager, no donor for partition #{idx} — " <>
+        "no previous holder is connected"
+    end)
+  end
+
+  defp handle_donor(_idx, me, me), do: :ok
+
+  defp handle_donor(idx, donor, me) do
+    Logger.info(
+      "super_cache, cluster_manager, pulling partition #{idx} from " <>
+        "#{inspect(donor)} (ownership moved to #{inspect(me)})"
+    )
+
+    request_partition(idx, donor)
+  end
+
+  defp request_partition(idx, donor) do
+    case :erpc.call(donor, Replicator, :push_partition, [idx, node()], 15_000) do
+      :ok ->
+        Metrics.increment(:handoff, :successes)
+
+      {:error, _} ->
+        Metrics.increment(:handoff, :failures)
+        Metrics.increment(:handoff, :transfer_failures)
+    end
+  catch
+    kind, reason ->
+      Logger.warning(
+        "super_cache, cluster_manager, failed to pull partition #{idx} from " <>
+          "#{inspect(donor)}: #{inspect({kind, reason})}"
+      )
+
+      Metrics.increment(:handoff, :failures)
+      Metrics.increment(:handoff, :transfer_failures)
   end
 
   # Build %{partition_idx => {primary, [replicas]}}.
   # `nodes` is guaranteed non-empty (always contains at least node()).
   defp build_partition_map(nodes) when nodes != [] do
-    factor = Config.get_config(:replication_factor, 2)
+    factor = replication_factor()
     num_parts = Config.get_config(:num_partition, Partition.get_schedulers())
     sorted = Enum.sort(nodes)
     node_count = length(sorted)
@@ -314,33 +347,99 @@ defmodule SuperCache.Cluster.Manager do
   defp rotate(list, 0), do: list
   defp rotate([h | t], n), do: rotate(t ++ [h], n - 1)
 
-  # Push all partitions this node owns to `target`.
+  # Push all partitions this node is the deterministic donor for to `target`.
   defp sync_to_node(target) do
     num_parts = Config.get_config(:num_partition, Partition.get_schedulers())
-    me = node()
+    live = live_set()
 
     for idx <- 0..(num_parts - 1) do
       {primary, replicas} = get_replicas(idx)
 
-      if me == primary or me in replicas do
-        SuperCache.Cluster.Replicator.push_partition(idx, target)
+      if select_donor(primary, replicas, target, live) == node() do
+        transfer_partition(idx, target)
       end
     end
+
+    :ok
+  end
+
+  # Deterministic single donor for a partition: the primary when alive and not
+  # the target, otherwise the first live replica that is not the target.
+  defp select_donor(primary, replicas, target, live) do
+    donor_for(primary, replicas, target, live)
+  end
+
+  @doc false
+  # Public for tests and diagnostics: return the deterministic donor for a
+  # partition without performing a transfer.
+  @spec donor_for(node | nil, [node], node, MapSet.t()) :: node | nil
+  def donor_for(primary, replicas, target, live) do
+    [primary | replicas]
+    |> Enum.reject(&(is_nil(&1) or &1 == target))
+    |> Enum.find(&MapSet.member?(live, &1))
+  end
+
+  # Coalesce duplicate concurrent transfers for the same {partition, target}.
+  defp transfer_partition(idx, target) do
+    ensure_transfer_table()
+
+    if :ets.insert_new(@transfers, {{idx, target}, true}) do
+      try do
+        case Replicator.push_partition(idx, target) do
+          :ok ->
+            Metrics.increment(:handoff, :successes)
+
+          {:error, _} ->
+            Metrics.increment(:handoff, :failures)
+            Metrics.increment(:handoff, :transfer_failures)
+        end
+      after
+        :ets.delete(@transfers, {idx, target})
+      end
+    else
+      SuperCache.Log.debug(fn ->
+        "super_cache, cluster_manager, transfer #{idx} → #{inspect(target)} already in flight"
+      end)
+
+      :ok
+    end
+  end
+
+  defp live_set do
+    Node.list()
+    |> MapSet.new()
+    |> MapSet.put(node())
+  end
+
+  defp ensure_transfer_table do
+    case :ets.info(@transfers) do
+      :undefined ->
+        :ets.new(@transfers, [
+          :set,
+          :public,
+          :named_table,
+          {:read_concurrency, true},
+          {:write_concurrency, true}
+        ])
+
+      _ ->
+        :ok
+    end
+  rescue
+    ArgumentError -> :ok
   end
 
   # Returns true when SuperCache.Cluster.Bootstrap is running on target_node.
   defp node_running?(target_node) do
-    try do
-      :erpc.call(target_node, SuperCache.Cluster.Bootstrap, :running?, [], 5_000)
-    catch
-      kind, reason ->
-        Logger.warning(
-          "super_cache, cluster_manager, health-check failed " <>
-            "→ #{inspect(target_node)}: #{inspect({kind, reason})}"
-        )
+    :erpc.call(target_node, SuperCache.Cluster.Bootstrap, :running?, [], 5_000)
+  catch
+    kind, reason ->
+      Logger.warning(
+        "super_cache, cluster_manager, health-check failed " <>
+          "→ #{inspect(target_node)}: #{inspect({kind, reason})}"
+      )
 
-        false
-    end
+      false
   end
 
   # Guarantee node() is always in the membership list.

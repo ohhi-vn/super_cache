@@ -3,7 +3,7 @@ defmodule SuperCache.StorageTest do
 
   alias SuperCache.Storage
 
-  @data  {:a, 1, "hello"}
+  @data {:a, 1, "hello"}
   @partition :"SuperCache.Storage.Ets_0"
 
   setup_all do
@@ -45,13 +45,19 @@ defmodule SuperCache.StorageTest do
   test "delete all data" do
     Storage.put(@data, @partition)
     Storage.delete_all(@partition)
-    assert ([] == Storage.get({}, @partition))
+    assert [] == Storage.get({}, @partition)
   end
 
   test "scan data" do
     Storage.put(@data, @partition)
-   assert 1 == Storage.scan(fn {_, n, _}, acc ->
-      acc + n
-    end, 0, @partition)
+
+    assert 1 ==
+             Storage.scan(
+               fn {_, n, _}, acc ->
+                 acc + n
+               end,
+               0,
+               @partition
+             )
   end
 end

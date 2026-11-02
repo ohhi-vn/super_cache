@@ -24,7 +24,7 @@ defmodule SuperCache.Cluster.DistributedHelpersTest do
   defmodule TestWriter do
     @moduledoc false
 
-    alias SuperCache.{Storage, Partition}
+    alias SuperCache.{Partition, Storage}
 
     def write(key, value) do
       partition = Partition.get_partition(key)
@@ -46,7 +46,7 @@ defmodule SuperCache.Cluster.DistributedHelpersTest do
   defmodule TestReader do
     @moduledoc false
 
-    alias SuperCache.{Storage, Partition}
+    alias SuperCache.{Partition, Storage}
 
     def read(key) do
       partition = Partition.get_partition(key)
@@ -84,6 +84,21 @@ defmodule SuperCache.Cluster.DistributedHelpersTest do
 
   setup do
     SuperCache.delete_all()
+    :ok
+  end
+
+  @pt_partition_map {SuperCache.Cluster.Manager, :partition_map}
+
+  defp plant_map(map) do
+    original = :persistent_term.get(@pt_partition_map, nil)
+    :persistent_term.put(@pt_partition_map, map)
+
+    on_exit(fn ->
+      if original,
+        do: :persistent_term.put(@pt_partition_map, original),
+        else: :persistent_term.erase(@pt_partition_map)
+    end)
+
     :ok
   end
 
@@ -238,6 +253,38 @@ defmodule SuperCache.Cluster.DistributedHelpersTest do
       assert Storage.get(:batch_a, partition) == [{:batch_a, 1}]
       assert Storage.get(:batch_b, partition) == [{:batch_b, 2}]
     end
+
+    test "sync write succeeds when one replica is down and another acks" do
+      idx = 1
+      partition = Partition.get_partition_by_idx(idx)
+      plant_map(%{idx => {node(), [node(), :dh_dead_a@host]}})
+      original = Config.get_config(:replication_mode)
+
+      try do
+        Config.set_config(:replication_mode, :sync)
+
+        assert :ok =
+                 DistributedHelpers.apply_write(idx, partition, [{:put, {:dh_sync_ok, 1}}])
+      after
+        if original, do: Config.set_config(:replication_mode, original)
+      end
+    end
+
+    test "sync write fails when no replica can acknowledge" do
+      idx = 2
+      partition = Partition.get_partition_by_idx(idx)
+      plant_map(%{idx => {node(), [:dh_dead_b@host, :dh_dead_c@host]}})
+      original = Config.get_config(:replication_mode)
+
+      try do
+        Config.set_config(:replication_mode, :sync)
+
+        assert {:error, %SuperCache.Cluster.Error{}} =
+                 DistributedHelpers.apply_write(idx, partition, [{:put, {:dh_sync_fail, 1}}])
+      after
+        if original, do: Config.set_config(:replication_mode, original)
+      end
+    end
   end
 
   # ── has_partition?/1 ─────────────────────────────────────────────────────────
@@ -316,6 +363,15 @@ defmodule SuperCache.Cluster.DistributedHelpersTest do
         partition = Partition.get_partition_by_idx(idx)
         key = :"dh_part_#{idx}"
         assert Storage.get({:routed, key}, partition) != []
+      end
+    end
+
+    test "forwarded write failure raises the documented error" do
+      idx = 3
+      plant_map(%{idx => {:dh_forward_dead@host, []}})
+
+      assert_raise SuperCache.Cluster.Error, fn ->
+        DistributedHelpers.route_write(TestWriter, :write, [:dh_forward_key, 1], idx)
       end
     end
   end
@@ -476,6 +532,26 @@ defmodule SuperCache.Cluster.DistributedHelpersTest do
 
       assert result == "primary_value"
     end
+
+    test "falls back to a local replica when the primary is unreachable" do
+      key = {:dh_primary_key, :fallback}
+      partition_idx = Partition.get_partition_order(key)
+      Storage.put({key, "local_value"}, Partition.get_partition_by_idx(partition_idx))
+      plant_map(%{partition_idx => {:dh_primary_dead@host, [node()]}})
+
+      assert "local_value" ==
+               DistributedHelpers.read_primary(TestReader, :read_value, [key], partition_idx)
+    end
+
+    test "raises when the primary is unreachable and no local replica exists" do
+      key = {:dh_primary_key, :fail}
+      partition_idx = Partition.get_partition_order(key)
+      plant_map(%{partition_idx => {:dh_primary_dead@host, []}})
+
+      assert_raise SuperCache.Cluster.Error, fn ->
+        DistributedHelpers.read_primary(TestReader, :read_value, [key], partition_idx)
+      end
+    end
   end
 
   # ── read_quorum/4 ───────────────────────────────────────────────────────────
@@ -535,6 +611,42 @@ defmodule SuperCache.Cluster.DistributedHelpersTest do
           )
 
         assert result == "quorum_#{idx}"
+      end
+    end
+
+    test "falls back to the primary result when no majority forms" do
+      key = {:dh_quorum, :primary_fallback}
+      partition_idx = Partition.get_partition_order(key)
+      Storage.put({key, "primary_value"}, Partition.get_partition_by_idx(partition_idx))
+
+      plant_map(%{
+        partition_idx => {node(), [:dh_q_dead_a@host, :dh_q_dead_b@host]}
+      })
+
+      assert "primary_value" ==
+               DistributedHelpers.read_quorum(TestReader, :read_value, [key], partition_idx)
+    end
+
+    test "falls back to a local replica when the primary is unreachable" do
+      key = {:dh_quorum, :local_fallback}
+      partition_idx = Partition.get_partition_order(key)
+      Storage.put({key, "local_value"}, Partition.get_partition_by_idx(partition_idx))
+      plant_map(%{partition_idx => {:dh_q_dead_primary@host, [node()]}})
+
+      assert "local_value" ==
+               DistributedHelpers.read_quorum(TestReader, :read_value, [key], partition_idx)
+    end
+
+    test "raises when neither a majority nor a local replica is available" do
+      key = {:dh_quorum, :failure}
+      partition_idx = Partition.get_partition_order(key)
+
+      plant_map(%{
+        partition_idx => {:dh_q_dead_primary@host, [:dh_q_dead_replica@host]}
+      })
+
+      assert_raise SuperCache.Cluster.Error, fn ->
+        DistributedHelpers.read_quorum(TestReader, :read_value, [key], partition_idx)
       end
     end
   end

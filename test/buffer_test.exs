@@ -27,6 +27,24 @@ defmodule SuperCache.BufferTest do
     assert [{:lazy_flush, :probe, 1}] == SuperCache.get!({:lazy_flush, nil})
   end
 
+  test "drained batch preserves FIFO order for the same key" do
+    SuperCache.delete_by_match!(:_, {:lazy_order, :_, :_})
+
+    assert :ok = Buffer.enqueue({:lazy_order, :k, :v1})
+    assert :ok = Buffer.enqueue({:lazy_order, :k, :v2})
+
+    wait_until(fn -> SuperCache.get!({:lazy_order, nil}) != [] end)
+    assert [{:lazy_order, :k, :v2}] == SuperCache.get!({:lazy_order, nil})
+  end
+
+  test "a malformed item in a batch does not drop valid items" do
+    batch = [{:stream_valid_a, :x}, :not_a_tuple, {:stream_valid_b, :y}]
+    assert :ok = SuperCache.Internal.Stream.make_stream_pipe([batch])
+
+    assert [{:stream_valid_a, :x}] == SuperCache.get_by_match_object!({:stream_valid_a, :_})
+    assert [{:stream_valid_b, :y}] == SuperCache.get_by_match_object!({:stream_valid_b, :_})
+  end
+
   test "enqueue returns an error when buffers are not started" do
     names = :persistent_term.get({Buffer, :buffer_names}, nil)
 

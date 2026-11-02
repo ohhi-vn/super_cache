@@ -172,18 +172,7 @@ defmodule SuperCache.EtsHolder do
 
   def handle_call({:delete, table_name}, _from, %{table_list: tables} = state) do
     if table_name in tables do
-      # Guard against the table already being deleted (e.g., by a prior stop
-      # or the create_table cleanup path) — :ets.delete raises on missing tables.
-      case :ets.info(table_name) do
-        :undefined ->
-          SuperCache.Log.debug(fn ->
-            "super_cache, ets_holder, table #{inspect(table_name)} already gone, skipping delete"
-          end)
-
-        _ ->
-          :ets.delete(table_name)
-          Logger.info("super_cache, ets_holder, table #{inspect(table_name)} deleted")
-      end
+      delete_owned_table(table_name)
     else
       SuperCache.Log.debug(fn ->
         "super_cache, ets_holder, table #{inspect(table_name)} not found, skipping delete"
@@ -191,6 +180,21 @@ defmodule SuperCache.EtsHolder do
     end
 
     {:reply, :ok, %{state | table_list: List.delete(tables, table_name)}, :hibernate}
+  end
+
+  # Guard against the table already being deleted (e.g., by a prior stop or
+  # the create_table cleanup path) — :ets.delete raises on missing tables.
+  defp delete_owned_table(table_name) do
+    case :ets.info(table_name) do
+      :undefined ->
+        SuperCache.Log.debug(fn ->
+          "super_cache, ets_holder, table #{inspect(table_name)} already gone, skipping delete"
+        end)
+
+      _ ->
+        :ets.delete(table_name)
+        Logger.info("super_cache, ets_holder, table #{inspect(table_name)} deleted")
+    end
   end
 
   @impl true

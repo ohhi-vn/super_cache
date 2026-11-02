@@ -41,28 +41,35 @@ defmodule SuperCache.Application do
 
     children = [
       # Core config — must start first.
-      {SuperCache.Config,              [key_pos: 0, partition_pos: 0]},
+      {SuperCache.Config, [key_pos: 0, partition_pos: 0]},
       # Dynamic supervisor for user-spawned workers.
-      {SuperCache.Sup,                 []},
+      {SuperCache.Sup, []},
       # Partition registry.
-      {SuperCache.Partition.Holder,    []},
+      {SuperCache.Partition.Holder, []},
       # Owns the ETS data tables.
-      {SuperCache.EtsHolder,           SuperCache.EtsHolder},
+      {SuperCache.EtsHolder, SuperCache.EtsHolder},
       # Cluster components — always started; idle in local mode.
-      {SuperCache.Cluster.Manager,     []},
+      {SuperCache.Cluster.Manager, []},
       {SuperCache.Cluster.NodeMonitor, []},
       # Replication worker pool — must be owned by the supervision tree.  A
       # lazily-started Task.Supervisor would be linked to whichever transient
       # process triggered the first replicated write (e.g. an :erpc executor
       # handling a forwarded write), and its death would silently kill
       # in-flight replications.
-      {Task.Supervisor,                [name: SuperCache.Cluster.Replicator.Pool]},
+      {Task.Supervisor, [name: SuperCache.Cluster.Replicator.Pool, max_children: 10_000]},
+      # Dedicated pool for deadline-bound quorum calls.  Isolating quorum
+      # tasks from replication workers keeps a stuck read from starving
+      # write replication (and vice versa).
+      {Task.Supervisor, [name: SuperCache.Cluster.Quorum.Pool]},
       # 3PC transaction log — must start before Bootstrap.
       {SuperCache.Cluster.TxnRegistry, []},
+      # WAL store — owns the WAL/ack/watermark ETS tables so they survive a
+      # WAL GenServer crash.
+      {SuperCache.Cluster.WAL.Store, []},
       # WAL for fast strong consistency — replaces heavy 3PC.
       {SuperCache.Cluster.WAL, []},
       # Metrics store.
-      {SuperCache.Cluster.Metrics,     []},
+      {SuperCache.Cluster.Metrics, []},
       # Health monitor — continuously checks cluster health.
       {SuperCache.Cluster.HealthMonitor, []}
     ]
@@ -92,7 +99,7 @@ defmodule SuperCache.Application do
 
   # ── Private helpers ──────────────────────────────────────────────────────────
 
-  defp start_cache() do
+  defp start_cache do
     env = Application.get_all_env(:super_cache)
 
     try do
@@ -107,7 +114,7 @@ defmodule SuperCache.Application do
     end
   end
 
-  defp connect_peers() do
+  defp connect_peers do
     peers = Application.get_env(:super_cache, :cluster_peers, [])
 
     if peers == [] do

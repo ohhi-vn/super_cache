@@ -16,15 +16,31 @@ defmodule SuperCache.Cluster.Replicator do
   `replicate_<mode>` counter in `SuperCache.Cluster.Metrics` and records
   a latency sample so the results are visible in
   `SuperCache.Cluster.Stats.api/0`.
+
+  ## Async replication semantics
+
+  An `:async` write returns after the local apply and a supervised handoff to
+  the replication worker pool. Workers retry transient replica failures with
+  bounded backoff, controlled by `:async_max_retries` (default `3`) and
+  `:async_retry_backoff_ms` (default `50`) under the `:super_cache,
+  :replication` application environment. Failures are logged and counted in
+  `replication/async_failures`; deliveries that still fail after the retry
+  budget are counted in `replication/async_drops`. A full or unavailable pool
+  also increments `async_drops` immediately and the write still succeeds
+  locally. Neither failure path blocks the caller, and no task-result message
+  is left in the caller's mailbox.
   """
 
   require Logger
-  require SuperCache.Log
 
-  alias SuperCache.{Storage, Partition}
-  alias SuperCache.Cluster.{Manager, WAL, Metrics}
+  alias SuperCache.Cluster.{Manager, Metrics, Quorum, WAL}
+  alias SuperCache.{Partition, Storage}
 
   @batch_size 500
+  @replica_timeout 5_000
+  @quorum_timeout @replica_timeout + 500
+  @push_retries 3
+  @push_retry_backoff_ms 50
 
   # Worker pool for async replication.  Started by SuperCache.Application
   # under the supervision tree — see the comment there for why it must not
@@ -32,6 +48,10 @@ defmodule SuperCache.Cluster.Replicator do
   @pool_name __MODULE__.Pool
 
   # ── Public API ───────────────────────────────────────────────────────────────
+
+  @doc false
+  # Exposed for tests that need to exercise multi-batch partition streaming.
+  def __batch_size__, do: @batch_size
 
   @spec replicate(non_neg_integer, atom, any) :: :ok | {:error, term}
   def replicate(partition_idx, op_name, op_arg \\ nil) do
@@ -56,8 +76,12 @@ defmodule SuperCache.Cluster.Replicator do
       Metrics.push_latency({:api_latency_us, metric_key}, elapsed)
 
       case result do
-        {:error, _} -> Metrics.increment({:api, metric_key}, :errors)
-        _ -> :ok
+        {:error, _} ->
+          Metrics.increment({:api, metric_key}, :errors)
+          Metrics.increment(:replication, failure_field(mode))
+
+        _ ->
+          :ok
       end
 
       result
@@ -78,11 +102,20 @@ defmodule SuperCache.Cluster.Replicator do
     end
 
     case {op_name, op_arg} do
-      {:put, records} when is_list(records) -> Storage.put(records, partition)
-      {:put, record} -> Storage.put(record, partition)
-      {:delete, key} -> Storage.delete(key, partition)
-      {:delete_match, pattern} -> Storage.delete_match(pattern, partition)
-      {:delete_all, _} -> Storage.delete_all(partition)
+      {:put, records} when is_list(records) ->
+        Storage.put(records, partition)
+
+      {:put, record} ->
+        Storage.put(record, partition)
+
+      {:delete, key} ->
+        Storage.delete(key, partition)
+
+      {:delete_match, pattern} ->
+        Storage.delete_match(pattern, partition)
+
+      {:delete_all, _} ->
+        Storage.delete_all(partition)
 
       {other, _} ->
         raise ArgumentError, "unknown replication op: #{inspect(other)}"
@@ -92,11 +125,11 @@ defmodule SuperCache.Cluster.Replicator do
   end
 
   @doc """
-  Push all records for `partition_idx` to `target_node` in batches.
+  Push all records for `partition_idx` to `target_node` in bounded batches.
 
-  Returns `:ok` when every batch transferred, or
-  `{:error, {:push_failed, failed_batches, total_batches}}` when any batch
-  failed — callers syncing a joining node can detect incomplete snapshots.
+  Records are streamed from ETS in `@batch_size` chunks and each chunk is
+  retried with bounded backoff. Successful batches are kept even when a later
+  batch fails, and the error reports the exact failed and total record counts.
   """
   @spec push_partition(non_neg_integer, node) ::
           :ok | {:error, {:push_failed, non_neg_integer, non_neg_integer}}
@@ -107,53 +140,73 @@ defmodule SuperCache.Cluster.Replicator do
       "super_cache, replicator, syncing partition #{partition_idx} → #{inspect(target_node)}"
     )
 
-    records = Storage.scan(fn rec, acc -> [rec | acc] end, [], partition)
-    total = length(records)
-
-    batches =
-      records
-      |> Enum.chunk_every(@batch_size)
-      |> Enum.with_index(1)
-
-    failures =
-      Enum.count(batches, fn {batch, batch_num} ->
-        try do
-          :erpc.call(target_node, __MODULE__, :apply_op, [partition_idx, :put, batch], 10_000)
-
-          SuperCache.Log.debug(fn ->
-            "super_cache, replicator, partition #{partition_idx} batch #{batch_num} " <>
-              "(#{length(batch)} records) → #{inspect(target_node)}"
-          end)
-
-          false
-        rescue
-          e ->
-            Logger.warning(
-              "super_cache, replicator, batch #{batch_num} failed " <>
-                "→ #{inspect(target_node)}: #{inspect(e)}"
-            )
-
-            true
-        catch
-          kind, reason ->
-            Logger.warning(
-              "super_cache, replicator, batch #{batch_num} failed " <>
-                "→ #{inspect(target_node)}: #{inspect({kind, reason})}"
-            )
-
-            true
-        end
-      end)
+    {transferred, failed} = stream_partition(partition, partition_idx, target_node)
+    total = transferred + failed
 
     Logger.info(
-      "super_cache, replicator, pushed #{total - failures * @batch_size}+ record(s) for partition " <>
+      "super_cache, replicator, pushed #{transferred}/#{total} record(s) for partition " <>
         "#{partition_idx} → #{inspect(target_node)}"
     )
 
-    case failures do
-      0 -> :ok
-      n -> {:error, {:push_failed, n, length(batches)}}
+    if failed == 0 do
+      :ok
+    else
+      {:error, {:push_failed, failed, total}}
     end
+  end
+
+  defp stream_partition(partition, partition_idx, target_node) do
+    {batch, transferred, failed} =
+      Storage.scan(
+        fn record, {batch, tr, fa} ->
+          batch = [record | batch]
+
+          if length(batch) >= @batch_size do
+            {tr, fa} = flush_batch(partition_idx, target_node, Enum.reverse(batch), tr, fa)
+            {[], tr, fa}
+          else
+            {batch, tr, fa}
+          end
+        end,
+        {[], 0, 0},
+        partition
+      )
+
+    flush_batch(partition_idx, target_node, Enum.reverse(batch), transferred, failed)
+  end
+
+  defp flush_batch(_idx, _target, [], transferred, failed), do: {transferred, failed}
+
+  defp flush_batch(idx, target, batch, transferred, failed) do
+    case send_batch(idx, target, batch, @push_retries) do
+      :ok -> {transferred + length(batch), failed}
+      :error -> {transferred, failed + length(batch)}
+    end
+  end
+
+  defp send_batch(_idx, _target, _batch, 0), do: :error
+
+  defp send_batch(idx, target, batch, retries) do
+    :erpc.call(target, __MODULE__, :apply_op, [idx, :put, batch], 10_000)
+    :ok
+  rescue
+    err ->
+      Logger.warning(
+        "super_cache, replicator, batch transfer to #{inspect(target)} failed " <>
+          "(#{retries} retries left): #{inspect(err)}"
+      )
+
+      Process.sleep(@push_retry_backoff_ms)
+      send_batch(idx, target, batch, retries - 1)
+  catch
+    kind, reason ->
+      Logger.warning(
+        "super_cache, replicator, batch transfer to #{inspect(target)} failed " <>
+          "(#{retries} retries left): #{inspect({kind, reason})}"
+      )
+
+      Process.sleep(@push_retry_backoff_ms)
+      send_batch(idx, target, batch, retries - 1)
   end
 
   @doc """
@@ -174,24 +227,19 @@ defmodule SuperCache.Cluster.Replicator do
       result =
         try do
           # OTP version differences: classic releases return {replies,
-          # bad_nodes}; newer OTP may return a flat per-node result list
-          # where failures appear as {:error, _} entries. Normalize both.
-          {_successes, failures} =
-            case :erpc.multicall(
-                   replicas,
-                   __MODULE__,
-                   :apply_op_batch,
-                   [partition_idx, op_name, op_args],
-                   10_000
-                 ) do
-              {replies, bad_nodes} when is_list(replies) and is_list(bad_nodes) ->
-                ok = Enum.count(replies, &successful_reply?/1)
-                {ok, length(replicas) - ok + length(bad_nodes)}
-
-              flat when is_list(flat) ->
-                ok = Enum.count(flat, &successful_reply?/1)
-                {ok, length(replicas) - ok}
-            end
+          # bad_nodes}; newer OTP returns a flat per-node result list where
+          # failures appear as error entries.
+          failures =
+            multicall_failures(
+              :erpc.multicall(
+                replicas,
+                __MODULE__,
+                :apply_op_batch,
+                [partition_idx, op_name, op_args],
+                10_000
+              ),
+              length(replicas)
+            )
 
           if failures > 0 do
             Logger.warning(
@@ -208,13 +256,18 @@ defmodule SuperCache.Cluster.Replicator do
         end
 
       elapsed = System.monotonic_time(:microsecond) - t0
-      metric_key = :"replicate_batch_#{SuperCache.Config.get_config(:replication_mode, :async)}"
+      mode = SuperCache.Config.get_config(:replication_mode, :async)
+      metric_key = :"replicate_batch_#{mode}"
       Metrics.increment({:api, metric_key}, :calls)
       Metrics.push_latency({:api_latency_us, metric_key}, elapsed)
 
       case result do
-        {:error, _} -> Metrics.increment({:api, metric_key}, :errors)
-        _ -> :ok
+        {:error, _} ->
+          Metrics.increment({:api, metric_key}, :errors)
+          Metrics.increment(:replication, failure_field(mode))
+
+        _ ->
+          :ok
       end
 
       result
@@ -234,82 +287,221 @@ defmodule SuperCache.Cluster.Replicator do
       raise ArgumentError, "unknown partition index: #{inspect(partition_idx)}"
     end
 
-    Enum.each(op_args, fn op_arg ->
-      case {op_name, op_arg} do
-        {:put, {key, record}} -> Storage.put({key, record}, partition)
-        {:put, record} when is_tuple(record) -> Storage.put(record, partition)
-        {:delete, key} -> Storage.delete(key, partition)
-        {:delete_match, pattern} -> Storage.delete_match(pattern, partition)
-        {:delete_all, _} -> Storage.delete_all(partition)
+    case op_name do
+      :put ->
+        records =
+          Enum.map(op_args, fn
+            {key, record} -> {key, record}
+            record when is_tuple(record) -> record
+          end)
 
-        {other, _} ->
-          raise ArgumentError, "unknown replication op: #{inspect(other)}"
-      end
-    end)
+        Storage.put(records, partition)
+
+      _ ->
+        Enum.each(op_args, &apply_batch_op(op_name, &1, partition))
+    end
 
     :ok
   end
 
+  defp apply_batch_op(:delete, key, partition), do: Storage.delete(key, partition)
+
+  defp apply_batch_op(:delete_match, pattern, partition),
+    do: Storage.delete_match(pattern, partition)
+
+  defp apply_batch_op(:delete_all, _arg, partition), do: Storage.delete_all(partition)
+
+  defp apply_batch_op(other, _arg, _partition) do
+    raise ArgumentError, "unknown replication op: #{inspect(other)}"
+  end
+
   # A successful multicall entry is the bare return value (:ok here). Any
   # {:error, ...} tuple or caught-exception marker counts as a failure.
-  defp successful_reply?(:ok), do: true
+  defp async_replicate_worker(partition_idx, op_name, op_arg, replicas) do
+    max_retries =
+      Application.get_env(:super_cache, :replication, [])[:async_max_retries] || 3
+
+    backoff_ms =
+      Application.get_env(:super_cache, :replication, [])[:async_retry_backoff_ms] || 50
+
+    do_async_replicate(partition_idx, op_name, op_arg, replicas, max_retries, backoff_ms, 0)
+  end
+
+  defp do_async_replicate(
+         partition_idx,
+         op_name,
+         op_arg,
+         replicas,
+         max_retries,
+         backoff_ms,
+         attempt
+       ) do
+    failed =
+      multicall_failures(
+        :erpc.multicall(
+          replicas,
+          __MODULE__,
+          :apply_op,
+          [partition_idx, op_name, op_arg],
+          5_000
+        ),
+        length(replicas)
+      )
+
+    if failed > 0 and attempt < max_retries do
+      Process.sleep(backoff_ms * (attempt + 1))
+
+      do_async_replicate(
+        partition_idx,
+        op_name,
+        op_arg,
+        replicas,
+        max_retries,
+        backoff_ms,
+        attempt + 1
+      )
+    else
+      if failed > 0 do
+        Metrics.increment(:replication, :async_drops, failed)
+      end
+
+      :ok
+    end
+  rescue
+    error ->
+      Logger.warning(
+        "super_cache, replicator, async replication failed (attempt #{attempt}): " <>
+          inspect(error)
+      )
+
+      Metrics.increment(:replication, :async_failures)
+
+      if attempt < max_retries do
+        Process.sleep(backoff_ms * (attempt + 1))
+
+        do_async_replicate(
+          partition_idx,
+          op_name,
+          op_arg,
+          replicas,
+          max_retries,
+          backoff_ms,
+          attempt + 1
+        )
+      else
+        :ok
+      end
+  catch
+    kind, reason ->
+      Logger.warning(
+        "super_cache, replicator, async replication exited (attempt #{attempt}): " <>
+          inspect({kind, reason})
+      )
+
+      Metrics.increment(:replication, :async_failures)
+
+      if attempt < max_retries do
+        Process.sleep(backoff_ms * (attempt + 1))
+
+        do_async_replicate(
+          partition_idx,
+          op_name,
+          op_arg,
+          replicas,
+          max_retries,
+          backoff_ms,
+          attempt + 1
+        )
+      else
+        :ok
+      end
+  end
+
+  # OTP 29 returns a flat list of per-node results; older releases return
+  # {replies, bad_nodes}. Keep both shapes working while the project supports
+  # Elixir ~> 1.15 across OTP versions. Dialyzer narrows the return type on the
+  # running OTP, so the compatibility clause is annotated.
+  @dialyzer {:nowarn_function, normalize_multicall: 1}
+  defp normalize_multicall({replies, bad_nodes})
+       when is_list(replies) and is_list(bad_nodes),
+       do: {replies, bad_nodes}
+
+  defp normalize_multicall(results) when is_list(results), do: {results, []}
+
+  @dialyzer {:nowarn_function, multicall_failures: 2}
+  defp multicall_failures(results, replica_count) do
+    {replies, bad_nodes} = normalize_multicall(results)
+
+    if bad_nodes == [] do
+      replica_count - Enum.count(replies, &successful_reply?/1)
+    else
+      length(bad_nodes)
+    end
+  end
+
   defp successful_reply?({:error, _}), do: false
   defp successful_reply?({:error, _, _}), do: false
   defp successful_reply?(:caught), do: false
   defp successful_reply?(_), do: true
 
+  defp failure_field(:async), do: :async_failures
+  defp failure_field(:sync), do: :sync_failures
+  defp failure_field(:strong), do: :strong_failures
+  defp failure_field(_mode), do: :async_failures
+
   # ── Private ──────────────────────────────────────────────────────────────────
 
   defp do_replicate(:async, partition_idx, op_name, op_arg, replicas) do
-    # Worker pool: uses Task.Supervisor to avoid per-operation spawn/1 overhead.
-    # Fire-and-forget: returns immediately after handing off to the pool.
-    # async_nolink prevents exit message leakage to the supervisor.
-    Task.Supervisor.async_nolink(@pool_name, fn ->
-      :erpc.multicall(replicas, __MODULE__, :apply_op, [partition_idx, op_name, op_arg], 5_000)
-    end)
+    # Supervised fire-and-forget worker.  No result message is sent to the
+    # caller; failures are logged and counted inside the worker.
+    case Task.Supervisor.start_child(@pool_name, fn ->
+           async_replicate_worker(partition_idx, op_name, op_arg, replicas)
+         end) do
+      {:ok, _pid} ->
+        :ok
 
-    :ok
+      {:error, reason} ->
+        Logger.warning(
+          "super_cache, replicator, async replication pool full or unavailable: " <>
+            inspect(reason)
+        )
+
+        Metrics.increment(:replication, :async_drops)
+        :ok
+    end
   end
 
   defp do_replicate(:sync, partition_idx, op_name, op_arg, replicas) do
-    # Adaptive quorum: returns :ok once a strict majority acknowledges.
-    # Avoids waiting for slow stragglers while maintaining strong durability.
-    required = div(length(replicas), 2) + 1
+    # Primary-inclusive quorum: the local apply already counts as one vote,
+    # so require a strict majority of all copies (primary + replicas).
+    # Duplicate acknowledgements are impossible because each replica is a
+    # separate entry and Quorum rejects duplicate nodes.
+    required = div(length(replicas) + 1, 2)
 
-    tasks =
+    entries =
       Enum.map(replicas, fn replica ->
-        Task.async(fn ->
-          try do
-            :erpc.call(replica, __MODULE__, :apply_op, [partition_idx, op_name, op_arg], 5_000)
-          catch
-            _kind, _reason -> :error
-          end
-        end)
+        {replica,
+         fn ->
+           :erpc.call(
+             replica,
+             __MODULE__,
+             :apply_op,
+             [partition_idx, op_name, op_arg],
+             @replica_timeout
+           )
+         end}
       end)
 
-    await_quorum(tasks, required)
+    case Quorum.await(entries, required, @quorum_timeout, pool: @pool_name) do
+      {:ok, _value, _voters} -> :ok
+      {:error, :timeout, _results} -> {:error, :quorum_timeout}
+      {:error, reason, _results} -> {:error, reason}
+    end
   end
 
   defp do_replicate(:strong, partition_idx, op_name, op_arg, _replicas) do
     # WAL-based strong consistency: replaces heavy 3PC.
     # ~200µs latency vs ~1500µs for 3PC.
     WAL.commit(partition_idx, [{op_name, op_arg}])
-  end
-
-  defp await_quorum(tasks, required) do
-    await_quorum(tasks, required, 0)
-  end
-
-  defp await_quorum(_tasks, required, success) when success >= required, do: :ok
-  defp await_quorum([], _required, _success), do: {:error, :quorum_not_reached}
-  defp await_quorum(tasks, required, success) do
-    case Task.yield_many(tasks, 5_000) do
-      [] -> {:error, :quorum_timeout}
-      results ->
-        finished = for {t, res} <- results, res != nil, do: t
-        remaining = tasks -- finished
-        new_success = Enum.count(results, fn {_, {:ok, :ok}} -> true; _ -> false end)
-        await_quorum(remaining, required, success + new_success)
-    end
   end
 end

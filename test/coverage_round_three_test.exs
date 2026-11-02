@@ -7,6 +7,7 @@ defmodule SuperCache.CoverageRoundThreeTest do
 
   use ExUnit.Case, async: false
 
+  alias SuperCache.Cluster.Bootstrap
   alias SuperCache.Cluster.{Manager, Stats, WAL}
   alias SuperCache.{EtsHolder, Partition, Storage}
 
@@ -22,7 +23,7 @@ defmodule SuperCache.CoverageRoundThreeTest do
       Application.put_env(:super_cache, :key_pos, 0)
       Application.put_env(:super_cache, :partition_pos, 0)
       Application.put_env(:super_cache, :num_partition, 2)
-      Application.put_env(:super_cache, :cluster_peers, [:"autostart_dead@host"])
+      Application.put_env(:super_cache, :cluster_peers, [:autostart_dead@host])
 
       :ok = Application.stop(:super_cache)
       {:ok, _} = Application.ensure_all_started(:super_cache)
@@ -50,7 +51,7 @@ defmodule SuperCache.CoverageRoundThreeTest do
     Process.sleep(30)
 
     :ok =
-      SuperCache.Cluster.Bootstrap.start!(
+      Bootstrap.start!(
         key_pos: 0,
         partition_pos: 0,
         cluster: :distributed,
@@ -62,7 +63,7 @@ defmodule SuperCache.CoverageRoundThreeTest do
 
     try do
       # Every node in the quorum set is unreachable.
-      :persistent_term.put(@pt_partition_map, %{0 => {:"q1_dead@host", [:"q2_dead@host"]}})
+      :persistent_term.put(@pt_partition_map, %{0 => {:q1_dead@host, [:q2_dead@host]}})
 
       assert [] ==
                SuperCache.get_by_key_partition!(:whatever, 0, read_mode: :quorum)
@@ -106,7 +107,7 @@ defmodule SuperCache.CoverageRoundThreeTest do
     original = :persistent_term.get(@pt_partition_map, nil)
 
     try do
-      :persistent_term.put(@pt_partition_map, %{0 => {node(), [:"wal_rec@host"]}})
+      :persistent_term.put(@pt_partition_map, %{0 => {node(), [:wal_rec@host]}})
 
       entry = %{
         seq: 97_001,

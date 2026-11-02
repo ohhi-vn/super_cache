@@ -14,6 +14,10 @@ targets = %{
   "SuperCache.Cluster.Bootstrap" => "lib/cluster/cluster_bootstrap.ex",
   "SuperCache.Cluster.HealthMonitor" => "lib/cluster/health_monitor.ex",
   "SuperCache.Cluster.Replicator" => "lib/cluster/replicator.ex",
+  "SuperCache.Cluster.WAL.Store" => "lib/cluster/wal/store.ex",
+  "SuperCache.Cluster.Error" => "lib/cluster/error.ex",
+  "SuperCache.Cluster.Rpc" => "lib/cluster/rpc.ex",
+  "SuperCache.Storage.MatchSpec" => "lib/storage/match_spec.ex",
   "SuperCache.Cluster.WAL" => "lib/cluster/wal.ex",
   "SuperCache.Cluster.Router" => "lib/cluster/router.ex",
   "SuperCache.Cluster.ThreePhaseCommit" => "lib/cluster/three_phase_commit.ex",
@@ -35,13 +39,17 @@ for {mod_name, src} <- Enum.sort(targets) do
     lines = File.read!(src) |> String.split("\n")
 
     if misses != [] do
-      IO.puts("\n=== #{mod_name} (#{src}) — #{length(misses)} uncovered: #{Enum.join(misses, ",")}")
+      IO.puts(
+        "\n=== #{mod_name} (#{src}) — #{length(misses)} uncovered: #{Enum.join(misses, ",")}"
+      )
 
       Enum.each(misses, fn ln ->
         src_line = lines |> Enum.at(ln - 1) |> to_string() |> String.trim()
 
         IO.puts("   #{String.pad_leading(Integer.to_string(ln), 4)}: #{src_line}")
       end)
+    else
+      IO.puts("\n=== #{mod_name} (#{src}) — 0 uncovered")
     end
   else
     IO.puts("\n=== #{mod_name}: no html report at #{file}")

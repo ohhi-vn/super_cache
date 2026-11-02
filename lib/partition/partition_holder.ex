@@ -53,7 +53,7 @@ defmodule SuperCache.Partition.Holder do
   The ETS table will be deleted when the GenServer terminates.
   """
   @spec stop() :: :ok
-  def stop() do
+  def stop do
     GenServer.call(__MODULE__, :stop, 5_000)
   end
 
@@ -63,7 +63,7 @@ defmodule SuperCache.Partition.Holder do
   Does NOT delete the ETS table itself — only removes its contents.
   """
   @spec clean() :: true
-  def clean() do
+  def clean do
     GenServer.call(__MODULE__, :clean, 5_000)
   end
 
@@ -105,7 +105,7 @@ defmodule SuperCache.Partition.Holder do
   Uses compiled match spec for better performance.
   """
   @spec get_all() :: [atom]
-  def get_all() do
+  def get_all do
     spec = MatchSpec.match_object({:"$1", :"$2"})
 
     MatchSpec.select(__MODULE__, spec)

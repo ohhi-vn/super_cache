@@ -23,15 +23,16 @@ defmodule SuperCache.PeerCoverageTest do
 
   @moduletag timeout: 240_000
 
-  alias SuperCache.Cluster.{Manager, Replicator, ThreePhaseCommit}
   alias SuperCache.Cluster.Bootstrap
+  alias SuperCache.Cluster.HealthMonitor
+  alias SuperCache.Cluster.{Manager, Replicator, ThreePhaseCommit}
   alias SuperCache.Config
 
   @pt_partition_map {Manager, :partition_map}
   @pt_peer {__MODULE__, :peer}
   @local_name :peer_cov_main
   @peer_name :peer_cov_aux
-  @dead :"peer_cov_dead@host"
+  @dead :peer_cov_dead@host
 
   # Both sides run 8 partitions so structural config agrees everywhere.
   @num_partitions 8
@@ -86,8 +87,10 @@ defmodule SuperCache.PeerCoverageTest do
       :peer.start(%{
         name: @peer_name,
         args: [
-          ~c"-setcookie", :erlang.atom_to_list(cookie),
-          ~c"-connect_all", ~c"false"
+          ~c"-setcookie",
+          :erlang.atom_to_list(cookie),
+          ~c"-connect_all",
+          ~c"false"
         ]
       })
 
@@ -124,11 +127,9 @@ defmodule SuperCache.PeerCoverageTest do
   end
 
   defp stop_peer(peer) do
-    try do
-      :peer.stop(peer)
-    catch
-      :exit, _ -> :ok
-    end
+    :peer.stop(peer)
+  catch
+    :exit, _ -> :ok
   end
 
   defp restore_local(original_env) do
@@ -213,8 +214,10 @@ defmodule SuperCache.PeerCoverageTest do
       :peer.start(%{
         name: :peer_cov_late,
         args: [
-          ~c"-setcookie", :erlang.atom_to_list(cookie),
-          ~c"-connect_all", ~c"false"
+          ~c"-setcookie",
+          :erlang.atom_to_list(cookie),
+          ~c"-connect_all",
+          ~c"false"
         ]
       })
 
@@ -414,10 +417,11 @@ defmodule SuperCache.PeerCoverageTest do
       plant_map(%{0 => {node(), [peer_node()]}})
       SuperCache.Storage.delete_all(table(0))
 
-      assert :ok = SuperCache.Cluster.HealthMonitor.force_check()
+      assert :ok = HealthMonitor.force_check()
 
       %{checks: %{replication: rep}} =
-        SuperCache.Cluster.HealthMonitor.node_health(node())
+        HealthMonitor.node_health(node())
+
       assert rep.status in [:pass, :unknown, :degraded]
     end
   end

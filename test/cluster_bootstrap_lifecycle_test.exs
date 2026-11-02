@@ -7,11 +7,12 @@ defmodule SuperCache.ClusterBootstrapLifecycleTest do
 
   use ExUnit.Case, async: false
 
-  alias SuperCache.Cluster.{Bootstrap, Manager, ThreePhaseCommit}
+  alias SuperCache.Cluster.{Bootstrap, Manager}
 
   setup do
     if SuperCache.started?(), do: Bootstrap.stop()
     Process.sleep(30)
+
     on_exit(fn ->
       if SuperCache.started?(), do: Bootstrap.stop()
     end)
@@ -44,7 +45,7 @@ defmodule SuperCache.ClusterBootstrapLifecycleTest do
           :ok =
             Bootstrap.start!(
               @base_opts ++
-                [cluster: :distributed, nodes: [:"prewarm_dead@host"]]
+                [cluster: :distributed, nodes: [:prewarm_dead@host]]
             )
         end)
 
@@ -61,6 +62,30 @@ defmodule SuperCache.ClusterBootstrapLifecycleTest do
       refute SuperCache.started?()
     end
 
+    test "rejects invalid replication_factor and num_partition before creating tables" do
+      assert_raise ArgumentError, fn ->
+        Bootstrap.start!(
+          @base_opts
+          |> Keyword.put(:cluster, :distributed)
+          |> Keyword.put(:replication_factor, 0)
+        )
+      end
+
+      refute SuperCache.started?()
+      assert SuperCache.Partition.get_all_partition() == []
+
+      assert_raise ArgumentError, fn ->
+        Bootstrap.start!(
+          @base_opts
+          |> Keyword.put(:cluster, :distributed)
+          |> Keyword.put(:num_partition, 0)
+        )
+      end
+
+      refute SuperCache.started?()
+      assert SuperCache.Partition.get_all_partition() == []
+    end
+
     test "raises when both nodes and nodes_mfa are given" do
       assert_raise ArgumentError, fn ->
         Bootstrap.start!(
@@ -72,6 +97,8 @@ defmodule SuperCache.ClusterBootstrapLifecycleTest do
             ]
         )
       end
+
+      refute SuperCache.started?()
     end
 
     test "raises on malformed nodes_mfa / bad refresh_ms" do

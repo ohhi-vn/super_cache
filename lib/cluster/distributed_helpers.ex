@@ -15,17 +15,18 @@ defmodule SuperCache.Cluster.DistributedHelpers do
 
   ## Quorum reads
 
-  Quorum reads use `Task.async` with early termination — as soon as a majority
-  of replicas agree on a result, remaining tasks are killed. This is more
-  efficient than `Task.async_stream` which always waits for all tasks to
-  complete before computing consensus.
+  Quorum reads use `SuperCache.Cluster.Quorum.await/4` with selective
+  receive and a single deadline. As soon as a strict majority agrees on a
+  result, remaining tasks are killed. This is more efficient than
+  `Task.async_stream`, which always waits for all tasks to complete before
+  computing consensus, and it counts `nil` as a valid value.
   """
 
   require Logger
   require SuperCache.Log
 
-  alias SuperCache.{Storage, Config}
-  alias SuperCache.Cluster.{Manager, Replicator, ThreePhaseCommit}
+  alias SuperCache.Cluster.{Manager, Metrics, Quorum, Replicator, Rpc, WAL}
+  alias SuperCache.{Config, Storage}
 
   # Inline hot-path cluster-mode check so callers don't pay a call overhead.
   @compile {:inline, distributed?: 0}
@@ -71,40 +72,70 @@ defmodule SuperCache.Cluster.DistributedHelpers do
           | {:delete, term()}
           | {:delete_match, term()}
           | {:delete_all, term()}
-        ]) :: :ok | {:error, term()}
+          | {:increment, term(), term(), term()}
+        ]) :: :ok | {:error, SuperCache.Cluster.Error.t()}
   def apply_write(idx, partition, ops) do
     case Manager.replication_mode() do
       :strong ->
-        case ThreePhaseCommit.commit(idx, ops) do
+        case WAL.commit(idx, ops) do
           :ok ->
             :ok
 
           {:error, reason} ->
-            Logger.error("super_cache, distributed_helpers, 3pc failed: #{inspect(reason)}")
-            {:error, reason}
+            Logger.error("super_cache, distributed_helpers, wal failed: #{inspect(reason)}")
+            {:error, normalize_error(reason, idx, :strong)}
         end
 
-      _ ->
-        Enum.each(ops, fn
-          {:put, record} ->
-            Storage.put(record, partition)
-            Replicator.replicate(idx, :put, record)
-
-          {:delete, key} ->
-            Storage.delete(key, partition)
-            Replicator.replicate(idx, :delete, key)
-
-          {:delete_match, pattern} ->
-            Storage.delete_match(pattern, partition)
-            Replicator.replicate(idx, :delete_match, pattern)
-
-          {:delete_all, _} ->
-            Storage.delete_all(partition)
-            Replicator.replicate(idx, :delete_all, nil)
+      mode ->
+        Enum.reduce_while(ops, :ok, fn op, _acc ->
+          replicate_op_result(op, partition, idx, mode)
         end)
-
-        :ok
     end
+  end
+
+  defp replicate_op_result(op, partition, idx, mode) do
+    applied = local_apply(op, partition)
+    {op_name, op_arg} = replicate_op(op, applied)
+
+    case Replicator.replicate(idx, op_name, op_arg) do
+      :ok ->
+        {:cont, :ok}
+
+      {:error, reason} when mode == :sync ->
+        {:halt, {:error, normalize_error(reason, idx, mode)}}
+
+      _other ->
+        {:cont, :ok}
+    end
+  end
+
+  defp local_apply({:put, record}, partition), do: Storage.put(record, partition)
+  defp local_apply({:delete, key}, partition), do: Storage.delete(key, partition)
+
+  defp local_apply({:delete_match, pattern}, partition),
+    do: Storage.delete_match(pattern, partition)
+
+  defp local_apply({:delete_all, _}, partition), do: Storage.delete_all(partition)
+
+  defp local_apply({:increment, key, default, step}, partition),
+    do: Storage.update_counter(key, partition, {2, step}, {key, default})
+
+  defp replicate_op({:put, record}, _applied), do: {:put, record}
+  defp replicate_op({:delete, key}, _applied), do: {:delete, key}
+  defp replicate_op({:delete_match, pattern}, _applied), do: {:delete_match, pattern}
+  defp replicate_op({:delete_all, _}, _applied), do: {:delete_all, nil}
+
+  defp replicate_op({:increment, key, _default, _step}, new_value),
+    do: {:put, {key, new_value}}
+
+  defp normalize_error(%SuperCache.Cluster.Error{} = error, _idx, _mode), do: error
+
+  defp normalize_error(reason, idx, mode) do
+    Rpc.normalize(reason,
+      operation: :apply_write,
+      partition: idx,
+      mode: mode
+    )
   end
 
   # ── Write routing ────────────────────────────────────────────────────────────
@@ -124,7 +155,8 @@ defmodule SuperCache.Cluster.DistributedHelpers do
 
   ## Returns
 
-  The return value of the called function, or raises on `:erpc` failure.
+  The return value of the called function. Transport failures raise
+  `SuperCache.Cluster.Error` rather than leaking a raw `:erpc` exit.
   """
   @spec route_write(module(), atom(), [term()], non_neg_integer()) :: term()
   def route_write(caller, fun, args, partition_idx) do
@@ -137,7 +169,12 @@ defmodule SuperCache.Cluster.DistributedHelpers do
         "super_cache, fwd #{fun} → #{inspect(primary)}"
       end)
 
-      :erpc.call(primary, caller, fun, args, 5_000)
+      Rpc.call!(primary, caller, fun, args,
+        operation: {caller, fun},
+        partition: partition_idx,
+        node: primary,
+        mode: Manager.replication_mode()
+      )
     end
   end
 
@@ -180,6 +217,21 @@ defmodule SuperCache.Cluster.DistributedHelpers do
   # ── Partition check ──────────────────────────────────────────────────────────
 
   @doc """
+  Run a read function, converting a distributed read failure into
+  `{:error, exception}` instead of raising.
+
+  Non-bang read APIs use this wrapper so a failed `:primary` or `:quorum`
+  read with no usable local copy returns the documented error tuple. Local
+  errors that are not distributed failures still propagate unchanged.
+  """
+  @spec read_or_error((-> term())) :: term() | {:error, SuperCache.Cluster.Error.t()}
+  def read_or_error(fun) when is_function(fun, 0) do
+    fun.()
+  rescue
+    error in SuperCache.Cluster.Error -> {:error, error}
+  end
+
+  @doc """
   Returns `true` if the current node holds a replica (primary or secondary)
   for the given partition index.
   """
@@ -207,19 +259,34 @@ defmodule SuperCache.Cluster.DistributedHelpers do
     if primary == node() do
       apply(caller, fun, args)
     else
-      try do
-        :erpc.call(primary, caller, fun, args, 5_000)
-      catch
-        kind, reason ->
-          Logger.warning(
-            "super_cache, distributed_helpers, primary read failed " <>
-              "(partition=#{partition_idx}, primary=#{inspect(primary)}): " <>
-              inspect({kind, reason}) <>
-              " — falling back to the local replica (stale reads possible)"
-          )
+      case Rpc.call(primary, caller, fun, args,
+             operation: {caller, fun},
+             partition: partition_idx,
+             node: primary,
+             mode: :primary
+           ) do
+        {:ok, value} ->
+          value
 
-          apply(caller, fun, args)
+        {:error, error} ->
+          primary_read_failed(error, caller, fun, args, partition_idx, primary)
       end
+    end
+  end
+
+  defp primary_read_failed(error, caller, fun, args, partition_idx, primary) do
+    Logger.warning(
+      "super_cache, distributed_helpers, primary read failed " <>
+        "(partition=#{partition_idx}, primary=#{inspect(primary)}): " <>
+        inspect(error)
+    )
+
+    if has_partition?(partition_idx) do
+      Metrics.increment(:read, :fallbacks)
+      apply(caller, fun, args)
+    else
+      Metrics.increment(:read, :errors)
+      raise error
     end
   end
 
@@ -228,9 +295,9 @@ defmodule SuperCache.Cluster.DistributedHelpers do
   @doc """
   Reads from all replicas and returns the result that achieves quorum (majority).
 
-  Uses `Task.async` with early termination: as soon as a majority of replicas
-  agree on a result, remaining tasks are killed immediately. This avoids waiting
-  for slow replicas once quorum is satisfied.
+  Uses `Quorum.await/4` with early termination: as soon as a strict majority
+  of nodes agree on a result, remaining tasks are killed immediately.  `nil`
+  is a valid value and can win a quorum.
 
   If no result reaches quorum, falls back to the primary node's result.
   """
@@ -241,63 +308,46 @@ defmodule SuperCache.Cluster.DistributedHelpers do
     total = length(nodes)
     required = div(total, 2) + 1
 
-    tasks =
+    entries =
       Enum.map(nodes, fn n ->
-        Task.async(fn ->
-          if n == node(),
-            do: apply(caller, fun, args),
-            else: :erpc.call(n, caller, fun, args, 5_000)
-        end)
+        {n,
+         fn ->
+           if n == node() do
+             apply(caller, fun, args)
+           else
+             :erpc.call(n, caller, fun, args, 5_000)
+           end
+         end}
       end)
 
-    await_quorum(tasks, required, %{}, caller, fun, args, primary)
-  end
+    case Quorum.await(entries, required, 5_500, pool: Quorum.Pool) do
+      {:ok, value, _voters} ->
+        value
 
-  # ── Private — quorum await ───────────────────────────────────────────────────
+      {:error, reason, results} ->
+        Metrics.increment(:read, :fallbacks)
 
-  # No tasks left — return the most frequent result, or fall back to primary.
-  defp await_quorum([], _required, counts, caller, fun, args, primary) do
-    case map_max(counts) do
-      {result, _count} ->
-        result
-
-      nil ->
-        if primary == node(),
-          do: apply(caller, fun, args),
-          else: :erpc.call(primary, caller, fun, args, 5_000)
+        case Map.fetch(results, primary) do
+          {:ok, {:ok, value}} -> value
+          _ -> quorum_read_fallback(caller, fun, args, partition_idx, primary, reason)
+        end
     end
   end
 
-  defp await_quorum([task | rest], required, counts, caller, fun, args, primary) do
-    result =
-      case Task.yield(task, 5_000) || Task.shutdown(task, :brutal_kill) do
-        {:ok, val} -> val
-        _ -> nil
-      end
-
-    new_counts =
-      if result != nil do
-        Map.update(counts, result, 1, &(&1 + 1))
-      else
-        counts
-      end
-
-    # Check if any result has reached quorum — early termination.
-    if quorum_reached?(new_counts, required) do
-      Enum.each(rest, &Task.shutdown(&1, :brutal_kill))
-      {winner, _} = Enum.max_by(new_counts, fn {_, c} -> c end)
-      winner
+  defp quorum_read_fallback(caller, fun, args, partition_idx, primary, reason) do
+    if has_partition?(partition_idx) do
+      apply(caller, fun, args)
     else
-      await_quorum(rest, required, new_counts, caller, fun, args, primary)
+      Metrics.increment(:read, :errors)
+
+      raise Rpc.normalize(reason,
+              operation: fun,
+              partition: partition_idx,
+              node: primary,
+              mode: :quorum
+            )
     end
-  end
-
-  # Returns {result, count} for the most frequent result, or nil if map is empty.
-  defp map_max(counts) when map_size(counts) == 0, do: nil
-  defp map_max(counts), do: Enum.max_by(counts, fn {_, c} -> c end)
-
-  # True if any result has reached the required quorum count.
-  defp quorum_reached?(counts, required) do
-    Enum.any?(counts, fn {_, count} -> count >= required end)
   end
 end
+
+## ── Private ──────────────────────────────────────────────────────────────────

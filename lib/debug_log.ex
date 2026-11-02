@@ -45,8 +45,6 @@ defmodule SuperCache.Log do
       SuperCache.Log.info("operation completed")
   """
 
-  require Logger
-
   @compile {:inline, enabled?: 0}
 
   # Compile-time flag — when false, all debug macros expand to :ok.
@@ -80,7 +78,7 @@ defmodule SuperCache.Log do
   """
   @spec enabled?() :: boolean
   @compile {:inline, enabled?: 0}
-  def enabled?() do
+  def enabled? do
     case :persistent_term.get(@pt_enabled, :__not_set__) do
       :__not_set__ -> @enable_debug_log
       val -> val

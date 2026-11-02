@@ -1,6 +1,7 @@
 defmodule SuperCache.DistributedTest do
   use ExUnit.Case, async: false
 
+  alias SuperCache.Cluster.Bootstrap
   alias SuperCache.Distributed, as: Cache
 
   # ── Setup ────────────────────────────────────────────────────────────────────
@@ -11,7 +12,7 @@ defmodule SuperCache.DistributedTest do
 
     # key_pos: 1  → elem(tuple, 1) is the unique key  e.g. the numeric id
     # partition_pos: 0 → elem(tuple, 0) determines the partition  e.g. :user / :session
-    SuperCache.Cluster.Bootstrap.start!(
+    Bootstrap.start!(
       key_pos: 1,
       partition_pos: 0,
       cluster: :distributed,
@@ -176,7 +177,7 @@ defmodule SuperCache.DistributedTest do
       SuperCache.stop()
       Process.sleep(50)
 
-      SuperCache.Cluster.Bootstrap.start!(
+      Bootstrap.start!(
         key_pos: 0,
         partition_pos: 0,
         cluster: :distributed,
@@ -193,7 +194,7 @@ defmodule SuperCache.DistributedTest do
       SuperCache.stop()
       Process.sleep(50)
 
-      SuperCache.Cluster.Bootstrap.start!(
+      Bootstrap.start!(
         key_pos: 1,
         partition_pos: 0,
         cluster: :distributed,
@@ -560,7 +561,7 @@ defmodule SuperCache.DistributedTest do
       SuperCache.stop()
       Process.sleep(50)
 
-      SuperCache.Cluster.Bootstrap.start!(
+      Bootstrap.start!(
         key_pos: 1,
         partition_pos: 0,
         cluster: :distributed,
@@ -579,7 +580,7 @@ defmodule SuperCache.DistributedTest do
       SuperCache.stop()
       Process.sleep(50)
 
-      SuperCache.Cluster.Bootstrap.start!(
+      Bootstrap.start!(
         key_pos: 1,
         partition_pos: 0,
         cluster: :distributed,
@@ -593,7 +594,7 @@ defmodule SuperCache.DistributedTest do
       SuperCache.stop()
       Process.sleep(50)
 
-      SuperCache.Cluster.Bootstrap.start!(
+      Bootstrap.start!(
         key_pos: 1,
         partition_pos: 0,
         cluster: :distributed,
@@ -609,7 +610,7 @@ defmodule SuperCache.DistributedTest do
       SuperCache.stop()
       Process.sleep(50)
 
-      SuperCache.Cluster.Bootstrap.start!(
+      Bootstrap.start!(
         key_pos: 1,
         partition_pos: 0,
         cluster: :distributed,

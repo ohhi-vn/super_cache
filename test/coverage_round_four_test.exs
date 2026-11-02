@@ -18,14 +18,16 @@ defmodule SuperCache.CoverageRoundFourTest do
 
   import ExUnit.CaptureIO
 
+  alias SuperCache.{Bootstrap, Buffer, Config, EtsHolder}
   alias SuperCache.Cluster.{DistributedHelpers, Manager, Replicator, Router, Stats, WAL}
   alias SuperCache.Cluster.HealthMonitor
-  alias SuperCache.{Bootstrap, Buffer, Config, EtsHolder}
+  alias SuperCache.Cluster.NodeMonitor
+  alias SuperCache.Cluster.ThreePhaseCommit
   alias SuperCache.{KeyValue, Partition, Queue, Stack, Storage, Struct, Sup}
 
   @pt_partition_map {Manager, :partition_map}
-  @dead :"round_four_dead@host"
-  @dead2 :"round_four_dead2@host"
+  @dead :round_four_dead@host
+  @dead2 :round_four_dead2@host
 
   # ── Setup helpers ─────────────────────────────────────────────────────────────
 
@@ -132,7 +134,7 @@ defmodule SuperCache.CoverageRoundFourTest do
       assert [_] = Router.route_get_by_match_object!(:r_default, {:r_default, :_})
     end
 
-    test "delete operations forward to an unreachable primary without crashing" do
+    test "delete operations on an unreachable primary report the documented error" do
       restart_cache()
 
       foreign_map = %{
@@ -144,21 +146,40 @@ defmodule SuperCache.CoverageRoundFourTest do
       plant_map(foreign_map)
       order = Partition.get_partition_order(:fwd_del)
 
-      assert :ok = Router.route_delete_all_partition(order)
-      assert :ok = Router.route_delete_match_partition!(order, {:fwd_del, :_})
-      assert :ok = Router.route_delete_match!(:fwd_del, {:fwd_del, :_})
+      assert_raise SuperCache.Cluster.Error, fn ->
+        Router.route_delete_all_partition(order)
+      end
+
+      assert_raise SuperCache.Cluster.Error, fn ->
+        Router.route_delete_match_partition!(order, {:fwd_del, :_})
+      end
+
+      assert_raise SuperCache.Cluster.Error, fn ->
+        Router.route_delete_match!(:fwd_del, {:fwd_del, :_})
+      end
 
       data = {:fwd_del, :x}
-      assert :ok = Router.route_delete!(data)
-      assert :ok = Router.route_delete_by_key_partition!(:fwd_del, :fwd_del)
+
+      assert_raise SuperCache.Cluster.Error, fn ->
+        Router.route_delete!(data)
+      end
+
+      assert_raise SuperCache.Cluster.Error, fn ->
+        Router.route_delete_by_key_partition!(:fwd_del, :fwd_del)
+      end
     end
 
-    test "primary read falls back to an empty list when the primary cannot be reached" do
+    test "primary read reports the documented error when there is no local replica" do
       restart_cache()
       plant_map(%{0 => {@dead, []}, 1 => {@dead, []}})
 
-      assert [] == Router.route_get_by_key_partition!(:nope, :nope, read_mode: :primary)
-      assert [] == Router.route_get_by_match!(:nope, {:nope, :_}, read_mode: :primary)
+      assert_raise SuperCache.Cluster.Error, fn ->
+        Router.route_get_by_key_partition!(:nope, :nope, read_mode: :primary)
+      end
+
+      assert_raise SuperCache.Cluster.Error, fn ->
+        Router.route_get_by_match!(:nope, {:nope, :_}, read_mode: :primary)
+      end
     end
 
     test "quorum read falls back to the best available result with dead replicas" do
@@ -211,7 +232,7 @@ defmodule SuperCache.CoverageRoundFourTest do
       plant_replication_mode(:strong)
       plant_map(%{0 => {node(), [@dead]}, 1 => {node(), []}})
 
-      assert {:error, {:prepare_timeout, _}} =
+      assert {:error, %SuperCache.Cluster.Error{reason: :majority_timeout}} =
                DistributedHelpers.apply_write(0, table(0), [{:put, {:x, 1}}])
     end
 
@@ -221,14 +242,8 @@ defmodule SuperCache.CoverageRoundFourTest do
       plant_map(%{order => {@dead, []}})
 
       trapping(fn ->
-        try do
+        assert_raise SuperCache.Cluster.Error, fn ->
           DistributedHelpers.route_write(Kernel, :node, [], order)
-          flunk("expected erpc failure")
-        rescue
-          ErlangError -> :ok
-        catch
-          :exit, {:erpc, _} -> :ok
-          :exit, _ -> :ok
         end
       end)
     end
@@ -240,14 +255,17 @@ defmodule SuperCache.CoverageRoundFourTest do
       ns_order = Partition.get_partition_order("esc_kv")
       plant_map(%{ns_order => {@dead, []}})
 
-      assert 42 ==
-               DistributedHelpers.route_read(
-                 KeyValue,
-                 :local_get,
-                 ["esc_kv", :rh_key, nil],
-                 ns_order,
-                 read_mode: :primary
-               )
+      # The partition is foreign and no local replica exists, so the primary
+      # escalation fails with the documented distributed error.
+      assert_raise SuperCache.Cluster.Error, fn ->
+        DistributedHelpers.route_read(
+          KeyValue,
+          :local_get,
+          ["esc_kv", :rh_key, nil],
+          ns_order,
+          read_mode: :primary
+        )
+      end
     end
 
     test "quorum read falls back to the most frequent result when no quorum forms" do
@@ -275,7 +293,7 @@ defmodule SuperCache.CoverageRoundFourTest do
       plant_map(%{ns_order => {@dead, []}})
 
       trapping(fn ->
-        try do
+        assert_raise SuperCache.Cluster.Error, fn ->
           DistributedHelpers.route_read(
             KeyValue,
             :local_get,
@@ -283,13 +301,6 @@ defmodule SuperCache.CoverageRoundFourTest do
             ns_order,
             read_mode: :quorum
           )
-
-          flunk("expected erpc failure")
-        rescue
-          ErlangError -> :ok
-        catch
-          :exit, {:erpc, _} -> :ok
-          :exit, _ -> :ok
         end
       end)
     end
@@ -346,7 +357,7 @@ defmodule SuperCache.CoverageRoundFourTest do
       partition = table(0)
       Storage.put([{:pp1, 1}, {:pp2, 2}], partition)
 
-      assert {:error, {:push_failed, 1, 1}} = Replicator.push_partition(0, @dead)
+      assert {:error, {:push_failed, 2, 2}} = Replicator.push_partition(0, @dead)
     end
 
     test "replicate_batch reports incomplete replication when a replica is dead" do
@@ -382,14 +393,14 @@ defmodule SuperCache.CoverageRoundFourTest do
       restart_cache()
 
       assert {:error, :invalid_partition} =
-               SuperCache.Cluster.ThreePhaseCommit.commit(999, [{:put, {:a, 1}}])
+               ThreePhaseCommit.commit(999, [{:put, {:a, 1}}])
     end
 
     test "handle_commit with an unknown partition fails gracefully" do
       restart_cache()
 
       assert {:error, :invalid_partition} =
-               SuperCache.Cluster.ThreePhaseCommit.handle_commit("txn-local-1", 999, [
+               ThreePhaseCommit.handle_commit("txn-local-1", 999, [
                  {:put, {:a, 1}}
                ])
     end
@@ -402,7 +413,7 @@ defmodule SuperCache.CoverageRoundFourTest do
       reg.mark_pre_committed("rec-pre")
       reg.register("rec-abort", 0, [], [])
 
-      assert :ok = SuperCache.Cluster.ThreePhaseCommit.recover()
+      assert :ok = ThreePhaseCommit.recover()
 
       assert [{:rec_pre, 1}] == Storage.get(:rec_pre, table(0))
       assert nil == reg.get("rec-pre")
@@ -761,7 +772,6 @@ defmodule SuperCache.CoverageRoundFourTest do
       end
     end
   end
-
 
   describe "Queue distributed primitives" do
     test "enqueue/dequeue/drain/count work through the dist entry points" do
@@ -1135,9 +1145,12 @@ defmodule SuperCache.CoverageRoundFourTest do
       result =
         Enum.reduce_while(1..10, {:error, :gave_up}, fn _i, acc ->
           case Buffer.enqueue({:drop_probe, 1}) do
-            {:error, :process_down} -> {:halt, {:error, :process_down}}
-            _ -> Process.sleep(5)
-            {:cont, acc}
+            {:error, :process_down} ->
+              {:halt, {:error, :process_down}}
+
+            _ ->
+              Process.sleep(5)
+              {:cont, acc}
           end
         end)
 
@@ -1231,7 +1244,7 @@ defmodule SuperCache.CoverageRoundFourTest do
                )
 
       Process.sleep(20)
-      assert :"RoundFourPrefix_0" == Partition.get_partition_by_idx(0)
+      assert :RoundFourPrefix_0 == Partition.get_partition_by_idx(0)
     end
 
     test "distributed delegation forwards to Cluster.Bootstrap" do
@@ -1246,7 +1259,6 @@ defmodule SuperCache.CoverageRoundFourTest do
       Process.sleep(20)
       assert SuperCache.started?()
     end
-
 
     test "Cluster.Bootstrap validates options eagerly" do
       alias SuperCache.Cluster.Bootstrap, as: CB
@@ -1398,22 +1410,22 @@ defmodule SuperCache.CoverageRoundFourTest do
 
   describe "NodeMonitor sources" do
     test "a raising nodes_mfa is contained" do
-      :ok = SuperCache.Cluster.NodeMonitor.reconfigure(nodes_mfa: {NoSuchMod, :list_nodes, []})
+      :ok = NodeMonitor.reconfigure(nodes_mfa: {NoSuchMod, :list_nodes, []})
       Process.sleep(30)
 
-      :ok = SuperCache.Cluster.NodeMonitor.reconfigure(nodes_mfa: {Kernel, :exit, [:boom]})
+      :ok = NodeMonitor.reconfigure(nodes_mfa: {Kernel, :exit, [:boom]})
       Process.sleep(30)
 
       # Restore legacy behaviour.
-      :ok = SuperCache.Cluster.NodeMonitor.reconfigure([])
+      :ok = NodeMonitor.reconfigure([])
       Process.sleep(30)
     end
 
     test "static node sources attempt connections to unreachable peers" do
-      :ok = SuperCache.Cluster.NodeMonitor.reconfigure(nodes: [@dead, @dead2])
+      :ok = NodeMonitor.reconfigure(nodes: [@dead, @dead2])
       Process.sleep(50)
 
-      :ok = SuperCache.Cluster.NodeMonitor.reconfigure([])
+      :ok = NodeMonitor.reconfigure([])
       Process.sleep(30)
     end
 

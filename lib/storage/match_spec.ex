@@ -11,35 +11,15 @@ defmodule SuperCache.Storage.MatchSpec do
   - `:ets.match/2` and `:ets.match_object/2` parse the pattern every time
   - `:ets.select/2` with a compiled match spec skips parsing
   - For repeated queries, compiled specs reduce CPU overhead
-
-  ## Example
-
-      # Instead of:
-      :ets.match(table, {:"$1", :"$2"})
-
-      # Use:
-      spec = MatchSpec.match([{:"$1", :"$2"}], [:"$1", :"$2"])
-      :ets.select(table, spec)
   """
 
-  @type match_spec :: [{tuple, [tuple], [tuple]}]
+  @type match_spec :: [{term(), [term()], [term()]}]
 
   @doc """
   Create a match spec for `:ets.match/2` style queries.
 
   Returns a match spec that, when used with `:ets.select/2`, returns
   a list of binding lists (like `:ets.match/2`).
-
-  ## Parameters
-
-    - `pattern`: The match pattern with `:"$1"`, `:"$2"`, etc.
-    - `bindings`: List of bindings to return (e.g., `[:"$1", :"$2"]`)
-
-  ## Example
-
-      # Match all records and return the first two fields
-      spec = MatchSpec.match({:"$1", :"$2", :_}, [:"$1", :"$2"])
-      :ets.select(table, spec)
   """
   @spec match(tuple | atom, [term]) :: match_spec
   def match(pattern, bindings) when is_list(bindings) do
@@ -49,19 +29,6 @@ defmodule SuperCache.Storage.MatchSpec do
 
   @doc """
   Create a match spec for `:ets.match_object/2` style queries.
-
-  Returns a match spec that, when used with `:ets.select/2`, returns
-  full matching tuples (like `:ets.match_object/2`).
-
-  ## Parameters
-
-    - `pattern`: The match pattern with `:"$1"`, `:"$2"`, etc.
-
-  ## Example
-
-      # Match all records with :admin as third element
-      spec = MatchSpec.match_object({:"$1", :"$2", :admin})
-      :ets.select(table, spec)
   """
   @spec match_object(tuple | atom) :: match_spec
   def match_object(pattern) do
@@ -70,37 +37,12 @@ defmodule SuperCache.Storage.MatchSpec do
 
   @doc """
   Create a match spec for deletion.
-
-  Returns a match spec that, when used with `:ets.select_delete/2`,
-  deletes matching records.
-
-  ## Parameters
-
-    - `pattern`: The match pattern with `:"$1"`, `:"$2"`, etc.
-
-  ## Example
-
-      # Delete all records with :expired status
-      spec = MatchSpec.delete_match({:"$1", :"$2", :expired})
-      :ets.select_delete(table, spec)
   """
   @spec delete_match(tuple | atom) :: match_spec
   def delete_match(pattern) do
     [{pattern, [], [true]}]
   end
 
-  @doc """
-  Compile a match spec via `:ets.match_spec_compile/1`.
-
-  **Deprecated / broken on OTP 28+**: as of stdlib 8.x, `:ets.select/2`
-  rejects compiled match-spec references ("not a valid match specification"),
-  so the returned value cannot be used on those releases. On older OTP
-  releases the compiled reference worked and could be more efficient when
-  the same query ran repeatedly.
-
-  Prefer passing the uncompiled spec from `match/2` or `match_object/1`
-  directly to `select/2` — this is what all SuperCache internals do.
-  """
   @deprecated "Broken on OTP 28+ (:ets.select/2 rejects compiled refs); pass the plain spec to select/2 instead"
   @spec compile(match_spec) :: :ets.comp_match_spec() | match_spec
   def compile(spec) when is_list(spec) do
@@ -109,8 +51,6 @@ defmodule SuperCache.Storage.MatchSpec do
 
   @doc """
   Run a match spec against a table.
-
-  Accepts either a compiled match spec or a regular match spec list.
   """
   @spec select(atom | :ets.tid(), :ets.comp_match_spec() | match_spec) :: [term]
   def select(table, spec) do
@@ -119,8 +59,6 @@ defmodule SuperCache.Storage.MatchSpec do
 
   @doc """
   Run a match spec for deletion.
-
-  Accepts either a compiled match spec or a regular match spec list.
   """
   @spec select_delete(atom | :ets.tid(), :ets.comp_match_spec() | match_spec) :: non_neg_integer
   def select_delete(table, spec) do
@@ -129,39 +67,80 @@ defmodule SuperCache.Storage.MatchSpec do
 
   @doc """
   Create a match spec to get all records.
-
-  **Note:** `:"$_"` is only valid in the *body* of a match spec, not in the
-  pattern.  A generic "match all" select spec that works for any tuple arity
-  does not exist — the pattern must match the stored tuple structure exactly.
-
-  Prefer `:ets.tab2list/1` when you need all records from a table, or use
-  `match_object/1` with an explicit pattern like `{:"$1", :"$2"}`.
   """
   @spec all_records() :: match_spec
-  def all_records() do
+  def all_records do
     [{:"$1", [], [:"$1"]}]
   end
 
   @doc """
   Create a match spec with a guard condition.
-
-  ## Parameters
-
-    - `pattern`: The match pattern
-    - `guards`: List of guard conditions (tuples)
-    - `body`: List of expressions to return
-
-  ## Example
-
-      # Match records where the second element is > 100
-      spec = MatchSpec.with_guard(
-        {:"$1", :"$2"},
-        [{:>, :"$2", 100}],
-        [:"$_"]
-      )
   """
   @spec with_guard(tuple | atom, [tuple], [term]) :: match_spec
   def with_guard(pattern, guards, body) when is_list(guards) and is_list(body) do
     [{pattern, guards, body}]
+  end
+
+  @doc """
+  Recursively extract capture variables (`:"$1"`, `:"$2"`, ...) from a match
+  pattern, deduplicate them, and sort them numerically by variable index.
+
+  Supports capture variables at any nesting depth inside tuples and lists, so
+  patterns like `{{:kv, :"$1"}, :"$2"}` or `{:rec, :"$2", :"$1"}` work
+  correctly. The returned list is sorted by variable number so the output
+  binding list is always `[b1, b2, ...]` in numerical order.
+  """
+  @spec extract_bindings(term()) :: [atom()]
+  def extract_bindings(pattern) do
+    pattern
+    |> collect_captures([])
+    |> Enum.uniq()
+    |> Enum.sort_by(&capture_index/1)
+  end
+
+  defp collect_captures(atom, acc) when is_atom(atom) do
+    if capture_atom?(atom) do
+      [atom | acc]
+    else
+      acc
+    end
+  end
+
+  defp collect_captures(tuple, acc) when is_tuple(tuple) do
+    tuple
+    |> Tuple.to_list()
+    |> Enum.reduce(acc, fn elem, acc -> collect_captures(elem, acc) end)
+  end
+
+  defp collect_captures(list, acc) when is_list(list) do
+    Enum.reduce(list, acc, fn elem, acc -> collect_captures(elem, acc) end)
+  end
+
+  defp collect_captures(_other, acc), do: acc
+
+  defp capture_atom?(atom) when is_atom(atom) do
+    case Atom.to_string(atom) do
+      "$" <> rest ->
+        case Integer.parse(rest) do
+          {n, ""} when n >= 1 -> true
+          _ -> false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  defp capture_index(atom) when is_atom(atom) do
+    case Atom.to_string(atom) do
+      "$" <> rest ->
+        case Integer.parse(rest) do
+          {n, ""} -> n
+          _ -> 0
+        end
+
+      _ ->
+        0
+    end
   end
 end

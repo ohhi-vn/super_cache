@@ -12,6 +12,7 @@ defmodule SuperCache.Cluster.NodeMonitorTest do
   """
 
   use SuperCache.ClusterCase
+  alias SuperCache.Cluster.Bootstrap
 
   # ── Setup ─────────────────────────────────────────────────────────────────────
 
@@ -47,8 +48,8 @@ defmodule SuperCache.Cluster.NodeMonitorTest do
       # filter it because it is not in the :nodes list.
       on_exit(fn ->
         try do
-          SuperCache.Cluster.Bootstrap.stop()
-          SuperCache.Cluster.Bootstrap.start!(@cache_opts)
+          Bootstrap.stop()
+          Bootstrap.start!(@cache_opts)
           restart_node_monitor(nodes: [node1, node2])
           wait_cluster_stable(3)
         catch
@@ -56,8 +57,8 @@ defmodule SuperCache.Cluster.NodeMonitorTest do
         end
       end)
 
-      SuperCache.Cluster.Bootstrap.stop()
-      SuperCache.Cluster.Bootstrap.start!(@cache_opts ++ [nodes: [node1, node2]])
+      Bootstrap.stop()
+      Bootstrap.start!(@cache_opts ++ [nodes: [node1, node2]])
 
       assert wait_until(
                fn -> node1 in Manager.live_nodes() and node2 in Manager.live_nodes() end,
@@ -194,7 +195,7 @@ defmodule SuperCache.Cluster.NodeMonitorTest do
     end
 
     defp set_disco(nodes), do: Agent.update(:monitor_test_disco, fn _ -> nodes end)
-    defp get_disco,        do: Agent.get(:monitor_test_disco, & &1)
+    defp get_disco, do: Agent.get(:monitor_test_disco, & &1)
 
     test "init resolves nodes from MFA", %{node1: node1, node2: node2} do
       set_disco([node1, node2])
@@ -300,8 +301,8 @@ defmodule SuperCache.Cluster.NodeMonitorTest do
 
       refute Enum.any?(msgs, fn
                {:refresh, _} -> true
-               :refresh      -> true
-               _             -> false
+               :refresh -> true
+               _ -> false
              end),
              "Static :nodes source must not schedule :refresh ticks"
     end

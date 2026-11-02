@@ -32,3 +32,5 @@ AGENTS.md
 .elixir_ls
 mise.toml
 .dexter.db*
+._*
+.opencode

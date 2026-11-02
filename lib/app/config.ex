@@ -15,6 +15,9 @@ defmodule SuperCache.Config do
   - `:num_partition` — number of ETS partitions
   - `:table_type` — ETS table type (`:set`, `:bag`, etc.)
   - `:table_prefix` — prefix for ETS table atom names
+  - `:replication_mode` — `:async`, `:sync`, or `:strong`
+  - `:replication_factor` — total copies (primary + replicas)
+  - `:started` — liveness flag set by bootstrap
 
   All other keys fall back to a `GenServer.call/3` with a 5-second timeout.
 
@@ -47,7 +50,12 @@ defmodule SuperCache.Config do
     partition_pos: true,
     num_partition: true,
     table_type: true,
-    table_prefix: true
+    table_prefix: true,
+    # Read on every distributed write/read path and by health checks.
+    replication_mode: true,
+    replication_factor: true,
+    # Polled by buffer streams and `SuperCache.started?/0`.
+    started: true
   }
 
   ## API ##
@@ -192,7 +200,7 @@ defmodule SuperCache.Config do
   for hot keys.
   """
   @spec clear_config() :: :ok
-  def clear_config() do
+  def clear_config do
     GenServer.call(__MODULE__, :clear, 5_000)
   end
 

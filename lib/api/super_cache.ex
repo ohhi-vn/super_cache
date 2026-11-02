@@ -74,19 +74,24 @@ defmodule SuperCache do
 
   `!`-suffix functions raise on error.  Non-bang variants return
   `{:error, exception}` instead and never raise.
+
+  Distributed transport failures are normalized to
+  `SuperCache.Cluster.Error`, which carries the operation, partition, node,
+  mode, and reason.  Non-bang functions also catch exits and throws so an
+  unreachable node cannot leak an exit signal into the caller.
   """
 
   require Logger
   require SuperCache.Log
 
-  alias SuperCache.{Config, Partition, Storage, Buffer}
-  alias SuperCache.Cluster.Router
+  alias SuperCache.{Buffer, Config, Partition, Storage}
+  alias SuperCache.Cluster.{Manager, Router, Rpc, Stats}
 
   ## ── Lifecycle ────────────────────────────────────────────────────────────────
 
   @doc "Start SuperCache with default options (local, key_pos: 0, partition_pos: 0)."
   @spec start!() :: :ok
-  def start!(), do: SuperCache.Bootstrap.start!()
+  def start!, do: SuperCache.Bootstrap.start!()
 
   @doc "Start SuperCache with the given keyword options. Raises on invalid config."
   @spec start!(keyword) :: :ok
@@ -94,7 +99,7 @@ defmodule SuperCache do
 
   @doc "Start SuperCache. Returns `:ok | {:error, exception}` instead of raising."
   @spec start() :: :ok | {:error, Exception.t()}
-  def start(), do: safe(fn -> SuperCache.Bootstrap.start!() end)
+  def start, do: safe(fn -> SuperCache.Bootstrap.start!() end)
 
   @doc "Start SuperCache with opts. Returns `:ok | {:error, exception}` instead of raising."
   @spec start(keyword) :: :ok | {:error, Exception.t()}
@@ -102,17 +107,22 @@ defmodule SuperCache do
 
   @doc "Returns `true` when SuperCache is running and ready."
   @spec started?() :: boolean
-  def started?() do
-    # Never exits — safe to call before start!/0 or while the application
-    # supervision tree is down.
-    Config.get_config(:started, false)
+  def started? do
+    # Fast path: if the Config process is not alive, the cache is not running.
+    # This also covers an application stop, where persistent_term may still
+    # hold a stale `:started` value.
+    if Process.whereis(Config) == nil do
+      false
+    else
+      Config.get_config(:started, false)
+    end
   catch
     :exit, _ -> false
   end
 
   @doc "Stop SuperCache and free all ETS memory."
   @spec stop() :: :ok
-  def stop(), do: SuperCache.Bootstrap.stop()
+  def stop, do: SuperCache.Bootstrap.stop()
 
   ## ── Write ────────────────────────────────────────────────────────────────────
 
@@ -148,7 +158,7 @@ defmodule SuperCache do
   """
   @spec lazy_put(tuple) :: :ok | {:error, :not_started} | {:error, :process_down}
   def lazy_put(data) when is_tuple(data) do
-    if Config.distributed?() and SuperCache.Cluster.Manager.replication_mode() == :strong do
+    if Config.distributed?() and Manager.replication_mode() == :strong do
       Logger.warning(
         "super_cache, lazy_put called in :strong replication mode — falling back to put!"
       )
@@ -380,7 +390,7 @@ defmodule SuperCache do
   In distributed mode, issues one routed delete per partition to its primary.
   """
   @spec delete_all() :: :ok
-  def delete_all() do
+  def delete_all do
     if Config.distributed?() do
       Router.route_delete_all()
     else
@@ -557,7 +567,7 @@ defmodule SuperCache do
   from the total rather than crashing with an arithmetic error.
   """
   @spec stats() :: keyword
-  def stats() do
+  def stats do
     entries = Partition.get_all_partition() |> List.flatten() |> Enum.map(&Storage.stats/1)
 
     total =
@@ -576,9 +586,9 @@ defmodule SuperCache do
   In distributed mode gathers per-node counts via `:erpc`.
   """
   @spec cluster_stats() :: map
-  def cluster_stats() do
+  def cluster_stats do
     if Config.distributed?() do
-      SuperCache.Cluster.Stats.cluster() |> Map.merge(gather_node_stats())
+      Stats.cluster() |> Map.merge(gather_node_stats())
     else
       base = stats()
       total = Keyword.get(base, :total, 0)
@@ -613,8 +623,8 @@ defmodule SuperCache do
     partition_data |> resolve_partitions() |> Enum.reduce(acc, fun)
   end
 
-  defp gather_node_stats() do
-    live = SuperCache.Cluster.Manager.live_nodes()
+  defp gather_node_stats do
+    live = Manager.live_nodes()
 
     {node_stats, unreachable} =
       live
@@ -647,5 +657,21 @@ defmodule SuperCache do
       # Lazily formatted — no string is built when :error level is filtered out.
       Logger.error(fn -> Exception.format(:error, err, __STACKTRACE__) end)
       {:error, err}
+  catch
+    :exit, reason ->
+      Logger.error(fn -> Exception.format(:exit, reason, __STACKTRACE__) end)
+      {:error, normalize_caught(:exit, reason)}
+
+    :throw, reason ->
+      Logger.error(fn -> Exception.format(:throw, reason, __STACKTRACE__) end)
+      {:error, normalize_caught(:throw, reason)}
+  end
+
+  # A raised or exited SuperCache.Cluster.Error keeps its original context.
+  defp normalize_caught(_kind, {%SuperCache.Cluster.Error{} = error, _stack}), do: error
+  defp normalize_caught(_kind, %SuperCache.Cluster.Error{} = error), do: error
+
+  defp normalize_caught(kind, reason) do
+    Rpc.normalize({kind, reason}, operation: :api_call)
   end
 end

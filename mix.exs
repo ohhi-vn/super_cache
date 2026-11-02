@@ -4,7 +4,7 @@ defmodule SuperCache.MixProject do
   def project do
     [
       app: :super_cache,
-      version: "1.5.0",
+      version: "1.6.0",
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -19,6 +19,7 @@ defmodule SuperCache.MixProject do
       description: description(),
       package: package(),
       aliases: aliases(),
+      dialyzer: dialyzer(),
       test_coverage: [
         ignore_modules: [
           # Dev-only mix task and test-support module — not library code.
@@ -74,7 +75,6 @@ defmodule SuperCache.MixProject do
         "CHANGELOG.md",
         "LICENSE",
         ".formatter.exs",
-        "AGENTS.md",
         "skills"
       ],
       maintainers: ["Manh Van Vu"],
@@ -120,6 +120,15 @@ defmodule SuperCache.MixProject do
     end)
   end
 
+  defp dialyzer() do
+    [
+      # Logger and Mix.Task are runtime applications but not part of the
+      # default core PLT, so without these Dialyzer reports their functions as
+      # unknown.
+      plt_add_apps: [:logger, :mix]
+    ]
+  end
+
   defp aliases() do
     [
       # Normal unit tests — no distribution required.
@@ -129,13 +138,14 @@ defmodule SuperCache.MixProject do
       # VM flags (--name, --cookie) must be passed via --erl to the runtime,
       # not directly to mix test which does not understand them.
       "test.cluster": [
-        "cmd elixir --name primary@127.0.0.1 --cookie test_secret -S mix test --only cluster",
+        "cmd elixir --name primary@127.0.0.1 --cookie test_secret -S mix test --only cluster"
+      ],
 
-        # Testing & Coverage
-        coveralls: ["test --cover", "coveralls.html"],
-        # Code Quality
-        quality: ["format --check-formatted", "credo --strict", "dialyzer"]
-      ]
+      # Testing & Coverage
+      coveralls: ["test --cover", "coveralls.html"],
+
+      # Code Quality
+      quality: ["format --check-formatted", "credo --strict", "dialyzer"]
     ]
   end
 

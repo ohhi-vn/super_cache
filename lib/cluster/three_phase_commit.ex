@@ -2,6 +2,12 @@ defmodule SuperCache.Cluster.ThreePhaseCommit do
   @moduledoc """
   Three-phase commit (3PC) coordinator.
 
+  **Legacy module.**  Strong-mode writes no longer use 3PC: they are routed
+  through `SuperCache.Cluster.WAL` (see `WAL.commit/2`).  This module is
+  retained for backward compatibility, crash recovery of in-flight
+  transactions created by older releases, and direct tests.  New code must
+  not select 3PC from the public write path.
+
   Every `commit/2` call records a latency sample and increments either
   the `:committed` or `:aborted` counter (plus per-phase failure counters
   on abort) via `SuperCache.Cluster.Stats.record_tpc/2`.  These are
@@ -28,9 +34,9 @@ defmodule SuperCache.Cluster.ThreePhaseCommit do
   require Logger
   require SuperCache.Log
 
-  alias SuperCache.{Storage, Partition}
   alias SuperCache.Cluster.{Manager, TxnRegistry}
   alias SuperCache.Cluster.Stats
+  alias SuperCache.{Partition, Storage}
 
   @prepare_timeout 3_000
   @pre_commit_timeout 2_000
@@ -51,47 +57,51 @@ defmodule SuperCache.Cluster.ThreePhaseCommit do
     {_primary, replicas} = Manager.get_replicas(partition_idx)
 
     if replicas == [] do
-      case apply_local(partition_idx, ops) do
-        :ok -> :ok
-        {:error, _} = err -> err
-      end
+      commit_local(partition_idx, ops)
     else
-      txn_id = generate_txn_id()
-      TxnRegistry.register(txn_id, partition_idx, ops, replicas)
-
-      SuperCache.Log.debug(fn ->
-        "super_cache, 3pc, txn=#{txn_id} starting on #{length(replicas)} replica(s)"
-      end)
-
-      t0 = System.monotonic_time(:microsecond)
-      result = run_phases(txn_id, partition_idx, ops, replicas)
-      elapsed = System.monotonic_time(:microsecond) - t0
-
-      TxnRegistry.remove(txn_id)
-
-      case result do
-        :ok ->
-          Stats.record_tpc(:committed, latency_us: elapsed)
-
-        {:error, {:vote_no, _}} ->
-          Stats.record_tpc(:aborted, phase: :prepare)
-
-        {:error, {:prepare_timeout, _}} ->
-          Stats.record_tpc(:aborted, phase: :prepare)
-
-        {:error, {:pre_commit_failed, _}} ->
-          Stats.record_tpc(:aborted, phase: :pre_commit)
-
-        {:error, {:commit_failed, _}} ->
-          Stats.record_tpc(:aborted, phase: :commit)
-
-        {:error, _} ->
-          Stats.record_tpc(:aborted, [])
-      end
-
-      result
+      commit_replicated(partition_idx, ops, replicas)
     end
   end
+
+  defp commit_local(partition_idx, ops) do
+    case apply_local(partition_idx, ops) do
+      :ok -> :ok
+      {:error, _} = err -> err
+    end
+  end
+
+  defp commit_replicated(partition_idx, ops, replicas) do
+    txn_id = generate_txn_id()
+    TxnRegistry.register(txn_id, partition_idx, ops, replicas)
+
+    SuperCache.Log.debug(fn ->
+      "super_cache, 3pc, txn=#{txn_id} starting on #{length(replicas)} replica(s)"
+    end)
+
+    t0 = System.monotonic_time(:microsecond)
+    result = run_phases(txn_id, partition_idx, ops, replicas)
+    elapsed = System.monotonic_time(:microsecond) - t0
+
+    TxnRegistry.remove(txn_id)
+    record_result(result, elapsed)
+    result
+  end
+
+  defp record_result(:ok, elapsed), do: Stats.record_tpc(:committed, latency_us: elapsed)
+
+  defp record_result({:error, {:vote_no, _}}, _elapsed),
+    do: Stats.record_tpc(:aborted, phase: :prepare)
+
+  defp record_result({:error, {:prepare_timeout, _}}, _elapsed),
+    do: Stats.record_tpc(:aborted, phase: :prepare)
+
+  defp record_result({:error, {:pre_commit_failed, _}}, _elapsed),
+    do: Stats.record_tpc(:aborted, phase: :pre_commit)
+
+  defp record_result({:error, {:commit_failed, _}}, _elapsed),
+    do: Stats.record_tpc(:aborted, phase: :commit)
+
+  defp record_result({:error, _}, _elapsed), do: Stats.record_tpc(:aborted, [])
 
   # ── Participant callbacks ────────────────────────────────────────────────────
 
@@ -164,7 +174,7 @@ defmodule SuperCache.Cluster.ThreePhaseCommit do
   # ── Recovery ────────────────────────────────────────────────────────────────
 
   @spec recover() :: :ok
-  def recover() do
+  def recover do
     TxnRegistry.list_all()
     |> Enum.each(fn {txn_id, txn} ->
       case txn.state do

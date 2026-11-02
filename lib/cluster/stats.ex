@@ -13,6 +13,7 @@ defmodule SuperCache.Cluster.Stats do
   | `node_partitions/1`       | Partition ownership for any specific node            |
   | `three_phase_commit/0`    | Counters for the 3PC coordinator (this node)         |
   | `api/0`                   | Per-operation call counters + latency percentiles    |
+  | `reliability/0`           | Reliability counters (failures, drops, fallbacks)    |
   | `print/1`                 | Pretty-print any stats map to the console            |
 
   ## Quick start
@@ -33,8 +34,8 @@ defmodule SuperCache.Cluster.Stats do
   metrics to an external system.
   """
 
-  alias SuperCache.{Storage, Partition, Config}
-  alias SuperCache.Cluster.{Manager, TxnRegistry, Metrics}
+  alias SuperCache.Cluster.{Manager, Metrics, TxnRegistry}
+  alias SuperCache.{Partition, Storage}
 
   # ── Cluster overview ─────────────────────────────────────────────────────────
 
@@ -47,9 +48,13 @@ defmodule SuperCache.Cluster.Stats do
   - `:node_count` — number of live nodes
   - `:replication_factor` — configured replication factor
   - `:replication_mode` — `:async | :sync | :strong`
-  - `:num_partitions` — total partition count
+  - `:num_partitions` — total partition count (`0` before partition init)
   - `:partitions` — list of per-partition maps (see `partitions/0`)
   - `:total_records` — sum of ETS record counts across all local partitions
+
+  Callable before `SuperCache.start!/1`: when partitions are not
+  initialised, `:num_partitions` is `0` and `:partitions` is `[]` rather
+  than raising.
 
   ## Example
 
@@ -65,8 +70,9 @@ defmodule SuperCache.Cluster.Stats do
       }
   """
   @spec cluster() :: map
-  def cluster() do
-    parts = partitions()
+  def cluster do
+    num_partitions = partition_count()
+    parts = partitions(num_partitions)
 
     # A missing table reports its size as :undefined — count only real sizes
     # so a torn-down partition cannot crash the summary with an ArithmeticError.
@@ -77,13 +83,14 @@ defmodule SuperCache.Cluster.Stats do
       |> Enum.sum()
 
     %{
-      nodes:              Manager.live_nodes(),
-      node_count:         Manager.live_nodes() |> length(),
-      replication_factor: Config.get_config(:replication_factor, 1),
-      replication_mode:   Config.get_config(:replication_mode, :async),
-      num_partitions:     Partition.get_num_partition(),
-      total_records:      total,
-      partitions:         parts
+      nodes: Manager.live_nodes(),
+      node_count: Manager.live_nodes() |> length(),
+      replication_factor: Manager.replication_factor(),
+      replication_mode: Manager.replication_mode(),
+      reliability: reliability(),
+      num_partitions: num_partitions,
+      total_records: total,
+      partitions: parts
     }
   end
 
@@ -111,28 +118,34 @@ defmodule SuperCache.Cluster.Stats do
       ]
   """
   @spec partitions() :: [map]
-  def partitions() do
+  def partitions do
+    partitions(Partition.get_num_partition())
+  end
+
+  defp partitions(0), do: []
+
+  defp partitions(num_partitions) do
     me = node()
 
-    Enum.map(0..(Partition.get_num_partition() - 1), fn idx ->
+    Enum.map(0..(num_partitions - 1), fn idx ->
       {primary, replicas} = Manager.get_replicas(idx)
-      table     = Partition.get_partition_by_idx(idx)
+      table = Partition.get_partition_by_idx(idx)
       {_, count} = Storage.stats(table)
 
       role =
         cond do
-          primary == me    -> :primary
-          me in replicas   -> :replica
-          true             -> :none
+          primary == me -> :primary
+          me in replicas -> :replica
+          true -> :none
         end
 
       %{
-        idx:                 idx,
-        table:               table,
-        primary:             primary,
-        replicas:            replicas,
-        role:                role,
-        local_record_count:  count
+        idx: idx,
+        table: table,
+        primary: primary,
+        replicas: replicas,
+        role: role,
+        local_record_count: count
       }
     end)
   end
@@ -150,7 +163,7 @@ defmodule SuperCache.Cluster.Stats do
       ]
   """
   @spec primary_partitions() :: [map]
-  def primary_partitions() do
+  def primary_partitions do
     partitions() |> Enum.filter(&(&1.role == :primary))
   end
 
@@ -167,7 +180,7 @@ defmodule SuperCache.Cluster.Stats do
       ]
   """
   @spec replica_partitions() :: [map]
-  def replica_partitions() do
+  def replica_partitions do
     partitions() |> Enum.filter(&(&1.role == :replica))
   end
 
@@ -208,11 +221,11 @@ defmodule SuperCache.Cluster.Stats do
       |> Enum.map(& &1.idx)
 
     %{
-      node:                target_node,
-      primary_count:       length(primary_idxs),
-      replica_count:       length(replica_idxs),
-      primary_partitions:  primary_idxs,
-      replica_partitions:  replica_idxs
+      node: target_node,
+      primary_count: length(primary_idxs),
+      replica_count: length(replica_idxs),
+      primary_partitions: primary_idxs,
+      replica_partitions: replica_idxs
     }
   end
 
@@ -251,22 +264,22 @@ defmodule SuperCache.Cluster.Stats do
       }
   """
   @spec three_phase_commit() :: map
-  def three_phase_commit() do
+  def three_phase_commit do
     c = Metrics.get_all(:tpc)
 
     {avg, p99} = latency_stats(:tpc_commit_latency_us)
 
     %{
-      in_flight:              TxnRegistry.count(),
-      committed:              Map.get(c, :committed, 0),
-      aborted:                Map.get(c, :aborted, 0),
-      prepare_failures:       Map.get(c, :prepare_failures, 0),
-      pre_commit_failures:    Map.get(c, :pre_commit_failures, 0),
-      commit_failures:        Map.get(c, :commit_failures, 0),
-      recovered_committed:    Map.get(c, :recovered_committed, 0),
-      recovered_aborted:      Map.get(c, :recovered_aborted, 0),
-      avg_commit_latency_us:  avg,
-      p99_commit_latency_us:  p99
+      in_flight: TxnRegistry.count(),
+      committed: Map.get(c, :committed, 0),
+      aborted: Map.get(c, :aborted, 0),
+      prepare_failures: Map.get(c, :prepare_failures, 0),
+      pre_commit_failures: Map.get(c, :pre_commit_failures, 0),
+      commit_failures: Map.get(c, :commit_failures, 0),
+      recovered_committed: Map.get(c, :recovered_committed, 0),
+      recovered_aborted: Map.get(c, :recovered_aborted, 0),
+      avg_commit_latency_us: avg,
+      p99_commit_latency_us: p99
     }
   end
 
@@ -303,24 +316,92 @@ defmodule SuperCache.Cluster.Stats do
       }
   """
   @spec api() :: map
-  def api() do
+  def api do
     ops = [
-      :put, :get_local, :get_primary, :get_quorum,
-      :delete, :delete_all, :delete_match,
-      :replicate_async, :replicate_sync, :replicate_strong
+      :put,
+      :get_local,
+      :get_primary,
+      :get_quorum,
+      :delete,
+      :delete_all,
+      :delete_match,
+      :replicate_async,
+      :replicate_sync,
+      :replicate_strong
     ]
 
     Map.new(ops, fn op ->
       c = Metrics.get_all({:api, op})
       {avg, p99} = latency_stats({:api_latency_us, op})
 
-      {op, %{
-        calls:   Map.get(c, :calls, 0),
-        errors:  Map.get(c, :errors, 0),
-        avg_us:  avg,
-        p99_us:  p99
-      }}
+      {op,
+       %{
+         calls: Map.get(c, :calls, 0),
+         errors: Map.get(c, :errors, 0),
+         avg_us: avg,
+         p99_us: p99
+       }}
     end)
+  end
+
+  # ── Reliability counters ───────────────────────────────────────────────────────
+
+  @doc """
+  Return reliability counters for this node.
+
+  Aggregates the counters added by the distributed reliability hardening:
+
+  - `:async_failures` — async replication worker failures
+  - `:async_drops` — async replication deliveries dropped (pool full or replica error)
+  - `:sync_failures` — sync quorum failures
+  - `:strong_failures` — strong (WAL) write failures
+  - `:wal_backpressure` — strong writes rejected due to WAL backpressure
+  - `:read_fallbacks` — reads that fell back to a stale replica or primary
+  - `:health_timeouts` — health-check timeouts
+  - `:membership_changes` — partition-map updates caused by membership changes
+  - `:handoff_successes` — successful partition handoffs
+  - `:handoff_failures` — failed partition handoffs
+  - `:transfer_failures` — partition transfers that reported a failure
+
+  ## Example
+
+      iex> SuperCache.Cluster.Stats.reliability()
+      %{
+        async_failures: 0,
+        async_drops: 0,
+        sync_failures: 0,
+        strong_failures: 0,
+        wal_backpressure: 0,
+        read_fallbacks: 0,
+        health_timeouts: 0,
+        membership_changes: 0,
+        handoff_successes: 0,
+        handoff_failures: 0,
+        transfer_failures: 0
+      }
+  """
+  @spec reliability() :: map
+  def reliability do
+    replication = Metrics.get_all(:replication)
+    wal = Metrics.get_all(:wal)
+    read = Metrics.get_all(:read)
+    health = Metrics.get_all(:health)
+    membership = Metrics.get_all(:membership)
+    handoff = Metrics.get_all(:handoff)
+
+    %{
+      async_failures: Map.get(replication, :async_failures, 0),
+      async_drops: Map.get(replication, :async_drops, 0),
+      sync_failures: Map.get(replication, :sync_failures, 0),
+      strong_failures: Map.get(replication, :strong_failures, 0),
+      wal_backpressure: Map.get(wal, :backpressure, 0),
+      read_fallbacks: Map.get(read, :fallbacks, 0),
+      health_timeouts: Map.get(health, :timeouts, 0),
+      membership_changes: Map.get(membership, :changes, 0),
+      handoff_successes: Map.get(handoff, :successes, 0),
+      handoff_failures: Map.get(handoff, :failures, 0),
+      transfer_failures: Map.get(handoff, :transfer_failures, 0)
+    }
   end
 
   # ── Pretty printer ───────────────────────────────────────────────────────────
@@ -353,12 +434,14 @@ defmodule SuperCache.Cluster.Stats do
 
   def print(stats) when is_list(stats) do
     IO.puts(banner("SuperCache Stats"))
+
     stats
     |> Enum.with_index(1)
     |> Enum.each(fn {item, i} ->
       IO.puts("  [#{i}]")
       print_map(item, 4)
     end)
+
     IO.puts("")
     :ok
   end
@@ -390,28 +473,42 @@ defmodule SuperCache.Cluster.Stats do
   @spec record_tpc(atom, keyword) :: :ok
   def record_tpc(:committed, opts) do
     Metrics.increment(:tpc, :committed)
+
     if lat = Keyword.get(opts, :latency_us) do
       Metrics.push_latency(:tpc_commit_latency_us, lat)
     end
+
     :ok
   end
 
   def record_tpc(:aborted, opts) do
     Metrics.increment(:tpc, :aborted)
+
     case Keyword.get(opts, :phase) do
-      :prepare    -> Metrics.increment(:tpc, :prepare_failures)
+      :prepare -> Metrics.increment(:tpc, :prepare_failures)
       :pre_commit -> Metrics.increment(:tpc, :pre_commit_failures)
-      :commit     -> Metrics.increment(:tpc, :commit_failures)
-      _           -> :ok
+      :commit -> Metrics.increment(:tpc, :commit_failures)
+      _ -> :ok
     end
+
     :ok
   end
 
   def record_tpc(:recovered_committed, _opts), do: Metrics.increment(:tpc, :recovered_committed)
-  def record_tpc(:recovered_aborted,   _opts), do: Metrics.increment(:tpc, :recovered_aborted)
-  def record_tpc(_event, _opts),               do: :ok
+  def record_tpc(:recovered_aborted, _opts), do: Metrics.increment(:tpc, :recovered_aborted)
+  def record_tpc(_event, _opts), do: :ok
 
   # ── Private ──────────────────────────────────────────────────────────────────
+
+  # Partition count is only available after Bootstrap.start!/1. An
+  # observability read must stay callable before that point, so treat an
+  # uninitialised registry as zero partitions instead of propagating the
+  # `get_num_partition/0` raise.
+  defp partition_count do
+    Partition.get_num_partition()
+  rescue
+    RuntimeError -> 0
+  end
 
   # Compute {avg, p99} from the latency sample ring buffer.
   defp latency_stats(key) do
@@ -421,9 +518,9 @@ defmodule SuperCache.Cluster.Stats do
 
       samples ->
         sorted = Enum.sort(samples)
-        n      = length(sorted)
-        avg    = div(Enum.sum(sorted), n)
-        p99    = Enum.at(sorted, trunc(n * 0.99))
+        n = length(sorted)
+        avg = div(Enum.sum(sorted), n)
+        p99 = Enum.at(sorted, trunc(n * 0.99))
         {avg, p99}
     end
   end
@@ -431,12 +528,24 @@ defmodule SuperCache.Cluster.Stats do
   defp banner(title) do
     pad = 38
     top = "╔" <> String.duplicate("═", pad) <> "╗"
-    centered = title
-               |> String.pad_leading(div(pad + String.length(title), 2))
-               |> String.pad_trailing(pad)
+
+    centered =
+      title
+      |> String.pad_leading(div(pad + String.length(title), 2))
+      |> String.pad_trailing(pad)
+
     mid = "║" <> centered <> "║"
     bot = "╚" <> String.duplicate("═", pad) <> "╝"
     Enum.join([top, mid, bot], "\n")
+  end
+
+  defp print_list(items, pad, indent) do
+    items
+    |> Enum.with_index(1)
+    |> Enum.each(fn {item, i} ->
+      IO.puts("#{pad}  [#{i}]")
+      print_map(item, indent + 4)
+    end)
   end
 
   defp print_map(map, indent) do
@@ -450,12 +559,9 @@ defmodule SuperCache.Cluster.Stats do
           IO.puts("#{pad}#{key_str}:")
           print_map(v, indent + 4)
 
-        v when is_list(v) and length(v) > 0 and is_map(hd(v)) ->
+        v when is_list(v) and v != [] and is_map(hd(v)) ->
           IO.puts("#{pad}#{key_str}:")
-          v |> Enum.with_index(1) |> Enum.each(fn {item, i} ->
-            IO.puts("#{pad}  [#{i}]")
-            print_map(item, indent + 4)
-          end)
+          print_list(v, pad, indent)
 
         _ ->
           IO.puts("#{pad}#{key_str}: #{inspect(v)}")

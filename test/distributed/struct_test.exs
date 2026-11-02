@@ -1,5 +1,6 @@
 defmodule SuperCache.Distributed.StructTest do
   use ExUnit.Case, async: false
+  alias SuperCache.Cluster.Bootstrap
   alias SuperCache.Distributed.Struct, as: DStruct
 
   defmodule Person do
@@ -14,7 +15,7 @@ defmodule SuperCache.Distributed.StructTest do
     if SuperCache.started?(), do: SuperCache.stop()
     Process.sleep(50)
 
-    SuperCache.Cluster.Bootstrap.start!(
+    Bootstrap.start!(
       key_pos: 0,
       partition_pos: 0,
       cluster: :distributed,
@@ -187,7 +188,7 @@ defmodule SuperCache.Distributed.StructTest do
     SuperCache.stop()
     Process.sleep(50)
 
-    SuperCache.Cluster.Bootstrap.start!(
+    Bootstrap.start!(
       key_pos: 0,
       partition_pos: 0,
       cluster: :distributed,
@@ -207,7 +208,7 @@ defmodule SuperCache.Distributed.StructTest do
     SuperCache.stop()
     Process.sleep(50)
 
-    SuperCache.Cluster.Bootstrap.start!(
+    Bootstrap.start!(
       key_pos: 0,
       partition_pos: 0,
       cluster: :distributed,

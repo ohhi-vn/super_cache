@@ -17,6 +17,7 @@ defmodule SuperCache.ClusterLocalTest do
     Metrics,
     NodeMonitor,
     Replicator,
+    Router,
     Stats,
     ThreePhaseCommit,
     TxnRegistry,
@@ -44,7 +45,8 @@ defmodule SuperCache.ClusterLocalTest do
     :persistent_term.put(@pt_partition_map, map)
 
     on_exit(fn ->
-      if original, do: :persistent_term.put(@pt_partition_map, original),
+      if original,
+        do: :persistent_term.put(@pt_partition_map, original),
         else: :persistent_term.erase(@pt_partition_map)
     end)
 
@@ -105,6 +107,32 @@ defmodule SuperCache.ClusterLocalTest do
       Process.sleep(10)
       assert Process.whereis(Manager)
     end
+
+    test "node_up/1 increments the membership change counter" do
+      before = Stats.reliability().membership_changes
+
+      Manager.node_up(node())
+      Process.sleep(50)
+
+      assert Stats.reliability().membership_changes >= before + 1
+    end
+
+    test "donor_for/4 selects exactly one deterministic donor" do
+      live = MapSet.new([node(), :donor_primary@host, :donor_replica@host])
+      target = :joining@host
+
+      assert Manager.donor_for(:donor_primary@host, [:donor_replica@host], target, live) ==
+               :donor_primary@host
+
+      assert Manager.donor_for(:dead_primary@host, [:donor_replica@host], target, live) ==
+               :donor_replica@host
+
+      # The primary is the target, so the first live replica donates.
+      assert Manager.donor_for(target, [:donor_primary@host], target, live) ==
+               :donor_primary@host
+
+      refute Manager.donor_for(:dead_primary@host, [:dead_replica@host], target, live)
+    end
   end
 
   # ── NodeMonitor ──────────────────────────────────────────────────────────────
@@ -128,7 +156,7 @@ defmodule SuperCache.ClusterLocalTest do
     end
 
     test "reconfigure/1 swaps the watched set and announces diffs" do
-      assert :ok = NodeMonitor.reconfigure(nodes: [:"nm_a@host", :"nm_b@host"])
+      assert :ok = NodeMonitor.reconfigure(nodes: [:nm_a@host, :nm_b@host])
       assert :ok = NodeMonitor.reconfigure(nodes: [])
 
       # Restore the default source so other tests are unaffected.
@@ -205,7 +233,7 @@ defmodule SuperCache.ClusterLocalTest do
       assert is_map(mine)
 
       # A fabricated node simply has nothing local.
-      other = Stats.node_partitions(:"fabricated@host")
+      other = Stats.node_partitions(:fabricated@host)
       assert is_map(other)
     end
 
@@ -325,7 +353,9 @@ defmodule SuperCache.ClusterLocalTest do
       assert balance.partition_count == num
       assert length(balance.partitions) == num
       assert is_number(balance.total_records)
-      assert is_float(balance.avg_records_per_partition) or is_integer(balance.avg_records_per_partition)
+
+      assert is_float(balance.avg_records_per_partition) or
+               is_integer(balance.avg_records_per_partition)
     end
 
     test "cluster_health/0 includes this node even without peers" do
@@ -360,7 +390,7 @@ defmodule SuperCache.ClusterLocalTest do
     end
 
     test "commit with unreachable replicas fails fast in prepare" do
-      plant_map(%{3 => {node(), [:"tpc_fake@host"]}})
+      plant_map(%{3 => {node(), [:tpc_fake@host]}})
 
       assert {:error, {:prepare_timeout, _}} =
                ThreePhaseCommit.commit(3, [{:put, {:tpc_remote, "v"}}])
@@ -470,26 +500,37 @@ defmodule SuperCache.ClusterLocalTest do
     end
 
     test "sync replicate to unreachable replicas fails quorum" do
-      plant_map(%{1 => {node(), [:"rep_fake1@host", :"rep_fake2@host"]}})
+      plant_map(%{1 => {node(), [:rep_fake1@host, :rep_fake2@host]}})
       original_mode = SuperCache.Config.get_config(:replication_mode)
+
+      before = Metrics.get_all(:replication)
 
       try do
         SuperCache.Config.set_config(:replication_mode, :sync)
         assert {:error, :quorum_not_reached} = Replicator.replicate(1, :put, {:r, 2})
+
+        after_counts = Metrics.get_all(:replication)
+        assert Map.get(after_counts, :sync_failures, 0) == Map.get(before, :sync_failures, 0) + 1
+        assert Stats.reliability().sync_failures >= Map.get(after_counts, :sync_failures, 0)
       after
         if original_mode, do: SuperCache.Config.set_config(:replication_mode, original_mode)
       end
     end
 
     test "strong replicate routes through WAL commit" do
-      plant_map(%{1 => {node(), [:"rep_fake3@host"]}})
+      plant_map(%{1 => {node(), [:rep_fake3@host]}})
       original_mode = SuperCache.Config.get_config(:replication_mode)
 
       try do
         SuperCache.Config.set_config(:replication_mode, :strong)
         Application.put_env(:super_cache, :wal, majority_timeout: 80)
 
+        before = Metrics.get_all(:replication)
         assert {:error, :majority_timeout} = Replicator.replicate(1, :put, {:r, 3})
+        after_counts = Metrics.get_all(:replication)
+
+        assert Map.get(after_counts, :strong_failures, 0) ==
+                 Map.get(before, :strong_failures, 0) + 1
       after
         Application.delete_env(:super_cache, :wal)
 
@@ -527,7 +568,7 @@ defmodule SuperCache.ClusterLocalTest do
     end
 
     test "replicate_batch/3 reports incomplete replication to dead replicas" do
-      plant_map(%{2 => {node(), [:"batch_fake@host"]}})
+      plant_map(%{2 => {node(), [:batch_fake@host]}})
 
       assert {:error, {:replication_incomplete, 1}} =
                Replicator.replicate_batch(2, :put, [{:bb, 1}])
@@ -541,7 +582,7 @@ defmodule SuperCache.ClusterLocalTest do
       partition = Partition.get_partition_by_idx(0)
       Storage.put({:push_me, 1}, partition)
 
-      assert {:error, {:push_failed, 1, 1}} = Replicator.push_partition(0, :"push_fake@host")
+      assert {:error, {:push_failed, 1, 1}} = Replicator.push_partition(0, :push_fake@host)
 
       Storage.delete(:push_me, partition)
     end
@@ -550,7 +591,25 @@ defmodule SuperCache.ClusterLocalTest do
       partition = Partition.get_partition_by_idx(3)
       Storage.delete_all(partition)
 
-      assert :ok = Replicator.push_partition(3, :"push_fake2@host")
+      assert :ok = Replicator.push_partition(3, :push_fake2@host)
+    end
+
+    test "push_partition/2 streams more than one batch with an exact count" do
+      idx = 3
+      partition = Partition.get_partition_by_idx(idx)
+      Storage.delete_all(partition)
+
+      records = for i <- 1..(Replicator.__batch_size__() + 1), do: {{:stream, i}, i}
+      Storage.put(records, partition)
+
+      try do
+        assert :ok = Replicator.push_partition(idx, node())
+
+        assert length(Storage.get_by_match_object({{:stream, :_}, :_}, partition)) ==
+                 length(records)
+      after
+        Storage.delete_all(partition)
+      end
     end
   end
 
@@ -603,37 +662,117 @@ defmodule SuperCache.ClusterLocalTest do
       ensure_local_cache!()
 
       # Plant a topology where another (unreachable) node owns partition 0.
-      plant_map(%{0 => {:"owner_fake@host", []}})
+      plant_map(%{0 => {:owner_fake@host, []}})
 
       # With read_mode: :local but no local replica, DistributedHelpers must
-      # escalate to the primary — which fails fast via erpc. The failure is
-      # raised as an exit by :erpc.call; catch it and confirm escalation
-      # happened (i.e. we did NOT get the local answer).
-      result =
-        try do
-          {:ok,
-           DistributedHelpers.route_read(
-             SuperCache.ClusterLocalTest.KVProbe,
-             :probe_value,
-             ["k"],
-             0,
-             read_mode: :local
-           )}
-        catch
-          :exit, reason -> {:exit, reason}
-        end
-
-      case result do
-        {:ok, value} -> assert value in [:probed]
-        {:exit, _} -> :ok
+      # escalate to the primary — which fails fast via erpc. With no local
+      # replica to fall back to, the failure is reported as the documented
+      # distributed exception rather than an empty result.
+      assert_raise SuperCache.Cluster.Error, fn ->
+        DistributedHelpers.route_read(
+          SuperCache.ClusterLocalTest.KVProbe,
+          :probe_value,
+          ["k"],
+          0,
+          read_mode: :local
+        )
       end
     end
 
     test "has_partition?/1 reflects the planted topology" do
-      plant_map(%{0 => {node(), [:"x@host"]}, 1 => {:"other@host", [:y@host]}})
+      plant_map(%{0 => {node(), [:x@host]}, 1 => {:other@host, [:y@host]}})
 
       assert DistributedHelpers.has_partition?(0) == true
       assert DistributedHelpers.has_partition?(1) == false
+    end
+  end
+
+  # ── Router write failure propagation ─────────────────────────────────────────
+
+  describe "Router write failure propagation" do
+    setup do
+      ensure_local_cache!()
+      :ok
+    end
+
+    test "local write succeeds and reports success" do
+      key = :"router_local_#{System.unique_integer([:positive])}"
+      order = Partition.get_partition_order(key)
+      plant_map(%{order => {node(), []}})
+
+      assert true == Router.route_put!({key, 1})
+    end
+
+    test "local sync quorum failure raises the documented error" do
+      key = :"router_quorum_#{System.unique_integer([:positive])}"
+      order = Partition.get_partition_order(key)
+      plant_map(%{order => {node(), [:router_dead_replica@host]}})
+      original = SuperCache.Config.get_config(:replication_mode)
+
+      try do
+        SuperCache.Config.set_config(:replication_mode, :sync)
+
+        assert_raise SuperCache.Cluster.Error, fn ->
+          Router.route_put!({key, 1})
+        end
+      after
+        if original, do: SuperCache.Config.set_config(:replication_mode, original)
+      end
+    end
+
+    test "forwarded write failure raises the documented error" do
+      key = :"router_forward_#{System.unique_integer([:positive])}"
+      order = Partition.get_partition_order(key)
+      plant_map(%{order => {:router_forward_dead@host, []}})
+
+      assert_raise SuperCache.Cluster.Error, fn ->
+        Router.route_put!({key, 1})
+      end
+    end
+
+    test "primary read falls back to a local replica when the primary is down" do
+      key = :"router_read_fallback_#{System.unique_integer([:positive])}"
+      order = Partition.get_partition_order(key)
+      plant_map(%{order => {:router_read_dead@host, [node()]}})
+
+      Storage.put({key, :local_value}, Partition.get_partition_by_idx(order))
+
+      assert [{^key, :local_value}] =
+               Router.route_get!({key, nil}, read_mode: :primary)
+    end
+
+    test "primary read fails when the primary is down and no local replica exists" do
+      key = :"router_read_fail_#{System.unique_integer([:positive])}"
+      order = Partition.get_partition_order(key)
+      plant_map(%{order => {:router_read_dead@host, []}})
+
+      assert_raise SuperCache.Cluster.Error, fn ->
+        Router.route_get!({key, nil}, read_mode: :primary)
+      end
+    end
+
+    test "quorum read falls back to the primary result when no majority forms" do
+      key = :"router_quorum_fallback_#{System.unique_integer([:positive])}"
+      order = Partition.get_partition_order(key)
+      plant_map(%{order => {node(), [:router_q_dead_a@host, :router_q_dead_b@host]}})
+
+      Storage.put({key, :primary_value}, Partition.get_partition_by_idx(order))
+
+      assert [{^key, :primary_value}] =
+               Router.route_get!({key, nil}, read_mode: :quorum)
+    end
+
+    test "quorum read fails when neither a majority nor a local copy is available" do
+      key = :"router_quorum_fail_#{System.unique_integer([:positive])}"
+      order = Partition.get_partition_order(key)
+
+      plant_map(%{
+        order => {:router_q_dead_primary@host, [:router_q_dead_replica@host]}
+      })
+
+      assert_raise SuperCache.Cluster.Error, fn ->
+        Router.route_get!({key, nil}, read_mode: :quorum)
+      end
     end
   end
 

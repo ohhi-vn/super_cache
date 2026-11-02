@@ -46,13 +46,13 @@ defmodule SuperCache.Cluster.WAL do
   use GenServer, restart: :permanent, shutdown: 5_000
 
   require Logger
-  require SuperCache.Log
 
-  alias SuperCache.{Storage, Partition}
   alias SuperCache.Cluster.{Manager, Metrics}
+  alias SuperCache.{Partition, Storage}
 
   @table __MODULE__
   @ack_table :"#{@table}_acks"
+  @watermark_table :"#{@table}_watermarks"
   # Counter key stored in the WAL ETS table for atomic sequence generation.
   # Uses a tuple key so it never collides with integer sequence numbers.
   @seq_key {:seq, :counter}
@@ -91,42 +91,57 @@ defmodule SuperCache.Cluster.WAL do
     {_primary, replicas} = Manager.get_replicas(partition_idx)
 
     if replicas == [] do
-      # No replicas — apply locally and return immediately
       apply_local(partition_idx, ops)
     else
-      t0 = System.monotonic_time(:microsecond)
+      commit_with_backpressure(partition_idx, ops, replicas)
+    end
+  end
 
-      # Apply locally first (write-ahead). Abort when the local apply fails —
-      # continuing would replicate an entry that was never applied here.
-      case apply_local(partition_idx, ops) do
-        {:error, _} = err ->
-          Metrics.increment({:wal, :failed}, :calls)
-          err
+  defp commit_with_backpressure(partition_idx, ops, replicas) do
+    # Backpressure: reject before applying when too many entries are pending.
+    max_pending = Application.get_env(:super_cache, :wal, [])[:max_pending] || 10_000
 
-        :ok ->
-          result = commit_with_replicas(partition_idx, ops, replicas)
-          elapsed = System.monotonic_time(:microsecond) - t0
+    if stats().pending >= max_pending do
+      Metrics.increment(:wal, :backpressure)
+      {:error, :wal_backpressure}
+    else
+      do_commit(partition_idx, ops, replicas)
+    end
+  end
 
-          case result do
-            :ok ->
-              Metrics.increment({:wal, :committed}, :calls)
-              Metrics.push_latency({:wal_latency_us, :commit}, elapsed)
-              :ok
+  defp do_commit(partition_idx, ops, replicas) do
+    t0 = System.monotonic_time(:microsecond)
 
-            {:error, _} = err ->
-              Metrics.increment({:wal, :failed}, :calls)
-              Metrics.push_latency({:wal_latency_us, :commit_failed}, elapsed)
-              err
-          end
-      end
+    case apply_local(partition_idx, ops) do
+      {:error, _} = err ->
+        Metrics.increment({:wal, :failed}, :calls)
+        err
+
+      :ok ->
+        commit_replicated(partition_idx, ops, replicas, t0)
+    end
+  end
+
+  defp commit_replicated(partition_idx, ops, replicas, t0) do
+    result = commit_with_replicas(partition_idx, ops, replicas)
+    elapsed = System.monotonic_time(:microsecond) - t0
+
+    case result do
+      :ok ->
+        Metrics.increment({:wal, :committed}, :calls)
+        Metrics.push_latency({:wal_latency_us, :commit}, elapsed)
+        :ok
+
+      {:error, _} = err ->
+        Metrics.increment({:wal, :failed}, :calls)
+        Metrics.push_latency({:wal_latency_us, :commit_failed}, elapsed)
+        err
     end
   end
 
   defp commit_with_replicas(partition_idx, ops, replicas) do
-    # Get next sequence number
     seq = next_seq()
 
-    # Write to WAL
     wal_entry = %{
       seq: seq,
       partition_idx: partition_idx,
@@ -136,25 +151,26 @@ defmodule SuperCache.Cluster.WAL do
 
     :ets.insert(@table, {seq, wal_entry})
 
-    # Initialize ack tracking: `{seq, required, waiter}` plus an atomic
-    # counter row so concurrent replica acks can never lose counts.
-    required = div(length(replicas), 2) + 1
+    # Primary-inclusive majority: the primary already applied the entry, so
+    # only `div(length(replicas) + 1, 2)` replica acknowledgements are needed.
+    required = div(length(replicas) + 1, 2)
     waiter = self()
 
     :ets.insert(@ack_table, [{seq, required, waiter}, {{seq, :count}, 0}])
 
-    # Async replicate to all replicas
+    set_watermark(partition_idx, seq)
+
     async_replicate(seq, partition_idx, ops, replicas)
 
-    # Wait for majority ack
     case await_majority(seq, required) do
       :ok ->
+        :ets.delete(@table, seq)
         :ok
 
       {:error, _} = err ->
-        # Timed out — remove our tracking rows so they cannot leak.
         :ets.delete(@ack_table, seq)
         :ets.delete(@ack_table, {seq, :count})
+        :ets.match_delete(@ack_table, {{seq, :ack, :_}, :_})
         err
     end
   end
@@ -170,25 +186,36 @@ defmodule SuperCache.Cluster.WAL do
   row) rather than to this module's GenServer.
   """
   @spec ack(non_neg_integer, node) :: :ok
-  def ack(seq, _replica_node) do
+  def ack(seq, replica_node) do
     case :ets.lookup(@ack_table, seq) do
-      [{^seq, required, waiter}] ->
-        count = :ets.update_counter(@ack_table, {seq, :count}, {2, 1}, {{seq, :count}, 0})
-
-        if count >= required do
-          # Majority reached — wake the committer and clean up the rows so no
-          # later ack can double-notify.
-          :ets.delete(@ack_table, seq)
-          :ets.delete(@ack_table, {seq, :count})
-          send(waiter, {:majority_reached, seq})
-        end
-
-        :ok
-
-      [] ->
-        # Entry already cleaned up or not found (majority already reached)
-        :ok
+      [{^seq, required, waiter}] -> record_ack(seq, required, waiter, replica_node)
+      [] -> :ok
     end
+  end
+
+  defp record_ack(seq, required, waiter, replica_node) do
+    # Count at most one acknowledgement per distinct replica node.
+    # insert_new returns false for a duplicate ack, so it cannot advance
+    # the quorum.
+    if :ets.insert_new(@ack_table, {{seq, :ack, replica_node}, true}) do
+      count = :ets.update_counter(@ack_table, {seq, :count}, {2, 1}, {{seq, :count}, 0})
+
+      if count >= required do
+        # Majority reached — wake the committer and clean up the rows so no
+        # later ack can double-notify.
+        cleanup_ack_rows(seq)
+        send(waiter, {:majority_reached, seq})
+      end
+    end
+
+    :ok
+  end
+
+  defp cleanup_ack_rows(seq) do
+    :ets.delete(@ack_table, seq)
+    :ets.delete(@ack_table, {seq, :count})
+    :ets.match_delete(@ack_table, {{seq, :ack, :_}, :_})
+    :ok
   end
 
   @doc """
@@ -199,7 +226,10 @@ defmodule SuperCache.Cluster.WAL do
   """
   @spec replicate_and_ack(non_neg_integer, non_neg_integer, [{atom, any}]) :: :ok
   def replicate_and_ack(seq, partition_idx, ops) do
-    apply_local(partition_idx, ops)
+    if is_integer(seq) and seq > watermark(partition_idx) do
+      apply_local(partition_idx, ops)
+      set_watermark(partition_idx, seq)
+    end
 
     # Send ack back to primary
     {primary, _} = Manager.get_replicas(partition_idx)
@@ -224,7 +254,7 @@ defmodule SuperCache.Cluster.WAL do
   Replays any entries that haven't been fully committed to ensure consistency.
   """
   @spec recover() :: :ok
-  def recover() do
+  def recover do
     # Skip the `{{:seq, :counter}, n}` bookkeeping row — only map-valued rows
     # are real WAL entries.
     entries = Enum.filter(:ets.tab2list(@table), fn {_k, v} -> is_map(v) end)
@@ -233,17 +263,24 @@ defmodule SuperCache.Cluster.WAL do
     if count > 0 do
       Logger.info("super_cache, wal, recovering #{count} uncommitted entries")
 
-      Enum.each(entries, fn {_seq, entry} ->
-        # Re-apply locally
-        apply_local(entry.partition_idx, entry.ops)
-
-        # Re-replicate to replicas
-        {_primary, replicas} = Manager.get_replicas(entry.partition_idx)
-        async_replicate(entry.seq, entry.partition_idx, entry.ops, replicas)
-      end)
+      Enum.each(entries, fn {_seq, entry} -> recover_entry(entry) end)
     end
 
     :ok
+  end
+
+  defp recover_entry(entry) do
+    seq = Map.get(entry, :seq, 0)
+    partition_idx = Map.get(entry, :partition_idx)
+    ops = Map.get(entry, :ops, [])
+
+    if is_integer(partition_idx) and seq > watermark(partition_idx) do
+      apply_local(partition_idx, ops)
+      set_watermark(partition_idx, seq)
+
+      {_primary, replicas} = Manager.get_replicas(partition_idx)
+      async_replicate(seq, partition_idx, ops, replicas)
+    end
   end
 
   @doc """
@@ -255,7 +292,7 @@ defmodule SuperCache.Cluster.WAL do
       # => %{pending: 42, acks_pending: 2}
   """
   @spec stats() :: %{pending: non_neg_integer, acks_pending: non_neg_integer}
-  def stats() do
+  def stats do
     %{
       pending: max(0, :ets.info(@table, :size) - 1),
       acks_pending: :ets.info(@ack_table, :size)
@@ -266,33 +303,19 @@ defmodule SuperCache.Cluster.WAL do
 
   @impl true
   def init(_opts) do
-    table =
-      :ets.new(@table, [
-        :ordered_set,
-        :public,
-        :named_table,
-        {:read_concurrency, true},
-        {:write_concurrency, true}
-      ])
-
-    ack_table =
-      :ets.new(@ack_table, [
-        :set,
-        :public,
-        :named_table,
-        {:read_concurrency, true},
-        {:write_concurrency, true}
-      ])
-
-    # Initialize sequence counter in ETS for atomic increment.
-    :ets.insert(@table, {@seq_key, 0})
-
-    # Start periodic cleanup
+    # Tables are owned by WAL.Store; this process only schedules cleanup and
+    # replays any pending entries that survived a restart.
     schedule_cleanup()
 
-    Logger.info(
-      "super_cache, wal, ETS tables ready (wal: #{inspect(table)}, acks: #{inspect(ack_table)})"
-    )
+    try do
+      recover()
+    rescue
+      _ -> :ok
+    catch
+      _, _ -> :ok
+    end
+
+    Logger.info("super_cache, wal, GenServer ready")
 
     {:ok, %{}}
   end
@@ -319,8 +342,20 @@ defmodule SuperCache.Cluster.WAL do
   # Unlike the previous persistent_term read+write approach, this is
   # race-condition-free: two concurrent callers will always get distinct
   # sequence numbers because update_counter is an atomic ETS operation.
-  defp next_seq() do
+  defp next_seq do
     :ets.update_counter(@table, @seq_key, {2, 1}, {@seq_key, 0})
+  end
+
+  defp watermark(partition_idx) do
+    case :ets.lookup(@watermark_table, partition_idx) do
+      [{^partition_idx, seq}] when is_integer(seq) -> seq
+      _ -> 0
+    end
+  end
+
+  defp set_watermark(partition_idx, seq) when is_integer(seq) do
+    :ets.insert(@watermark_table, {partition_idx, seq})
+    :ok
   end
 
   defp apply_local(partition_idx, ops) do
@@ -330,10 +365,20 @@ defmodule SuperCache.Cluster.WAL do
       {:error, :invalid_partition}
     else
       Enum.each(ops, fn
-        {:put, record} -> Storage.put(record, partition)
-        {:delete, key} -> Storage.delete(key, partition)
-        {:delete_match, pattern} -> Storage.delete_match(pattern, partition)
-        {:delete_all, _} -> Storage.delete_all(partition)
+        {:put, record} ->
+          Storage.put(record, partition)
+
+        {:delete, key} ->
+          Storage.delete(key, partition)
+
+        {:delete_match, pattern} ->
+          Storage.delete_match(pattern, partition)
+
+        {:delete_all, _} ->
+          Storage.delete_all(partition)
+
+        {:increment, key, default, step} ->
+          Storage.update_counter(key, partition, {2, step}, {key, default})
       end)
 
       :ok
@@ -374,14 +419,14 @@ defmodule SuperCache.Cluster.WAL do
     end
   end
 
-  defp schedule_cleanup() do
+  defp schedule_cleanup do
     interval =
       Application.get_env(:super_cache, :wal, [])[:cleanup_interval] || @default_cleanup_interval
 
     Process.send_after(self(), :cleanup, interval)
   end
 
-  defp cleanup_old_entries() do
+  defp cleanup_old_entries do
     # Remove WAL entries older than 10 seconds. The sequence-counter row
     # ({@seq_key, integer}) is skipped by the `is_map` guard.
     cutoff = System.monotonic_time(:millisecond) - 10_000

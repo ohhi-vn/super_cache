@@ -70,6 +70,18 @@ defmodule SuperCache.BootstrapTest do
       assert SuperCache.started?() == false
     end
 
+    test "a failed start leaves started?/0 false" do
+      assert_raise ArgumentError, ~r/table_prefix/, fn ->
+        Bootstrap.start!(key_pos: 0, partition_pos: 0, table_prefix: {:not, :a, :string})
+      end
+
+      refute SuperCache.started?()
+
+      # The failed attempt must not poison a subsequent valid start.
+      assert :ok = Bootstrap.start!()
+      assert SuperCache.started?() == true
+    end
+
     test "multiple start/stop cycles work" do
       for _ <- 1..3 do
         Bootstrap.start!()

@@ -5,14 +5,15 @@ defmodule SuperCache.ClusterTest do
   @moduletag :sequential
   @moduletag timeout: 120_000
 
-  alias SuperCache.Cluster.Manager
-  alias SuperCache.Cluster.NodeMonitor
+  alias SuperCache.Cluster.{HealthMonitor, Manager, NodeMonitor}
+  alias SuperCache.{Partition, Storage}
 
   # Shared convergence-drain helper; everything else is file-local because
   # this suite predates ClusterCase and manages its own peer lifecycle.
   import SuperCache.ClusterCase, only: [await_convergence: 0]
 
   require Logger
+  alias SuperCache.Cluster.Bootstrap
 
   # Base cache opts — deliberately omit node-source keys (:nodes / :nodes_mfa /
   # :refresh_ms) so NodeMonitor starts in legacy :all mode.  Tests that need
@@ -76,11 +77,9 @@ defmodule SuperCache.ClusterTest do
   end
 
   defp stop_peer(peer) do
-    try do
-      :peer.stop(peer)
-    catch
-      :exit, _ -> :ok
-    end
+    :peer.stop(peer)
+  catch
+    :exit, _ -> :ok
   end
 
   defp restart_peer(name) do
@@ -114,7 +113,7 @@ defmodule SuperCache.ClusterTest do
   # ── Read / assert helpers ─────────────────────────────────────────────────────
 
   defp node_read(target_node, key, partition_value) do
-    order = SuperCache.Partition.get_partition_order(partition_value)
+    order = Partition.get_partition_order(partition_value)
 
     :erpc.call(
       target_node,
@@ -151,7 +150,7 @@ defmodule SuperCache.ClusterTest do
   end
 
   defp primary_for(partition_value) do
-    idx = SuperCache.Partition.get_partition_order(partition_value)
+    idx = Partition.get_partition_order(partition_value)
     {primary, _} = Manager.get_replicas(idx)
     primary
   end
@@ -163,9 +162,9 @@ defmodule SuperCache.ClusterTest do
       Enum.each(0..(num - 1), fn idx ->
         try do
           partition =
-            :erpc.call(n, SuperCache.Partition, :get_partition_by_idx, [idx], 5_000)
+            :erpc.call(n, Partition, :get_partition_by_idx, [idx], 5_000)
 
-          :erpc.call(n, SuperCache.Storage, :delete_all, [partition], 5_000)
+          :erpc.call(n, Storage, :delete_all, [partition], 5_000)
         catch
           kind, reason ->
             Logger.debug(
@@ -308,7 +307,7 @@ defmodule SuperCache.ClusterTest do
     SuperCache.put!({:session, "tok-abc", %{user: 1}})
     expected = [{:session, "tok-abc", %{user: 1}}]
 
-    order = SuperCache.Partition.get_partition_order(:session)
+    order = Partition.get_partition_order(:session)
     {primary, replicas} = Manager.get_replicas(order)
     holders = [primary | replicas]
 
@@ -367,7 +366,7 @@ defmodule SuperCache.ClusterTest do
 
   test "reads still work after a peer goes down", %{agent: agent, peer2: peer2, node2: node2} do
     SuperCache.put!({:durable, "k1", "v1"})
-    order = SuperCache.Partition.get_partition_order(:durable)
+    order = Partition.get_partition_order(:durable)
     {primary, replicas} = Manager.get_replicas(order)
 
     assert_node_has(primary, :durable, :durable, [{:durable, "k1", "v1"}], 1_000)
@@ -398,7 +397,7 @@ defmodule SuperCache.ClusterTest do
   test "node rejoin triggers full sync", %{agent: agent, peer1: peer1, node1: node1} do
     SuperCache.put!({:sync_key1, "data1"})
 
-    order1 = SuperCache.Partition.get_partition_order(:sync_key1)
+    order1 = Partition.get_partition_order(:sync_key1)
     {primary1, _} = Manager.get_replicas(order1)
     assert_node_has(primary1, :sync_key1, :sync_key1, [{:sync_key1, "data1"}], 1_000)
 
@@ -410,7 +409,7 @@ defmodule SuperCache.ClusterTest do
     wait_cluster_stable(2)
 
     SuperCache.put!({:sync_key2, "data2"})
-    order2 = SuperCache.Partition.get_partition_order(:sync_key2)
+    order2 = Partition.get_partition_order(:sync_key2)
     {primary2, _} = Manager.get_replicas(order2)
     assert_node_has(primary2, :sync_key2, :sync_key2, [{:sync_key2, "data2"}], 1_000)
 
@@ -423,10 +422,10 @@ defmodule SuperCache.ClusterTest do
     # assert_node_has (which polls) instead of a fixed sleep so the test
     # is resilient to variable sync latency.
     {new_primary1, _} =
-      Manager.get_replicas(SuperCache.Partition.get_partition_order(:sync_key1))
+      Manager.get_replicas(Partition.get_partition_order(:sync_key1))
 
     {new_primary2, _} =
-      Manager.get_replicas(SuperCache.Partition.get_partition_order(:sync_key2))
+      Manager.get_replicas(Partition.get_partition_order(:sync_key2))
 
     assert_node_has(new_primary1, :sync_key1, :sync_key1, [{:sync_key1, "data1"}], 5_000)
     assert_node_has(new_primary2, :sync_key2, :sync_key2, [{:sync_key2, "data2"}], 5_000)
@@ -444,7 +443,7 @@ defmodule SuperCache.ClusterTest do
       end)
 
     for {key, val} <- [{:sync_key1, "data1"}, {:sync_key2, "data2"}] do
-      ord = SuperCache.Partition.get_partition_order(key)
+      ord = Partition.get_partition_order(key)
 
       if ord in node1_orders do
         assert_node_has(new_node1, key, key, [{key, val}], 1_000)
@@ -462,8 +461,8 @@ defmodule SuperCache.ClusterTest do
     SuperCache.put!({:to_clear, "a", 1})
     SuperCache.put!({:to_clear_b, "b", 2})
 
-    {pa, _} = Manager.get_replicas(SuperCache.Partition.get_partition_order(:to_clear))
-    {pb, _} = Manager.get_replicas(SuperCache.Partition.get_partition_order(:to_clear_b))
+    {pa, _} = Manager.get_replicas(Partition.get_partition_order(:to_clear))
+    {pb, _} = Manager.get_replicas(Partition.get_partition_order(:to_clear_b))
     assert_node_has(pa, :to_clear, :to_clear, [{:to_clear, "a", 1}], 1_000)
     assert_node_has(pb, :to_clear_b, :to_clear_b, [{:to_clear_b, "b", 2}], 1_000)
 
@@ -713,7 +712,7 @@ defmodule SuperCache.ClusterTest do
       SuperCache.put!({:late_join_key, "probe", "value"})
       Process.sleep(300)
 
-      ord = SuperCache.Partition.get_partition_order(:late_join_key)
+      ord = Partition.get_partition_order(:late_join_key)
       {primary, replicas} = Manager.get_replicas(ord)
       holders = [primary | replicas]
 
@@ -827,8 +826,8 @@ defmodule SuperCache.ClusterTest do
       # subsequent tests start from a clean state.
       on_exit(fn ->
         try do
-          SuperCache.Cluster.Bootstrap.stop()
-          SuperCache.Cluster.Bootstrap.start!(@cache_opts)
+          Bootstrap.stop()
+          Bootstrap.start!(@cache_opts)
           restart_node_monitor(nodes: [node1, node2])
           wait_cluster_stable(3)
         catch
@@ -836,7 +835,7 @@ defmodule SuperCache.ClusterTest do
         end
       end)
 
-      SuperCache.Cluster.Bootstrap.stop()
+      Bootstrap.stop()
 
       # Ensure node1 and node2 are still connected at the Erlang level
       # before restarting Bootstrap.  Bootstrap.stop() does not disconnect
@@ -849,7 +848,7 @@ defmodule SuperCache.ClusterTest do
 
       # Pass :nodes = [node1, node2] so NodeMonitor's managed set is exactly
       # those two peers.  Any other Erlang node that connects is filtered.
-      SuperCache.Cluster.Bootstrap.start!(@cache_opts ++ [nodes: [node1, node2]])
+      Bootstrap.start!(@cache_opts ++ [nodes: [node1, node2]])
 
       # Confirm the local node is back up and the two managed peers are still live.
       assert wait_until(
@@ -1142,5 +1141,77 @@ defmodule SuperCache.ClusterTest do
 
     @doc false
     def test_mfa_raise, do: raise("simulated discovery failure")
+  end
+
+  # ── Membership and health hardening ─────────────────────────────────────────
+
+  test "a plain Erlang peer without SuperCache bootstrap gets no assignment" do
+    {plain_peer, plain_node} = start_plain_peer(:assignment_plain_peer)
+
+    on_exit(fn -> stop_peer(plain_peer) end)
+
+    Node.connect(plain_node)
+    Manager.node_up(plain_node)
+    Process.sleep(300)
+
+    refute plain_node in Manager.live_nodes(),
+           "plain peer without bootstrap must not enter live membership"
+
+    num = SuperCache.Config.get_config(:num_partition, 8)
+
+    refute Enum.any?(0..(num - 1), fn idx ->
+             {primary, replicas} = Manager.get_replicas(idx)
+             primary == plain_node or plain_node in replicas
+           end),
+           "plain peer without bootstrap must receive no primary or replica assignment"
+  end
+
+  test "remote health uses the remote node's own partition data", %{node1: node1, node2: node2} do
+    num = SuperCache.Config.get_config(:num_partition, 8)
+
+    peer =
+      [node1, node2]
+      |> Enum.find(fn candidate ->
+        length(
+          Enum.filter(0..(num - 1), fn idx ->
+            elem(Manager.get_replicas(idx), 0) == candidate
+          end)
+        ) >= 2
+      end)
+
+    assert peer, "expected a peer to own at least two primary partitions"
+
+    idx =
+      Enum.find(0..(num - 1), fn idx ->
+        elem(Manager.get_replicas(idx), 0) == peer
+      end)
+
+    partition = :erpc.call(peer, Partition, :get_partition_by_idx, [idx], 5_000)
+    key = {:health_remote_probe, System.unique_integer([:positive])}
+
+    try do
+      :erpc.call(
+        peer,
+        Storage,
+        :put,
+        [[{key, 1}, {key, 2}], partition],
+        5_000
+      )
+
+      :erpc.call(peer, HealthMonitor, :force_check, [], 30_000)
+
+      health = HealthMonitor.node_health(peer)
+
+      assert health.node == peer
+      assert is_map(health.checks.partitions)
+      assert health.checks.partitions.status in [:pass, :degraded]
+
+      # The imbalance is measured from the peer's own tables; the local node
+      # has no records in this partition.
+      assert health.checks.partitions.imbalance > 0
+      assert [] == Storage.get(key, Partition.get_partition_by_idx(idx))
+    after
+      :erpc.call(peer, Storage, :delete, [key, partition], 5_000)
+    end
   end
 end

@@ -14,21 +14,16 @@ defmodule SuperCache.Stack do
   In distributed mode, structural mutations (`push`, `pop`, `get_all`) are
   routed to the partition's primary node.
 
-  ## Example
-
-      alias SuperCache.Stack
-
-      Stack.push("history", :page_a)
-      Stack.push("history", :page_b)
-      Stack.pop("history")          # => :page_b
-      Stack.get_all("history")      # => [:page_a]
+  All structural mutations use a soft per-stack update lock with bounded
+  spin-waiting and stale-lock reclamation so a crashed process never wedges
+  the stack.
   """
 
-  require Logger
-  require SuperCache.Log
-
-  alias SuperCache.{Storage, Partition, Config}
   alias SuperCache.Cluster.DistributedHelpers
+  alias SuperCache.{Config, Partition, Storage}
+
+  @max_spin_retries 100
+  @lock_stale_ms 2_000
 
   ## ── Public API ──────────────────────────────────────────────────────────────
 
@@ -61,13 +56,20 @@ defmodule SuperCache.Stack do
   Return the number of items.
 
   ## Options
-
   - `:read_mode` — `:local` (default), `:primary`, or `:quorum`.
   """
   @spec count(any, keyword) :: non_neg_integer
   def count(stack_name, opts \\ []) do
     if Config.distributed?() do
-      DistributedHelpers.route_read(__MODULE__, :dist_count, [stack_name], idx(stack_name), opts)
+      DistributedHelpers.read_or_error(fn ->
+        DistributedHelpers.route_read(
+          __MODULE__,
+          :dist_count,
+          [stack_name],
+          idx(stack_name),
+          opts
+        )
+      end)
     else
       local_count(stack_name)
     end
@@ -103,100 +105,129 @@ defmodule SuperCache.Stack do
     dist_do_drain(Partition.get_partition(stack_name), stack_name)
   end
 
-  ## ── Private — local mode (Storage.take for atomicity) ───────────────────────
+  ## ── Private — local mode ────────────────────────────────────────────────────
 
   defp local_push(partition, stack_name, value) do
-    case Storage.take({:stack, :counter, stack_name}, partition) do
-      [] ->
-        case Storage.get({:stack, :updating, stack_name}, partition) do
-          [] ->
-            local_init(stack_name)
-            local_push(partition, stack_name, value)
+    local_push(partition, stack_name, value, 0)
+  end
 
-          _ ->
-            :erlang.yield()
-            local_push(partition, stack_name, value)
+  defp local_push(_partition, _stack_name, _value, retries)
+       when retries >= @max_spin_retries do
+    false
+  end
+
+  defp local_push(partition, stack_name, value, retries) do
+    case acquire_lock(partition, stack_name) do
+      :ok ->
+        try do
+          case Storage.get({:stack, :counter, stack_name}, partition) do
+            [] ->
+              Storage.put({{:stack, :counter, stack_name}, 0}, partition)
+              do_push(partition, stack_name, value, 0)
+
+            [{_, counter}] ->
+              do_push(partition, stack_name, value, counter)
+          end
+        after
+          release_lock(partition, stack_name)
         end
 
-      [{_, counter}] ->
-        next = counter + 1
-        Storage.put({{:stack, :updating, stack_name}, true}, partition)
-        Storage.put({{:stack, :counter, stack_name}, next}, partition)
-        Storage.put({{:stack, stack_name, next}, value}, partition)
-        Storage.delete({:stack, :updating, stack_name}, partition)
-        true
+      :contended ->
+        Process.sleep(1)
+        local_push(partition, stack_name, value, retries + 1)
     end
   end
 
+  defp do_push(partition, stack_name, value, counter) do
+    next = counter + 1
+    Storage.put({{:stack, :counter, stack_name}, next}, partition)
+    Storage.put({{:stack, stack_name, next}, value}, partition)
+    true
+  end
+
   defp local_pop(partition, stack_name, default) do
-    case Storage.take({:stack, :counter, stack_name}, partition) do
-      [] ->
-        case Storage.get({:stack, :updating, stack_name}, partition) do
-          [] ->
-            default
+    local_pop(partition, stack_name, default, 0)
+  end
 
-          _ ->
-            :erlang.yield()
-            local_pop(partition, stack_name, default)
-        end
+  defp local_pop(_partition, _stack_name, default, retries)
+       when retries >= @max_spin_retries do
+    default
+  end
 
-      [{_, 0}] ->
-        default
-
-      [{_, counter}] ->
-        Storage.put({{:stack, :updating, stack_name}, true}, partition)
-
-        value =
-          case Storage.take({:stack, stack_name, counter}, partition) do
+  defp local_pop(partition, stack_name, default, retries) do
+    case acquire_lock(partition, stack_name) do
+      :ok ->
+        try do
+          case Storage.get({:stack, :counter, stack_name}, partition) do
             [] ->
               Storage.put({{:stack, :counter, stack_name}, 0}, partition)
               default
 
-            [{_, v}] ->
-              Storage.put({{:stack, :counter, stack_name}, counter - 1}, partition)
-              v
-          end
+            [{_, 0}] ->
+              default
 
-        Storage.delete({:stack, :updating, stack_name}, partition)
-        value
+            [{_, counter}] ->
+              case Storage.take({:stack, stack_name, counter}, partition) do
+                [] ->
+                  Storage.put({{:stack, :counter, stack_name}, 0}, partition)
+                  default
+
+                [{_, v}] ->
+                  Storage.put({{:stack, :counter, stack_name}, counter - 1}, partition)
+                  v
+              end
+          end
+        after
+          release_lock(partition, stack_name)
+        end
+
+      :contended ->
+        Process.sleep(1)
+        local_pop(partition, stack_name, default, retries + 1)
     end
   end
 
   defp local_drain(partition, stack_name) do
-    case Storage.take({:stack, :counter, stack_name}, partition) do
-      [] ->
-        case Storage.get({:stack, :updating, stack_name}, partition) do
-          [] ->
-            []
-
-          _ ->
-            :erlang.yield()
-            local_drain(partition, stack_name)
-        end
-
-      [{_, 0}] ->
-        []
-
-      [{_, counter}] ->
-        Storage.put({{:stack, :updating, stack_name}, true}, partition)
-
-        values =
-          Enum.reduce(counter..1//-1, [], fn x, acc ->
-            case Storage.take({:stack, stack_name, x}, partition) do
-              [] -> acc
-              [{_, v}] -> [v | acc]
-            end
-          end)
-
-        Storage.put({{:stack, :counter, stack_name}, 0}, partition)
-        Storage.delete({:stack, :updating, stack_name}, partition)
-        values
-    end
+    local_drain(partition, stack_name, 0)
   end
 
-  defp local_init(stack_name) do
-    part = Partition.get_partition(stack_name)
-    Storage.put({{:stack, :counter, stack_name}, 0}, part)
+  defp local_drain(_partition, _stack_name, retries)
+       when retries >= @max_spin_retries do
+    []
+  end
+
+  defp local_drain(partition, stack_name, retries) do
+    case acquire_lock(partition, stack_name) do
+      :ok ->
+        try do
+          case Storage.get({:stack, :counter, stack_name}, partition) do
+            [] ->
+              Storage.put({{:stack, :counter, stack_name}, 0}, partition)
+              []
+
+            [{_, 0}] ->
+              []
+
+            [{_, counter}] ->
+              values =
+                Enum.reduce(counter..1//-1, [], fn x, acc ->
+                  case Storage.take({:stack, stack_name, x}, partition) do
+                    [] -> acc
+                    [{_, v}] -> [v | acc]
+                  end
+                end)
+
+              Storage.put({{:stack, :counter, stack_name}, 0}, partition)
+              values
+          end
+        after
+          release_lock(partition, stack_name)
+        end
+
+      :contended ->
+        Process.sleep(1)
+        local_drain(partition, stack_name, retries + 1)
+    end
   end
 
   defp local_count(stack_name) do
@@ -208,111 +239,219 @@ defmodule SuperCache.Stack do
     end
   end
 
-  ## ── Private — distributed mode (Storage.get + ops list for 3PC) ─────────────
+  ## ── Private — distributed mode ──────────────────────────────────────────────
 
   defp dist_do_push(partition, stack_name, value) do
-    case Storage.get({:stack, :counter, stack_name}, partition) do
-      [] ->
-        case Storage.get({:stack, :updating, stack_name}, partition) do
-          [] ->
-            dist_init(stack_name)
-            dist_do_push(partition, stack_name, value)
+    dist_do_push(partition, stack_name, value, 0)
+  end
 
-          _ ->
-            :erlang.yield()
-            dist_do_push(partition, stack_name, value)
+  defp dist_do_push(_partition, _stack_name, _value, retries)
+       when retries >= @max_spin_retries do
+    false
+  end
+
+  defp dist_do_push(partition, stack_name, value, retries) do
+    case acquire_lock(partition, stack_name) do
+      :ok ->
+        try do
+          result =
+            case Storage.get({:stack, :counter, stack_name}, partition) do
+              [] ->
+                DistributedHelpers.apply_write(idx(stack_name), partition, [
+                  {:put, {{:stack, :counter, stack_name}, 1}},
+                  {:put, {{:stack, stack_name, 1}, value}}
+                ])
+
+              [{_, counter}] ->
+                next = counter + 1
+
+                DistributedHelpers.apply_write(idx(stack_name), partition, [
+                  {:put, {{:stack, :counter, stack_name}, next}},
+                  {:put, {{:stack, stack_name, next}, value}}
+                ])
+            end
+
+          case result do
+            :ok -> true
+            {:error, _} = error -> error
+          end
+        after
+          release_lock(partition, stack_name)
         end
 
-      [{_, counter}] ->
-        next = counter + 1
-        lock(partition, stack_name)
-
-        ops = [
-          {:put, {{:stack, :counter, stack_name}, next}},
-          {:put, {{:stack, stack_name, next}, value}}
-        ]
-
-        DistributedHelpers.apply_write(idx(stack_name), partition, ops)
-        unlock(partition, stack_name)
-        true
+      :contended ->
+        Process.sleep(1)
+        dist_do_push(partition, stack_name, value, retries + 1)
     end
   end
 
   defp dist_do_pop(partition, stack_name, default) do
-    case Storage.get({:stack, :counter, stack_name}, partition) do
-      [] ->
-        case Storage.get({:stack, :updating, stack_name}, partition) do
-          [] ->
-            default
+    dist_do_pop(partition, stack_name, default, 0)
+  end
 
-          _ ->
-            :erlang.yield()
-            dist_do_pop(partition, stack_name, default)
+  defp dist_do_pop(_partition, _stack_name, default, retries)
+       when retries >= @max_spin_retries do
+    default
+  end
+
+  defp dist_do_pop(partition, stack_name, default, retries) do
+    case acquire_lock(partition, stack_name) do
+      :ok ->
+        try do
+          pop_locked(partition, stack_name, default)
+        after
+          release_lock(partition, stack_name)
         end
 
-      [{_, 0}] ->
-        default
+      :contended ->
+        Process.sleep(1)
+        dist_do_pop(partition, stack_name, default, retries + 1)
+    end
+  end
 
-      [{_, counter}] ->
-        lock(partition, stack_name)
+  defp pop_locked(partition, stack_name, default) do
+    case Storage.get({:stack, :counter, stack_name}, partition) do
+      [] -> default
+      [{_, 0}] -> default
+      [{_, counter}] -> pop_at(partition, stack_name, counter, default)
+    end
+  end
 
-        {value, ops} =
-          case Storage.get({:stack, stack_name, counter}, partition) do
-            [] ->
-              {default, [{:put, {{:stack, :counter, stack_name}, 0}}]}
+  defp pop_at(partition, stack_name, counter, default) do
+    case Storage.get({:stack, stack_name, counter}, partition) do
+      [] ->
+        apply_value(
+          [{:put, {{:stack, :counter, stack_name}, 0}}],
+          default,
+          partition,
+          stack_name
+        )
 
-            [{_, v}] ->
-              {v,
-               [
-                 {:delete, {:stack, stack_name, counter}},
-                 {:put, {{:stack, :counter, stack_name}, counter - 1}}
-               ]}
-          end
-
-        DistributedHelpers.apply_write(idx(stack_name), partition, ops)
-        unlock(partition, stack_name)
-        value
+      [{_, v}] ->
+        apply_value(
+          [
+            {:delete, {:stack, stack_name, counter}},
+            {:put, {{:stack, :counter, stack_name}, counter - 1}}
+          ],
+          v,
+          partition,
+          stack_name
+        )
     end
   end
 
   defp dist_do_drain(partition, stack_name) do
-    case Storage.get({:stack, :counter, stack_name}, partition) do
-      [] ->
-        []
+    dist_do_drain(partition, stack_name, 0)
+  end
 
-      [{_, 0}] ->
-        []
+  defp dist_do_drain(_partition, _stack_name, retries)
+       when retries >= @max_spin_retries do
+    []
+  end
 
-      [{_, counter}] ->
-        lock(partition, stack_name)
+  defp dist_do_drain(partition, stack_name, retries) do
+    case acquire_lock(partition, stack_name) do
+      :ok ->
+        try do
+          drain_locked(partition, stack_name)
+        after
+          release_lock(partition, stack_name)
+        end
 
-        {values, del_ops} =
-          Enum.reduce(1..counter, {[], []}, fn x, {vs, ops} ->
-            case Storage.get({:stack, stack_name, x}, partition) do
-              [] -> {vs, ops}
-              [{_, v}] -> {[v | vs], [{:delete, {:stack, stack_name, x}} | ops]}
-            end
-          end)
-
-        reset_ops = [{:put, {{:stack, :counter, stack_name}, 0}}]
-        DistributedHelpers.apply_write(idx(stack_name), partition, del_ops ++ reset_ops)
-        unlock(partition, stack_name)
-        values
+      :contended ->
+        Process.sleep(1)
+        dist_do_drain(partition, stack_name, retries + 1)
     end
   end
 
-  defp dist_init(stack_name) do
-    part = Partition.get_partition(stack_name)
+  defp drain_locked(partition, stack_name) do
+    case Storage.get({:stack, :counter, stack_name}, partition) do
+      [] -> []
+      [{_, 0}] -> []
+      [{_, counter}] -> drain_from(partition, stack_name, counter)
+    end
+  end
 
-    DistributedHelpers.apply_write(idx(stack_name), part, [
-      {:put, {{:stack, :counter, stack_name}, 0}}
-    ])
+  defp drain_from(partition, stack_name, counter) do
+    {values, del_ops} =
+      Enum.reduce(1..counter, {[], []}, fn x, {vs, ops} ->
+        case Storage.get({:stack, stack_name, x}, partition) do
+          [] -> {vs, ops}
+          [{_, v}] -> {[v | vs], [{:delete, {:stack, stack_name, x}} | ops]}
+        end
+      end)
+
+    reset_ops = [{:put, {{:stack, :counter, stack_name}, 0}}]
+    apply_value(del_ops ++ reset_ops, values, partition, stack_name)
+  end
+
+  defp apply_value(ops, value, partition, stack_name) do
+    case DistributedHelpers.apply_write(idx(stack_name), partition, ops) do
+      :ok -> value
+      {:error, _} = error -> error
+    end
   end
 
   ## ── Private — shared helpers ─────────────────────────────────────────────────
 
-  defp lock(partition, name), do: Storage.put({{:stack, :updating, name}, true}, partition)
-  defp unlock(partition, name), do: Storage.delete({:stack, :updating, name}, partition)
+  defp acquire_lock(partition, stack_name) do
+    now = System.monotonic_time(:millisecond)
+    lock_key = {:stack, :updating, stack_name}
+    lock_value = {self(), now}
+
+    if Storage.insert_new({lock_key, lock_value}, partition) do
+      :ok
+    else
+      reclaim_lock(partition, lock_key, lock_value, now)
+    end
+  end
+
+  defp reclaim_lock(partition, lock_key, lock_value, now) do
+    case Storage.get(lock_key, partition) do
+      [{_, {holder_pid, locked_at}}] ->
+        if stale_lock?(holder_pid, locked_at, now) do
+          replace_lock(partition, lock_key, lock_value)
+        else
+          :contended
+        end
+
+      [_legacy_or_malformed] ->
+        :contended
+
+      [] ->
+        :contended
+    end
+  end
+
+  # A lock we hold ourselves is never stale: a slow caller must not have its
+  # own critical section reclaimed underneath it.
+  defp stale_lock?(holder_pid, _locked_at, _now) when holder_pid == self(), do: false
+
+  defp stale_lock?(holder_pid, locked_at, now) do
+    not Process.alive?(holder_pid) or now - locked_at > @lock_stale_ms
+  end
+
+  defp replace_lock(partition, lock_key, lock_value) do
+    Storage.delete(lock_key, partition)
+
+    if Storage.insert_new({lock_key, lock_value}, partition) do
+      :ok
+    else
+      :contended
+    end
+  end
+
+  defp release_lock(partition, stack_name) do
+    lock_key = {:stack, :updating, stack_name}
+
+    case Storage.get(lock_key, partition) do
+      [{_, {pid, _}}] when pid == self() ->
+        Storage.delete(lock_key, partition)
+
+      _ ->
+        :ok
+    end
+  end
 
   defp idx(name), do: Partition.get_partition_order(name)
 end

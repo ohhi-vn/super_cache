@@ -5,8 +5,9 @@ defmodule SuperCache.Cluster.ThreePhaseCommitTest do
 
   use ExUnit.Case, async: false
 
-  alias SuperCache.Cluster.{ThreePhaseCommit, TxnRegistry, Manager}
-  alias SuperCache.{Storage, Partition, Config}
+  alias SuperCache.Cluster.Bootstrap
+  alias SuperCache.Cluster.{Manager, ThreePhaseCommit, TxnRegistry}
+  alias SuperCache.{Config, Partition, Storage}
 
   @cache_opts [
     key_pos: 0,
@@ -73,8 +74,8 @@ defmodule SuperCache.Cluster.ThreePhaseCommitTest do
     # exists" on the subsequent start!.
     if SuperCache.started?(), do: SuperCache.stop()
     Process.sleep(50)
-    SuperCache.Cluster.Bootstrap.start!(@cache_opts)
-    on_exit(fn -> SuperCache.Cluster.Bootstrap.stop() end)
+    Bootstrap.start!(@cache_opts)
+    on_exit(fn -> Bootstrap.stop() end)
     :ok
   end
 
@@ -337,9 +338,9 @@ defmodule SuperCache.Cluster.ThreePhaseCommitTest do
         raise "Multi-node tests require distribution. Run with: mix test.cluster"
       end
 
-      SuperCache.Cluster.Bootstrap.stop()
+      Bootstrap.stop()
       Process.sleep(50)
-      SuperCache.Cluster.Bootstrap.start!(@cluster_opts)
+      Bootstrap.start!(@cluster_opts)
 
       {peer1, node1} = start_peer(:tpc_node1)
       {peer2, node2} = start_peer(:tpc_node2)
@@ -367,9 +368,9 @@ defmodule SuperCache.Cluster.ThreePhaseCommitTest do
       on_exit(fn ->
         stop_peer(peer1)
         stop_peer(peer2)
-        SuperCache.Cluster.Bootstrap.stop()
+        Bootstrap.stop()
         Process.sleep(50)
-        SuperCache.Cluster.Bootstrap.start!(@cache_opts)
+        Bootstrap.start!(@cache_opts)
       end)
 
       %{node1: node1, node2: node2, peer1: peer1, peer2: peer2}
@@ -525,11 +526,9 @@ defmodule SuperCache.Cluster.ThreePhaseCommitTest do
   end
 
   defp stop_peer(peer) do
-    try do
-      :peer.stop(peer)
-    catch
-      :exit, _ -> :ok
-    end
+    :peer.stop(peer)
+  catch
+    :exit, _ -> :ok
   end
 
   defp wait_until(fun, timeout \\ 3_000, interval \\ 50) do

@@ -1,6 +1,7 @@
 defmodule SuperCache.ConfigTest do
   use ExUnit.Case, async: false
 
+  alias SuperCache.Cluster.Manager
   alias SuperCache.Config
 
   setup_all do
@@ -79,6 +80,36 @@ defmodule SuperCache.ConfigTest do
 
       Config.set_config(:cluster, :distributed)
       assert Config.get_config(:cluster) == :distributed
+
+      Config.set_config(:replication_mode, :strong)
+      assert Config.get_config(:replication_mode) == :strong
+
+      Config.set_config(:replication_factor, 3)
+      assert Config.get_config(:replication_factor) == 3
+
+      Config.set_config(:started, true)
+      assert Config.get_config(:started) == true
+    end
+
+    test "distributed fast keys are readable while Config is suspended" do
+      Config.set_config(:replication_mode, :sync)
+      Config.set_config(:replication_factor, 4)
+      Config.set_config(:started, true)
+
+      :ok = :sys.suspend(Config)
+
+      try do
+        # A GenServer call would block here; persistent_term reads must not.
+        assert Config.get_config(:replication_mode) == :sync
+        assert Config.get_config(:replication_factor) == 4
+        assert Config.get_config(:started) == true
+
+        assert Manager.replication_mode() == :sync
+        assert Manager.replication_factor() == 4
+        assert SuperCache.started?() == true
+      after
+        :sys.resume(Config)
+      end
     end
 
     test "fast keys survive GenServer restart" do

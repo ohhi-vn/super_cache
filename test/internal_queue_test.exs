@@ -115,4 +115,14 @@ defmodule SuperCache.Internal.QueueTest do
   test "down?/1 is true for never-started names" do
     assert Queue.down?(:"Never.Started.Queue")
   end
+
+  test "buffered items are delivered in FIFO insertion order" do
+    pid = Queue.start(@name)
+    Queue.add(pid, :first)
+    Queue.add(pid, :second)
+    Queue.add(pid, :third)
+
+    assert [:first, :second, :third] == Queue.get(pid)
+    Queue.stop(pid)
+  end
 end

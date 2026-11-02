@@ -83,20 +83,20 @@ defmodule SuperCache.Cluster.Bootstrap do
 
   require Logger
 
-  alias SuperCache.{Config, Partition, Storage, Buffer}
+  alias SuperCache.{Buffer, Config, Partition, Storage}
   alias SuperCache.Cluster.{Manager, NodeMonitor, ThreePhaseCommit}
 
   @default_opts [
-    key_pos:            0,
-    partition_pos:      0,
-    cluster:            :distributed,
+    key_pos: 0,
+    partition_pos: 0,
+    cluster: :distributed,
     replication_factor: 2,
-    replication_mode:   :async,
-    table_type:         :set
+    replication_mode: :async,
+    table_type: :set
   ]
 
   @valid_table_types [:set, :ordered_set, :bag, :duplicate_bag]
-  @valid_rep_modes   [:async, :sync, :strong]
+  @valid_rep_modes [:async, :sync, :strong]
 
   # Keys forwarded verbatim to NodeMonitor.reconfigure/1.
   # All three are optional; omitting them preserves NodeMonitor's current
@@ -112,7 +112,6 @@ defmodule SuperCache.Cluster.Bootstrap do
     :replication_factor,
     :replication_mode
   ]
-
 
   # ── Public API ───────────────────────────────────────────────────────────────
 
@@ -130,6 +129,11 @@ defmodule SuperCache.Cluster.Bootstrap do
 
     Config.clear_config()
     Enum.each(opts, fn {k, v} -> Config.set_config(k, v) end)
+
+    # Mark not-ready until partitions, storage, buffers, recovery, and the
+    # initial full sync below have all completed.  Written explicitly after
+    # opts are applied so a caller-supplied `:started` cannot bypass it.
+    Config.set_config(:started, false)
 
     num_partition = resolve_num_partition()
     resolve_table_type()
@@ -183,9 +187,7 @@ defmodule SuperCache.Cluster.Bootstrap do
       live = Manager.live_nodes() -- [node()]
 
       if live != [] do
-        Logger.info(
-          "super_cache, cluster.bootstrap, requesting full sync from: #{inspect(live)}"
-        )
+        Logger.info("super_cache, cluster.bootstrap, requesting full sync from: #{inspect(live)}")
         Manager.full_sync()
       end
     end
@@ -203,7 +205,7 @@ defmodule SuperCache.Cluster.Bootstrap do
   Stop SuperCache and release all ETS resources.
   """
   @spec stop() :: :ok
-  def stop() do
+  def stop do
     # Mark not-running first so buffer streams observe the shutdown and exit
     # quietly instead of resurrecting queues during teardown.
     Config.set_config(:started, false)
@@ -212,10 +214,11 @@ defmodule SuperCache.Cluster.Bootstrap do
 
     case Config.get_config(:num_partition) do
       nil -> :ok
-      n   -> Storage.stop(n)
+      n -> Storage.stop(n)
     end
 
     Partition.stop()
+    SuperCache.Struct.clear_key_field_cache()
     :ok
   end
 
@@ -226,7 +229,7 @@ defmodule SuperCache.Cluster.Bootstrap do
   Called remotely by `Manager.node_running?/1` via `:erpc`.
   """
   @spec running?() :: boolean
-  def running?() do
+  def running? do
     Config.get_config(:cluster) == :distributed and
       Config.get_config(:started, false) == true
   end
@@ -244,7 +247,7 @@ defmodule SuperCache.Cluster.Bootstrap do
       #       table_type: :set, replication_factor: 2, replication_mode: :async}
   """
   @spec export_config() :: map
-  def export_config() do
+  def export_config do
     Map.new(@config_keys, fn k -> {k, Config.get_config(k)} end)
   end
 
@@ -266,7 +269,7 @@ defmodule SuperCache.Cluster.Bootstrap do
   @spec fetch_partition_map(pos_integer) :: [{non_neg_integer, {node, [node]}}]
   def fetch_partition_map(num) do
     Enum.map(0..(num - 1), fn idx ->
-      {idx, SuperCache.Cluster.Manager.get_replicas(idx)}
+      {idx, Manager.get_replicas(idx)}
     end)
   end
 
@@ -298,44 +301,85 @@ defmodule SuperCache.Cluster.Bootstrap do
       end
     end
 
+    validate_replication_mode_opt!(opts)
+    validate_replication_factor_opt!(opts)
+    validate_num_partition_opt!(opts)
+    validate_node_source!(opts)
+  end
+
+  defp validate_replication_mode_opt!(opts) do
     if mode = Keyword.get(opts, :replication_mode) do
       unless mode in @valid_rep_modes do
         raise ArgumentError,
-          "invalid :replication_mode #{inspect(mode)}, must be one of #{inspect(@valid_rep_modes)}"
+              "invalid :replication_mode #{inspect(mode)}, must be one of #{inspect(@valid_rep_modes)}"
       end
     end
+  end
 
-    # Validate node-source options eagerly so errors surface at the call site
-    # rather than inside NodeMonitor's GenServer init.
-    validate_node_source!(opts)
+  defp validate_replication_factor_opt!(opts) do
+    case Keyword.get(opts, :replication_factor) do
+      nil ->
+        :ok
+
+      n when is_integer(n) and n >= 1 ->
+        :ok
+
+      other ->
+        raise ArgumentError,
+              "replication_factor must be a positive integer, got: #{inspect(other)}"
+    end
+  end
+
+  defp validate_num_partition_opt!(opts) do
+    case Keyword.get(opts, :num_partition) do
+      nil ->
+        :ok
+
+      n when is_integer(n) and n > 0 ->
+        :ok
+
+      other ->
+        raise ArgumentError,
+              "num_partition must be a positive integer, got: #{inspect(other)}"
+    end
   end
 
   # Mirrors the resolve_source/1 guards in NodeMonitor so failures are raised
   # in the caller's process with a clear Bootstrap context in the stack trace.
   defp validate_node_source!(opts) do
-    has_nodes     = Keyword.has_key?(opts, :nodes)
+    has_nodes = Keyword.has_key?(opts, :nodes)
     has_nodes_mfa = Keyword.has_key?(opts, :nodes_mfa)
 
     if has_nodes and has_nodes_mfa do
       raise ArgumentError, "only one of :nodes or :nodes_mfa may be specified, not both"
     end
 
-    if has_nodes do
-      nodes = Keyword.fetch!(opts, :nodes)
+    validate_nodes_opt!(opts, has_nodes)
+    validate_nodes_mfa_opt!(opts, has_nodes_mfa)
+    validate_refresh_opt!(opts)
+  end
 
-      unless is_list(nodes) and Enum.all?(nodes, &is_atom/1) do
-        raise ArgumentError, ":nodes must be a list of node atoms"
-      end
+  defp validate_nodes_opt!(_opts, false), do: :ok
+
+  defp validate_nodes_opt!(opts, true) do
+    nodes = Keyword.fetch!(opts, :nodes)
+
+    unless is_list(nodes) and Enum.all?(nodes, &is_atom/1) do
+      raise ArgumentError, ":nodes must be a list of node atoms"
     end
+  end
 
-    if has_nodes_mfa do
-      mfa = Keyword.fetch!(opts, :nodes_mfa)
+  defp validate_nodes_mfa_opt!(_opts, false), do: :ok
 
-      unless match?({m, f, a} when is_atom(m) and is_atom(f) and is_list(a), mfa) do
-        raise ArgumentError, ":nodes_mfa must be a {module, function, args} tuple"
-      end
+  defp validate_nodes_mfa_opt!(opts, true) do
+    mfa = Keyword.fetch!(opts, :nodes_mfa)
+
+    unless match?({m, f, a} when is_atom(m) and is_atom(f) and is_list(a), mfa) do
+      raise ArgumentError, ":nodes_mfa must be a {module, function, args} tuple"
     end
+  end
 
+  defp validate_refresh_opt!(opts) do
     if refresh_ms = Keyword.get(opts, :refresh_ms) do
       unless is_integer(refresh_ms) and refresh_ms > 0 do
         raise ArgumentError, ":refresh_ms must be a positive integer"
@@ -354,54 +398,21 @@ defmodule SuperCache.Cluster.Bootstrap do
 
     mismatches =
       live_nodes
-      |> Task.async_stream(
-        fn peer ->
-          case fetch_remote_config(peer) do
-            {:ok, remote_cfg} ->
-              diffs =
-                Enum.flat_map(@config_keys, fn key ->
-                  local_val  = Map.get(local_cfg, key)
-                  remote_val = Map.get(remote_cfg, key)
-
-                  if local_val == remote_val do
-                    []
-                  else
-                    [{key, local_val, remote_val}]
-                  end
-                end)
-
-              {peer, diffs}
-
-            {:error, reason} ->
-              Logger.warning(
-                "super_cache, cluster.bootstrap, could not fetch config from " <>
-                  "#{inspect(peer)}: #{inspect(reason)} — skipping peer"
-              )
-              {peer, :unreachable}
-          end
-        end,
+      |> Task.async_stream(&peer_config_diff(&1, local_cfg),
         timeout: 8_000,
         on_timeout: :kill_task
       )
       |> Enum.flat_map(fn
         {:ok, {_peer, :unreachable}} -> []
-        {:ok, {_peer, []}}          -> []
-        {:ok, {peer, diffs}}        -> [{peer, diffs}]
-        _                           -> []
+        {:ok, {_peer, []}} -> []
+        {:ok, {peer, diffs}} -> [{peer, diffs}]
+        _ -> []
       end)
 
     if mismatches == [] do
       Logger.info("super_cache, cluster.bootstrap, config verified — all peers agree")
     else
-      details =
-        Enum.map_join(mismatches, "\n", fn {peer, diffs} ->
-          diff_lines =
-            Enum.map_join(diffs, "\n", fn {key, local_val, remote_val} ->
-              "      #{inspect(key)}: local=#{inspect(local_val)}, peer=#{inspect(remote_val)}"
-            end)
-
-          "  peer #{inspect(peer)}:\n#{diff_lines}"
-        end)
+      details = mismatch_details(mismatches)
 
       raise ArgumentError, """
       SuperCache config mismatch — this node cannot join the cluster.
@@ -416,14 +427,53 @@ defmodule SuperCache.Cluster.Bootstrap do
     end
   end
 
-  defp fetch_remote_config(peer) do
-    try do
-      cfg = :erpc.call(peer, __MODULE__, :export_config, [], 5_000)
-      {:ok, cfg}
-    catch
-      kind, reason ->
-        {:error, {kind, reason}}
+  defp peer_config_diff(peer, local_cfg) do
+    case fetch_remote_config(peer) do
+      {:ok, remote_cfg} ->
+        {peer, config_diffs(local_cfg, remote_cfg)}
+
+      {:error, reason} ->
+        Logger.warning(
+          "super_cache, cluster.bootstrap, could not fetch config from " <>
+            "#{inspect(peer)}: #{inspect(reason)} — skipping peer"
+        )
+
+        {peer, :unreachable}
     end
+  end
+
+  defp config_diffs(local_cfg, remote_cfg) do
+    Enum.flat_map(@config_keys, fn key ->
+      local_val = Map.get(local_cfg, key)
+      remote_val = Map.get(remote_cfg, key)
+
+      if local_val == remote_val do
+        []
+      else
+        [{key, local_val, remote_val}]
+      end
+    end)
+  end
+
+  defp mismatch_details(mismatches) do
+    Enum.map_join(mismatches, "\n", fn {peer, diffs} -> peer_diff_lines(peer, diffs) end)
+  end
+
+  defp peer_diff_lines(peer, diffs) do
+    diff_lines =
+      Enum.map_join(diffs, "\n", fn {key, local_val, remote_val} ->
+        "      #{inspect(key)}: local=#{inspect(local_val)}, peer=#{inspect(remote_val)}"
+      end)
+
+    "  peer #{inspect(peer)}:\n#{diff_lines}"
+  end
+
+  defp fetch_remote_config(peer) do
+    cfg = :erpc.call(peer, __MODULE__, :export_config, [], 5_000)
+    {:ok, cfg}
+  catch
+    kind, reason ->
+      {:error, {kind, reason}}
   end
 
   # ── Private — connection pre-warming ─────────────────────────────────────────
@@ -461,7 +511,7 @@ defmodule SuperCache.Cluster.Bootstrap do
 
   # ── Private — config resolution ──────────────────────────────────────────────
 
-  defp resolve_num_partition() do
+  defp resolve_num_partition do
     case Config.get_config(:num_partition, :not_found) do
       :not_found ->
         n = Partition.get_schedulers()
@@ -473,22 +523,22 @@ defmodule SuperCache.Cluster.Bootstrap do
     end
   end
 
-  defp resolve_table_type() do
+  defp resolve_table_type do
     case Config.get_config(:table_type, :not_found) do
-      :not_found                     -> Config.set_config(:table_type, :set)
+      :not_found -> Config.set_config(:table_type, :set)
       t when t in @valid_table_types -> :ok
       bad -> raise ArgumentError, "unsupported table type: #{inspect(bad)}"
     end
   end
 
-  defp resolve_table_prefix() do
+  defp resolve_table_prefix do
     case Config.get_config(:table_prefix, :not_found) do
       :not_found -> Config.set_config(:table_prefix, "SuperCache.Storage.Ets")
-      _          -> :ok
+      _ -> :ok
     end
   end
 
-  defp resolve_replication_mode() do
+  defp resolve_replication_mode do
     case Config.get_config(:replication_mode, :not_found) do
       :not_found -> Config.set_config(:replication_mode, :async)
       m when m in @valid_rep_modes -> :ok

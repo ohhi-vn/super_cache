@@ -1,7 +1,7 @@
 defmodule SuperCache.PartitionTest do
   use ExUnit.Case, async: false
 
-  alias SuperCache.{Partition, Config}
+  alias SuperCache.{Config, Partition}
 
   @data {:a, "hello"}
 
@@ -19,7 +19,7 @@ defmodule SuperCache.PartitionTest do
     order = Partition.get_pattition_order(@data)
     prefix = Config.get_config(:table_prefix)
     partition = String.to_atom("#{prefix}_#{order}")
-    assert  partition == Partition.get_partition(@data)
+    assert partition == Partition.get_partition(@data)
   end
 
   test "get all partitions" do

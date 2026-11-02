@@ -47,7 +47,57 @@ config :super_cache,
   num_partition:      8            # Must match across ALL nodes
 ```
 
-### Peer Discovery
+### Fast Configuration Keys
+
+`:replication_mode`, `:replication_factor`, and `:started` are promoted to
+fast keys in `SuperCache.Config`.  They are stored in `:persistent_term` and
+read without a GenServer hop, so the hot distributed path never blocks on the
+Config process.  A suspended or down Config process still serves all three
+values:
+
+- `:replication_mode` — `:async`, `:sync`, or `:strong`
+- `:replication_factor` — total copies (primary included)
+- `:started` — liveness flag set by bootstrap
+
+`Manager.replication_mode/0` and `Manager.replication_factor/0` read these
+values directly.  Bootstrap sets `:started` to `false` while initializing and
+to `true` only after partitions, storage, buffers, recovery, and the initial
+full sync are complete; it clears the flag again on stop.
+
+### Latency Ring Buffer
+
+`Metrics.push_latency/2` writes into a fixed-size ETS ring buffer from the
+calling process.  Each key keeps at most 256 samples; the oldest slot is
+overwritten when the ring wraps.  Samples are tagged with a monotonic
+sequence number, so `get_latency_samples/1` returns them newest first and
+percentile reads are unaffected by concurrent writers.  No message is sent to
+the Metrics GenServer, so throughput is bounded only by ETS.
+
+### Reliability Counters
+
+New counters are exposed through `SuperCache.Cluster.Stats.reliability/0` and
+the `:reliability` field of `Stats.cluster/0`:
+
+| Counter | Meaning |
+|---------|---------|
+| `async_failures` | Async replication worker failures |
+| `async_drops` | Async replication deliveries dropped |
+| `sync_failures` | Sync quorum failures |
+| `strong_failures` | Strong (WAL) write failures |
+| `wal_backpressure` | Strong writes rejected due to WAL backpressure |
+| `read_fallbacks` | Reads that fell back to a stale replica or primary |
+| `health_timeouts` | Health-check timeouts |
+| `membership_changes` | Partition-map updates caused by membership changes |
+| `handoff_successes` | Successful partition handoffs |
+| `handoff_failures` | Failed partition handoffs |
+| `transfer_failures` | Partition transfers that reported a failure |
+
+```elixir
+SuperCache.Cluster.Stats.reliability()
+# => %{async_failures: 0, async_drops: 0, ...}
+
+SuperCache.Cluster.Stats.cluster().reliability
+```
 
 Configure cluster peers for automatic connection:
 
@@ -93,6 +143,21 @@ SuperCache offers three replication modes, each trading off latency vs. durabili
 ### Async Mode
 
 Fire-and-forget replication via a `Task.Supervisor` worker pool. The primary applies the write locally and immediately returns `:ok`. Replication happens in the background. The pool is a permanent child of the application supervision tree, so replica delivery is never tied to the lifetime of whichever process happened to trigger a write.
+
+Workers retry transient replica failures with bounded backoff. Configure the
+budget with:
+
+```elixir
+config :super_cache, :replication,
+  async_max_retries: 3,
+  async_retry_backoff_ms: 50
+```
+
+Exhausted retries increment `replication/async_failures`; deliveries that still
+fail are counted in `replication/async_drops`. A full or unavailable worker pool
+also increments `async_drops` immediately. These counters are exposed through
+`SuperCache.Cluster.Stats.reliability/0`. Async failures never block the caller
+or add a task-result message to its mailbox.
 
 ```elixir
 config :super_cache,
@@ -170,15 +235,33 @@ Reads from the local node's ETS table. Fastest option (~10µs) but may return st
 Routes the read to the partition's primary node. Guarantees reading the most recent write for that partition. Adds one network round-trip (~100-300µs depending on network).
 
 ### Quorum Read (Early Termination)
-Reads from all replicas and returns as soon as a **strict majority** agrees on the result. Uses `Task.yield` + selective receive for immediate notification when any task completes — no polling overhead.
+Reads from every node holding the partition and returns as soon as a **strict majority** agrees on the result. Agreement is computed by `SuperCache.Cluster.Quorum.await/4`, which uses selective receive and a single deadline — there is no polling and no per-task wait.
 
 **How it works**:
-1. Launch `Task.async` for each replica (including primary)
-2. Await tasks one-by-one with `Task.yield`
-3. Track result frequencies
-4. Return immediately when any result reaches quorum
-5. Kill remaining tasks to free resources
-6. Fall back to primary if no majority is reached
+1. Build one `{node, task_fun}` entry for the primary and each replica
+2. Start the tasks under `SuperCache.Cluster.Quorum.Pool`
+3. Tally results as they arrive; `nil` is a valid value and can win
+4. Return immediately when any result reaches a strict majority
+5. Kill every remaining task and flush its messages
+6. Fall back to the primary result if no majority forms before the deadline
+
+**Counting rules**:
+- Each node contributes at most one vote.
+- Duplicate node entries are rejected before any task starts.
+- A duplicate acknowledgement cannot advance the quorum; only a majority of distinct nodes succeeds.
+- At the deadline, unfinished nodes are recorded as `:timeout` and the call returns without waiting for them.
+
+```elixir
+entries = [
+  {:primary@host, fn -> read_primary() end},
+  {:replica1@host, fn -> read_replica1() end},
+  {:replica2@host, fn -> read_replica2() end}
+]
+
+SuperCache.Cluster.Quorum.await(entries, 2, 1_000)
+# => {:ok, [record], [:primary@host, :replica1@host]}
+# or {:error, :timeout, %{replica2@host: :timeout, ...}}
+```
 
 **Pros**: Strong consistency, tolerates slow/unresponsive replicas, early termination saves time
 **Cons**: Highest read latency (~100-200µs), more network traffic
@@ -192,6 +275,116 @@ SuperCache.Cluster.Router.track_write(partition_idx)
 SuperCache.Cluster.Router.ryw_recent?(partition_idx)
 SuperCache.Cluster.Router.resolve_read_mode(mode, partition_idx)
 ```
+
+## Distributed Error Contract
+
+Failures that cross a node boundary are normalized to
+`SuperCache.Cluster.Error` before they reach application code.  The
+exception carries enough context to identify what failed and where:
+
+| Field       | Meaning                                                     |
+|-------------|-------------------------------------------------------------|
+| `operation` | Operation that failed, such as `:put` or `{Module, :read}` |
+| `partition` | Partition index the operation targeted, when known          |
+| `node`      | Node the call was sent to, when known                       |
+| `mode`      | Replication or read mode active for the operation           |
+| `reason`    | Normalized reason (`:nodedown`, `:timeout`, …)              |
+
+`SuperCache.Cluster.Rpc` is the single `:erpc` boundary used by distributed
+operations:
+
+```elixir
+# Returns {:ok, value} or {:error, %SuperCache.Cluster.Error{}}
+SuperCache.Cluster.Rpc.call(primary, __MODULE__, :local_read, [0, :get, :key],
+  partition: 0,
+  mode: :primary
+)
+
+# Raises %SuperCache.Cluster.Error{} on failure
+SuperCache.Cluster.Rpc.call!(primary, __MODULE__, :local_read, [0, :get, :key])
+
+# Convert a raw reason and context without making a call
+SuperCache.Cluster.Rpc.normalize({:erpc, :timeout}, operation: :put, partition: 0)
+```
+
+`Rpc.call/5` converts disconnections, timeouts, remote exceptions, exits,
+and throws into the same exception shape.  Raw `:exit` signals and
+transport-specific tuples such as `{:erpc, :noconnection}` never escape to
+the caller.
+
+### Bang and non-bang APIs
+
+The public API follows one rule in both local and distributed mode:
+
+- **Bang APIs** (`put!/1`, `get!/2`, `delete!/1`, …) raise the documented
+  exception on failure.
+- **Non-bang APIs** (`put/1`, `get/2`, `delete/1`, …) return
+  `{:error, exception}` and never raise or leak an exit.
+
+```elixir
+# Raises %SuperCache.Cluster.Error{} if the primary is unreachable
+SuperCache.put!({:user, 1, "Alice"})
+
+# Returns {:error, %SuperCache.Cluster.Error{}} instead
+case SuperCache.put({:user, 1, "Alice"}) do
+  true -> :stored
+  {:error, %SuperCache.Cluster.Error{} = error} -> {:failed, Exception.message(error)}
+end
+```
+
+A successful call keeps its existing return shape (`true`, `:ok`, `[tuple]`,
+and so on).  Only failures gain the normalized error tuple.
+
+### Write failure behavior change
+
+Write call sites that previously ignored replication outcomes now surface them:
+a sync or strong write that cannot reach its required quorum raises the
+documented exception (bang) or returns `{:error, exception}` (non-bang) instead
+of reporting success. This is intentional — the previous silent-success behavior
+made a write appear durable when replicas had not applied it. Async writes are
+unchanged: they still return after the local apply and supervised handoff, and
+replica failures are logged and counted rather than returned.
+
+## Replication Ack Deduplication
+
+Strong-mode WAL commits count **at most one acknowledgement per replica node**.
+A duplicate ack from the same node is ignored, so a single misbehaving replica
+cannot satisfy a majority on its own. Ack bookkeeping rows are removed when the
+quorum is reached or the commit times out, so no per-sequence state leaks.
+
+## Read Failover Rules
+
+- `:primary` and `:quorum` reads fall back to a **local** read only when the
+  local node actually holds a replica for that partition (`has_partition?/1`).
+- With no local replica, the read raises `SuperCache.Cluster.Error`
+  (bang APIs) or returns `{:error, exception}` (non-bang APIs) instead of
+  returning `[]`.
+- Every fallback increments the `read_fallbacks` counter; failures with no
+  usable copy increment the read error counter.
+
+## Node-Local Health Checks
+
+Each node's health monitor evaluates only its own node: local partition
+counts, local error metrics, and replication lag for partitions it owns.
+`cluster_health/0` aggregates `local_node_health/0` from peers through a
+bounded RPC and marks unreachable peers as `:degraded`/`:unknown` using the
+last aggregated result. Replication-lag probes are unique per check
+(`{:health_probe, node(), ref}`) and are removed from the primary and every
+replica even when the check times out. Health cycles are bounded by
+`:cycle_deadline_ms` (default `30_000` ms) and skipped until the cache has
+completed bootstrap; a timed-out cycle records `:unhealthy`/`:unknown` statuses
+and increments `health_timeouts`.
+
+## Partition Handoff
+
+When membership changes, exactly one deterministic donor transfers each
+affected partition: the primary if it is alive and not the target, otherwise
+the first live replica. Concurrent transfers for the same
+`{partition, target}` pair are coalesced in an ETS table, records are streamed
+in bounded batches with bounded retry, and the result reports the exact
+failed and total record counts. Each partition-map update increments
+`membership_changes`; successful handoffs increment `handoff_successes`, while
+failed handoffs increment both `handoff_failures` and `transfer_failures`.
 
 ## Data Flow
 
@@ -451,6 +644,19 @@ SuperCache.Cluster.Replicator.apply_op(partition_idx, op_name, op_arg)
 SuperCache.Cluster.Replicator.apply_op_batch(partition_idx, op_name, op_args)
 ```
 
+### Cluster.Quorum
+
+Deadline-bound quorum collection shared by sync writes and quorum reads.
+`await/4` takes `{node, task_fun}` entries, a required vote count, and a
+timeout; it returns `{:ok, value, voters}` or `{:error, reason, results}`.
+Tasks run under `SuperCache.Cluster.Quorum.Pool`, and every remaining task
+is killed before the call returns.
+
+```elixir
+SuperCache.Cluster.Quorum.await(entries, required, timeout_ms)
+SuperCache.Cluster.Quorum.await(entries, required, timeout_ms, pool: MyPool)
+```
+
 ### Cluster.WAL
 
 Write-Ahead Log for strong consistency. Replaces heavy 3PC with ~200µs latency.
@@ -518,6 +724,7 @@ SuperCache.Cluster.Stats.replica_partitions()
 SuperCache.Cluster.Stats.node_partitions(target_node)
 SuperCache.Cluster.Stats.three_phase_commit()
 SuperCache.Cluster.Stats.api()
+SuperCache.Cluster.Stats.reliability()
 SuperCache.Cluster.Stats.print(stats)
 SuperCache.Cluster.Stats.record(key, %{latency_us: lat, error: err})
 SuperCache.Cluster.Stats.record_tpc(event, opts)
@@ -665,6 +872,10 @@ SuperCache.Cluster.HealthMonitor.partition_balance()
 - `SuperCache.Cluster.Replicator.replicate/3` — Replicate operation to replicas
 - `SuperCache.Cluster.Replicator.replicate_batch/3` — Batch replication
 - `SuperCache.Cluster.Replicator.push_partition/2` — Sync partition to target node
+
+### Quorum
+
+- `SuperCache.Cluster.Quorum.await/4` — Collect a deadline-bound quorum from `{node, task_fun}` entries
 
 ### WAL
 

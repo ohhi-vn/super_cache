@@ -6,7 +6,7 @@ defmodule SuperCache.Cluster.HealthMonitorTest do
   use ExUnit.Case, async: false
 
   alias SuperCache.Cluster.{HealthMonitor, Manager}
-  alias SuperCache.{Partition, Storage, Config}
+  alias SuperCache.{Config, Partition, Storage}
 
   @moduletag :cluster
   @moduletag :sequential

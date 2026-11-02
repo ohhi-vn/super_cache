@@ -102,6 +102,7 @@ defmodule SuperCache.Cluster.RouterRywTest do
 
       # Set all entries to expired
       now = System.monotonic_time(:millisecond)
+
       Enum.each([1, 2, 3], fn order ->
         :ets.insert(@ryw_table, {{self(), order}, now - 1_000})
       end)

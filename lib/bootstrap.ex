@@ -50,7 +50,8 @@ defmodule SuperCache.Bootstrap do
   require Logger
   require SuperCache.Log
 
-  alias SuperCache.{Config, Partition, Storage, Buffer}
+  alias SuperCache.{Buffer, Config, Partition, Storage}
+  alias SuperCache.Cluster.Bootstrap, as: ClusterBootstrap
 
   @default_opts [key_pos: 0, partition_pos: 0, cluster: :local, table_type: :set]
   @valid_table_types [:set, :ordered_set, :bag, :duplicate_bag]
@@ -67,7 +68,7 @@ defmodule SuperCache.Bootstrap do
       # => :ok
   """
   @spec start!() :: :ok
-  def start!(), do: start!(@default_opts)
+  def start!, do: start!(@default_opts)
 
   @doc """
   Start SuperCache with the given keyword options.
@@ -99,7 +100,7 @@ defmodule SuperCache.Bootstrap do
       case Keyword.get(opts, :cluster, :local) do
         :distributed ->
           Logger.info("super_cache, bootstrap, starting in distributed mode")
-          SuperCache.Cluster.Bootstrap.start!(opts)
+          ClusterBootstrap.start!(opts)
 
         :local ->
           Logger.info("super_cache, bootstrap, starting in local mode")
@@ -132,7 +133,7 @@ defmodule SuperCache.Bootstrap do
       # => :ok
   """
   @spec stop() :: :ok
-  def stop() do
+  def stop do
     Logger.info("super_cache, bootstrap, stopping...")
     t0 = System.monotonic_time(:millisecond)
 
@@ -140,7 +141,7 @@ defmodule SuperCache.Bootstrap do
       case Config.get_config(:cluster, :local) do
         :distributed ->
           Logger.info("super_cache, bootstrap, stopping distributed mode")
-          SuperCache.Cluster.Bootstrap.stop()
+          ClusterBootstrap.stop()
 
         :local ->
           local_stop()
@@ -164,6 +165,11 @@ defmodule SuperCache.Bootstrap do
 
     # Apply new configuration
     Enum.each(opts, fn {k, v} -> Config.set_config(k, v) end)
+
+    # Mark not-ready until every component below has started successfully.
+    # This is written explicitly after opts are applied so a caller-supplied
+    # `:started` value cannot advertise readiness during initialization.
+    Config.set_config(:started, false)
 
     # Resolve defaults for missing options
     num = resolve_num_partition()
@@ -190,7 +196,7 @@ defmodule SuperCache.Bootstrap do
     end
   end
 
-  defp local_stop() do
+  defp local_stop do
     Logger.info("super_cache, bootstrap, stopping local mode components...")
 
     # Mark not-running first so buffer streams observe the shutdown and exit
@@ -220,6 +226,8 @@ defmodule SuperCache.Bootstrap do
 
     Partition.stop()
     SuperCache.Log.debug(fn -> "super_cache, bootstrap, partition registry cleared" end)
+
+    SuperCache.Struct.clear_key_field_cache()
 
     Logger.info("super_cache, bootstrap, local mode stopped")
     :ok
@@ -253,7 +261,7 @@ defmodule SuperCache.Bootstrap do
     end
   end
 
-  defp start_buffers() do
+  defp start_buffers do
     num_schedulers = Partition.get_schedulers()
     SuperCache.Log.debug(fn -> "super_cache, bootstrap, creating #{num_schedulers} buffer(s)" end)
 
@@ -270,25 +278,39 @@ defmodule SuperCache.Bootstrap do
   # ── Private — validation ─────────────────────────────────────────────────────
 
   defp validate!(opts) do
-    unless Keyword.keyword?(opts),
-      do: raise(ArgumentError, "options must be a keyword list, got: #{inspect(opts)}")
+    validate_keyword!(opts)
+    validate_required_positions!(opts)
+    validate_cluster!(opts)
+    validate_table_type!(opts)
+    validate_num_partition!(opts)
+    validate_replication_factor!(opts)
+    validate_replication_mode!(opts)
+    warn_replication_factor!(opts)
+    :ok
+  end
 
-    # Validate required options
-    for key <- [:key_pos, :partition_pos] do
-      unless Keyword.has_key?(opts, key),
-        do: raise(ArgumentError, "missing required option: #{inspect(key)}")
+  defp validate_keyword!(opts) do
+    unless Keyword.keyword?(opts) do
+      raise ArgumentError, "options must be a keyword list, got: #{inspect(opts)}"
+    end
+  end
+
+  defp validate_required_positions!(opts) do
+    Enum.each([:key_pos, :partition_pos], fn key ->
+      unless Keyword.has_key?(opts, key) do
+        raise ArgumentError, "missing required option: #{inspect(key)}"
+      end
 
       value = Keyword.fetch!(opts, key)
 
-      unless is_integer(value) and value >= 0,
-        do:
-          raise(
-            ArgumentError,
-            "#{inspect(key)} must be a non-negative integer, got: #{inspect(value)}"
-          )
-    end
+      unless is_integer(value) and value >= 0 do
+        raise ArgumentError,
+              "#{inspect(key)} must be a non-negative integer, got: #{inspect(value)}"
+      end
+    end)
+  end
 
-    # Validate cluster mode
+  defp validate_cluster!(opts) do
     case Keyword.get(opts, :cluster, :local) do
       mode when mode in [:local, :distributed] ->
         :ok
@@ -297,8 +319,9 @@ defmodule SuperCache.Bootstrap do
         raise ArgumentError,
               "unsupported cluster mode: #{inspect(other)}, expected :local or :distributed"
     end
+  end
 
-    # Validate table type if provided
+  defp validate_table_type!(opts) do
     case Keyword.get(opts, :table_type) do
       nil ->
         :ok
@@ -310,8 +333,9 @@ defmodule SuperCache.Bootstrap do
         raise ArgumentError,
               "unsupported table_type: #{inspect(other)}, expected one of #{inspect(@valid_table_types)}"
     end
+  end
 
-    # Validate num_partition if provided
+  defp validate_num_partition!(opts) do
     case Keyword.get(opts, :num_partition) do
       nil ->
         :ok
@@ -322,8 +346,9 @@ defmodule SuperCache.Bootstrap do
       other ->
         raise ArgumentError, "num_partition must be a positive integer, got: #{inspect(other)}"
     end
+  end
 
-    # Validate replication_factor if provided
+  defp validate_replication_factor!(opts) do
     case Keyword.get(opts, :replication_factor) do
       nil ->
         :ok
@@ -335,8 +360,9 @@ defmodule SuperCache.Bootstrap do
         raise ArgumentError,
               "replication_factor must be a positive integer, got: #{inspect(other)}"
     end
+  end
 
-    # Validate replication_mode if provided
+  defp validate_replication_mode!(opts) do
     case Keyword.get(opts, :replication_mode) do
       nil ->
         :ok
@@ -348,8 +374,9 @@ defmodule SuperCache.Bootstrap do
         raise ArgumentError,
               "unsupported replication_mode: #{inspect(other)}, expected :async, :sync, or :strong"
     end
+  end
 
-    # Cross-validation: replication_factor should not exceed reasonable bounds
+  defp warn_replication_factor!(opts) do
     case {Keyword.get(opts, :replication_factor), Keyword.get(opts, :num_partition)} do
       {rf, np} when is_integer(rf) and is_integer(np) and rf > np ->
         Logger.warning(
@@ -362,13 +389,11 @@ defmodule SuperCache.Bootstrap do
       _ ->
         :ok
     end
-
-    :ok
   end
 
   # ── Private — config resolution ──────────────────────────────────────────────
 
-  defp resolve_num_partition() do
+  defp resolve_num_partition do
     case Config.get_config(:num_partition, :not_found) do
       :not_found ->
         n = Partition.get_schedulers()
@@ -385,7 +410,7 @@ defmodule SuperCache.Bootstrap do
     end
   end
 
-  defp resolve_table_type() do
+  defp resolve_table_type do
     case Config.get_config(:table_type, :not_found) do
       :not_found ->
         Config.set_config(:table_type, :set)
@@ -401,7 +426,7 @@ defmodule SuperCache.Bootstrap do
     end
   end
 
-  defp resolve_table_prefix() do
+  defp resolve_table_prefix do
     case Config.get_config(:table_prefix, :not_found) do
       :not_found ->
         Config.set_config(:table_prefix, "SuperCache.Storage.Ets")

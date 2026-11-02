@@ -41,9 +41,9 @@ defmodule SuperCache.Storage do
   require Logger
   require SuperCache.Log
 
-  alias SuperCache.{EtsHolder, Config}
-  alias SuperCache.Storage.MatchSpec
   alias :ets, as: Ets
+  alias SuperCache.{Config, EtsHolder}
+  alias SuperCache.Storage.MatchSpec
 
   ## Lifecycle ──────────────────────────────────────────────────────────────────
 
@@ -213,21 +213,9 @@ defmodule SuperCache.Storage do
       "super_cache, storage, match pattern=#{inspect(pattern)} in #{inspect(partition)}"
     end)
 
-    spec = MatchSpec.match(pattern, extract_bindings(pattern))
+    spec = MatchSpec.match(pattern, MatchSpec.extract_bindings(pattern))
     MatchSpec.select(partition, spec)
   end
-
-  # Extract bindings (:$1, :$2, etc.) from a pattern
-  defp extract_bindings(pattern) when is_tuple(pattern) do
-    pattern
-    |> Tuple.to_list()
-    |> Enum.filter(fn
-      x when is_atom(x) -> String.starts_with?(Atom.to_string(x), "$")
-      _ -> false
-    end)
-  end
-
-  defp extract_bindings(_), do: []
 
   @doc """
   Pattern match using compiled match spec via `:ets.select/2`.

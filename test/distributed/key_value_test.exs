@@ -1,12 +1,13 @@
 defmodule SuperCache.Distributed.KeyValueTest do
   use ExUnit.Case, async: false
+  alias SuperCache.Cluster.Bootstrap
   alias SuperCache.Distributed.KeyValue
 
   setup_all do
     if SuperCache.started?(), do: SuperCache.stop()
     Process.sleep(50)
 
-    SuperCache.Cluster.Bootstrap.start!(
+    Bootstrap.start!(
       key_pos: 0,
       partition_pos: 0,
       cluster: :distributed,
@@ -187,7 +188,7 @@ defmodule SuperCache.Distributed.KeyValueTest do
     SuperCache.stop()
     Process.sleep(50)
 
-    SuperCache.Cluster.Bootstrap.start!(
+    Bootstrap.start!(
       key_pos: 0,
       partition_pos: 0,
       cluster: :distributed,
@@ -203,7 +204,7 @@ defmodule SuperCache.Distributed.KeyValueTest do
     SuperCache.stop()
     Process.sleep(50)
 
-    SuperCache.Cluster.Bootstrap.start!(
+    Bootstrap.start!(
       key_pos: 0,
       partition_pos: 0,
       cluster: :distributed,

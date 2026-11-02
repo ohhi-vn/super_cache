@@ -49,7 +49,7 @@ defmodule SuperCache.Storage.MatchSpecTest do
 
   test "compile/1 returns a term (deprecated — unusable on OTP 28+)" do
     # apply/3 avoids triggering the deprecation warning inside our own suite.
-    compiled = apply(MatchSpec, :compile, [MatchSpec.match_object({:a, :_, :_})])
+    compiled = Function.capture(MatchSpec, :compile, 1).(MatchSpec.match_object({:a, :_, :_}))
     assert compiled
   end
 
@@ -66,5 +66,17 @@ defmodule SuperCache.Storage.MatchSpecTest do
     spec = MatchSpec.with_guard({:"$1", :"$2", :"$3"}, [{:>, :"$2", 100}], [:"$_"])
 
     assert [{:g, 150, "high"}] == MatchSpec.select(@partition, spec)
+  end
+
+  test "extract_bindings/1 walks lists and sorts captures numerically" do
+    pattern = [{:"$2", :"$1"}, :"$3"]
+
+    assert [:"$1", :"$2", :"$3"] == MatchSpec.extract_bindings(pattern)
+  end
+
+  test "extract_bindings/1 ignores atoms that are not valid captures" do
+    pattern = {:"$1", :"$x", :"$0", :named}
+
+    assert [:"$1"] == MatchSpec.extract_bindings(pattern)
   end
 end

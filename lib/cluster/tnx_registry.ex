@@ -33,7 +33,6 @@ defmodule SuperCache.Cluster.TxnRegistry do
   use GenServer, restart: :permanent, shutdown: 5_000
 
   require Logger
-  require SuperCache.Log
 
   @table __MODULE__
 
@@ -103,13 +102,13 @@ defmodule SuperCache.Cluster.TxnRegistry do
 
   @doc "Return all transaction entries as `[{txn_id, entry}]`."
   @spec list_all() :: [{binary, map}]
-  def list_all() do
+  def list_all do
     :ets.tab2list(@table)
   end
 
   @doc "Return the number of in-flight transactions (useful for tests)."
   @spec count() :: non_neg_integer
-  def count() do
+  def count do
     :ets.info(@table, :size)
   end
 

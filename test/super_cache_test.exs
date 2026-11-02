@@ -23,6 +23,20 @@ defmodule SuperCacheTest do
     true
   end
 
+  test "non-bang scan converts exits and throws into Cluster.Error" do
+    SuperCache.put!(@data)
+
+    assert {:error, %SuperCache.Cluster.Error{reason: {:exit, :boom}} = exit_error} =
+             SuperCache.scan(:_, fn _, _ -> exit(:boom) end, 0)
+
+    assert Exception.message(exit_error) =~ "exit :boom"
+
+    assert {:error, %SuperCache.Cluster.Error{reason: {:throw, :boom}} = throw_error} =
+             SuperCache.scan(:_, fn _, _ -> throw(:boom) end, 0)
+
+    assert Exception.message(throw_error) =~ "throw :boom"
+  end
+
   test "put & get data" do
     SuperCache.put!(@data)
     result = SuperCache.get!(@data)
@@ -78,18 +92,20 @@ defmodule SuperCacheTest do
   end
 
   test "scan data with a fun" do
-    fun = fn ({_, _, _, n, _}, acc) ->
+    fun = fn {_, _, _, n, _}, acc ->
       n + acc
     end
+
     SuperCache.put!(@data)
     result = SuperCache.scan!(fun, 0)
     assert 1 == result
   end
 
   test "scan data in a partition with a fun" do
-    fun = fn ({_, _, _, n, _}, acc) ->
+    fun = fn {_, _, _, n, _}, acc ->
       n + acc
     end
+
     SuperCache.put!(@data)
     result = SuperCache.scan!(:a, fun, 0)
     assert 1 == result

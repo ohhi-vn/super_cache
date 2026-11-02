@@ -4,7 +4,8 @@ defmodule SuperCache.Internal.Stream do
 
   This module bridges the internal message-passing queue (`SuperCache.Internal.Queue`)
   with the caching layer (`SuperCache`). It creates a `Stream` that continuously
-  pulls items from a named queue and pushes them into the cache via `SuperCache.put/1`.
+  pulls items from a named queue and flushes each drained batch into the cache
+  via `SuperCache.put_batch!/1`.
 
   ## Design
 
@@ -13,14 +14,11 @@ defmodule SuperCache.Internal.Stream do
   2. **Next function** - Calls `Queue.get/1` to fetch a batch of items.
   3. **Cleanup function** - No-op, as the queue lifecycle is managed externally.
 
-  The stream is consumed by `make_stream_pipe/1`, which pipes each item
-  through `push/1` and runs the stream to completion.
-
-  ## Error Handling
-
-  - If `Queue.get/1` returns `{:error, :timeout}`, the stream terminates gracefully.
-  - If `SuperCache.put/1` raises, the error is logged and the stream continues
-    processing subsequent items (fault-tolerant design).
+  `Queue.get/1` returns items in FIFO order, so sequential updates to the same
+  key within one batch preserve the last write. The batch is flushed with a
+  single `put_batch!/1` call. If a batch contains a malformed tuple, the flush
+  retries item by item so valid tuples still land and only the bad item is
+  logged.
 
   ## Warning
 
@@ -56,11 +54,8 @@ defmodule SuperCache.Internal.Stream do
         SuperCache.Log.debug(fn -> "get data from queue" end)
 
         case Queue.get(q) do
-          [] ->
-            if Queue.down?(q), do: {:halt, q}, else: {[], q}
-
-          items ->
-            {items, q}
+          [] -> empty_batch(q)
+          items -> {[items], q}
         end
       end,
       fn _queue ->
@@ -69,22 +64,22 @@ defmodule SuperCache.Internal.Stream do
     )
   end
 
+  defp empty_batch(queue_ref) do
+    if Queue.down?(queue_ref), do: {:halt, queue_ref}, else: {[], queue_ref}
+  end
+
   @doc """
-  Consumes an enumerable and pushes each item into the cache.
+  Consumes an enumerable and pushes each batch into the cache.
 
-  Runs the stream to completion. Errors during `push/1` are caught and logged
-  so that a single bad item does not halt the entire stream.
-
-  ## Examples
-
-      :my_buffer
-      |> SuperCache.Internal.Stream.create()
-      |> SuperCache.Internal.Stream.make_stream_pipe()
+  Runs the stream to completion. Drained batches are written with
+  `SuperCache.put_batch!/1`; if a batch contains a malformed tuple, the
+  batch is retried item by item so valid tuples still land and only the bad
+  item is logged.
   """
   @spec make_stream_pipe(Enumerable.t()) :: :ok
   def make_stream_pipe(enumable) do
     enumable
-    |> Stream.each(&safe_push/1)
+    |> Stream.each(&flush_batch/1)
     |> Stream.run()
   end
 
@@ -101,27 +96,51 @@ defmodule SuperCache.Internal.Stream do
   """
   @spec push(tuple()) :: :ok
   def push(data) when is_tuple(data) do
-    try do
-      SuperCache.put(data)
+    SuperCache.put(data)
 
-      SuperCache.Log.debug(fn ->
-        "super_cache, internal_stream, pushed #{inspect(data)} to cache"
-      end)
+    SuperCache.Log.debug(fn ->
+      "super_cache, internal_stream, pushed #{inspect(data)} to cache"
+    end)
 
-      :ok
-    rescue
-      err ->
-        Logger.error(
-          "super_cache, internal_stream, failed to push #{inspect(data)}: #{inspect(err)}"
-        )
+    :ok
+  rescue
+    err ->
+      Logger.error(
+        "super_cache, internal_stream, failed to push #{inspect(data)}: #{inspect(err)}"
+      )
 
-        :error
-    end
+      :error
   end
 
   # ── Private helpers ──────────────────────────────────────────────────────────
 
+  defp flush_batch(items) when is_list(items) do
+    SuperCache.put_batch!(items)
+  rescue
+    _err ->
+      # A malformed tuple poisoned the batch — retry individually so valid
+      # items still land and only the bad one is logged.
+      Enum.each(items, &safe_push/1)
+  end
+
+  defp flush_batch(item), do: safe_push(item)
+
   defp safe_push(data) do
     push(data)
+  rescue
+    err ->
+      Logger.error(
+        "super_cache, internal_stream, failed to push #{inspect(data)}: #{inspect(err)}"
+      )
+
+      :error
+  catch
+    kind, reason ->
+      Logger.error(
+        "super_cache, internal_stream, failed to push #{inspect(data)}: " <>
+          inspect({kind, reason})
+      )
+
+      :error
   end
 end

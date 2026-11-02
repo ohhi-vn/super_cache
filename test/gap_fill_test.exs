@@ -8,7 +8,9 @@ defmodule SuperCache.GapFillTest do
   use ExUnit.Case, async: false
 
   alias SuperCache.Cluster.{Manager, NodeMonitor, Router}
+  alias SuperCache.Cluster.Stats
   alias SuperCache.{EtsHolder, Partition, Storage}
+  alias SuperCache.Partition.Holder
 
   @pt_partition_map {Manager, :partition_map}
 
@@ -36,30 +38,40 @@ defmodule SuperCache.GapFillTest do
   # ── Router: forwarded operations (foreign primary, erpc fails fast) ──────────
 
   describe "Router forwarded writes" do
-    test "route_put!/1 forwards to the primary and survives its absence" do
+    test "route_put!/1 reports the documented error when the primary is absent" do
       order = Partition.get_partition_order(:fwd_key)
-      plant_map(%{order => {:"foreign@host", []}})
-      assert true == Router.route_put!({:fwd_key, "v"})
+      plant_map(%{order => {:foreign@host, []}})
+
+      assert_raise SuperCache.Cluster.Error, fn ->
+        Router.route_put!({:fwd_key, "v"})
+      end
     end
 
-    test "route_delete!/1 forwards to the foreign primary" do
+    test "route_delete!/1 reports the documented error when the primary is absent" do
       order = Partition.get_partition_order(:fwd_del)
-      plant_map(%{order => {:"foreign@host", []}})
-      assert :ok = Router.route_delete!({:fwd_del, nil})
+      plant_map(%{order => {:foreign@host, []}})
+
+      assert_raise SuperCache.Cluster.Error, fn ->
+        Router.route_delete!({:fwd_del, nil})
+      end
     end
 
-    test "route_put_batch!/1 forwards grouped batches" do
+    test "route_put_batch!/1 reports failure when a partition's primary is absent" do
       o1 = Partition.get_partition_order(:batch_a)
       o2 = Partition.get_partition_order(:batch_b)
-      plant_map(%{o1 => {:"foreign@host", []}, o2 => {node(), []}})
+      plant_map(%{o1 => {:foreign@host, []}, o2 => {node(), []}})
 
-      assert :ok =
-               Router.route_put_batch!([{:batch_a, 1, "x"}, {:batch_b, 2, "y"}])
+      assert_raise SuperCache.Cluster.Error, fn ->
+        Router.route_put_batch!([{:batch_a, 1, "x"}, {:batch_b, 2, "y"}])
+      end
     end
 
-    test "route_delete_by_key_partition!/3 forwards when not primary" do
-      plant_map(%{3 => {:"foreign@host", []}})
-      assert :ok = Router.route_delete_by_key_partition!(:some_key, 3)
+    test "route_delete_by_key_partition!/3 reports failure when not primary" do
+      plant_map(%{3 => {:foreign@host, []}})
+
+      assert_raise SuperCache.Cluster.Error, fn ->
+        Router.route_delete_by_key_partition!(:some_key, 3)
+      end
     end
 
     test "route_delete_match_partition!/3 executes locally when forwarded flag set" do
@@ -69,7 +81,7 @@ defmodule SuperCache.GapFillTest do
       assert :ok = Router.route_delete_all_partition(0, forwarded: true)
     end
 
-    test "route_delete_all/0 fans out over foreign primaries" do
+    test "route_delete_all/0 reports failure when primaries are absent" do
       num = Partition.get_num_partition()
 
       map =
@@ -78,11 +90,14 @@ defmodule SuperCache.GapFillTest do
         end)
 
       plant_map(map)
-      assert :ok = Router.route_delete_all()
+
+      assert_raise SuperCache.Cluster.Error, fn ->
+        Router.route_delete_all()
+      end
     end
 
     test "forwarded ops skip the primary check entirely" do
-      plant_map(%{0 => {:"foreign@host", []}})
+      plant_map(%{0 => {:foreign@host, []}})
       # With forwarded: true the op must apply locally regardless of topology.
       assert true == Router.route_put!({:local_fwd, 1}, forwarded: true)
       partition = Partition.get_partition(:local_fwd)
@@ -157,7 +172,7 @@ defmodule SuperCache.GapFillTest do
     end
 
     test "kernel events for nodes outside a static set are ignored" do
-      assert :ok = NodeMonitor.reconfigure(nodes: [:"watched_only@host"])
+      assert :ok = NodeMonitor.reconfigure(nodes: [:watched_only@host])
       send(NodeMonitor, {:nodeup, :unwatched@host, []})
       Process.sleep(20)
 
@@ -206,6 +221,7 @@ defmodule SuperCache.GapFillTest do
       Storage.put({:typed, 5}, @partition)
 
       assert [5] == Storage.get_typed(GapTypedRecord, :typed, @partition)
+
       assert [5] ==
                Storage.get_by_match_object_typed(GapTypedRecord, {:typed, :_}, @partition)
     end
@@ -232,18 +248,18 @@ defmodule SuperCache.GapFillTest do
 
   describe "EtsHolder" do
     test "clean/2 clears one table; clean_all/1 clears every tracked table" do
-      EtsHolder.new_table(EtsHolder, :"gap_holder_table")
-      :ets.insert(:"gap_holder_table", {:a, 1})
+      EtsHolder.new_table(EtsHolder, :gap_holder_table)
+      :ets.insert(:gap_holder_table, {:a, 1})
 
-      assert true == EtsHolder.clean(EtsHolder, :"gap_holder_table")
-      assert [] == :ets.tab2list(:"gap_holder_table")
+      assert true == EtsHolder.clean(EtsHolder, :gap_holder_table)
+      assert [] == :ets.tab2list(:gap_holder_table)
 
       EtsHolder.clean_all(EtsHolder)
-      assert :ok == EtsHolder.delete_table(EtsHolder, :"gap_holder_table")
+      assert :ok == EtsHolder.delete_table(EtsHolder, :gap_holder_table)
     end
 
     test "delete_table/2 skips unknown tables gracefully" do
-      assert :ok == EtsHolder.delete_table(EtsHolder, :"never_created_gap")
+      assert :ok == EtsHolder.delete_table(EtsHolder, :never_created_gap)
     end
   end
 
@@ -251,11 +267,11 @@ defmodule SuperCache.GapFillTest do
 
   describe "Partition.Holder" do
     test "get/1 returns nil for unregistered indices" do
-      assert nil == SuperCache.Partition.Holder.get(99_999)
+      assert nil == Holder.get(99_999)
     end
 
     test "get_all/0 returns only integer-indexed entries as table atoms" do
-      all = SuperCache.Partition.Holder.get_all()
+      all = Holder.get_all()
       assert all != []
       assert Enum.all?(all, &is_atom/1)
     end
@@ -264,7 +280,7 @@ defmodule SuperCache.GapFillTest do
       num = Partition.get_num_partition()
       pid = Process.whereis(SuperCache.Partition.Holder)
 
-      assert :ok = SuperCache.Partition.Holder.stop()
+      assert :ok = Holder.stop()
       Process.sleep(30)
       refute pid == Process.whereis(SuperCache.Partition.Holder)
 
@@ -276,13 +292,13 @@ defmodule SuperCache.GapFillTest do
     end
 
     test "clean/0 empties the registry and it can be rebuilt" do
-      num = length(SuperCache.Partition.Holder.get_all())
-      assert true == SuperCache.Partition.Holder.clean()
+      num = length(Holder.get_all())
+      assert true == Holder.clean()
 
       # Rebuild immediately so sibling tests are unaffected.
       SuperCache.Partition.start(num)
 
-      assert length(SuperCache.Partition.Holder.get_all()) == num
+      assert length(Holder.get_all()) == num
     end
   end
 
@@ -331,7 +347,7 @@ defmodule SuperCache.GapFillTest do
   # ── Stats extras ─────────────────────────────────────────────────────────────
 
   test "Stats.print/1 handles nested keyword lists" do
-    assert :ok = SuperCache.Cluster.Stats.print(%{deep: %{deeper: %{deepest: 1}}})
+    assert :ok = Stats.print(%{deep: %{deeper: %{deepest: 1}}})
   end
 
   test "cluster_stats/1 in local mode reports single-node shape" do
@@ -340,6 +356,7 @@ defmodule SuperCache.GapFillTest do
     assert stats.replication_mode == :none
     assert stats.unreachable_nodes == []
   end
+
   defp wait_until(fun, tries \\ 100)
 
   defp wait_until(_fun, 0), do: flunk("condition not met")

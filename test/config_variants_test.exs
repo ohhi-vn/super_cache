@@ -6,6 +6,8 @@ defmodule SuperCache.BagTableTest do
 
   use ExUnit.Case, async: false
 
+  alias SuperCache.Cluster.Bootstrap
+  alias SuperCache.Cluster.Manager
   alias SuperCache.KeyValue
 
   setup_all do
@@ -89,6 +91,7 @@ defmodule SuperCache.StrongModeTest do
 
   use ExUnit.Case, async: false
 
+  alias SuperCache.Cluster.{Bootstrap, Manager}
   alias SuperCache.KeyValue
 
   setup_all do
@@ -101,13 +104,13 @@ defmodule SuperCache.StrongModeTest do
     # verification only ever sees this node.
     Enum.each(Node.list(), fn n ->
       Node.disconnect(n)
-      SuperCache.Cluster.Manager.node_down(n)
+      Manager.node_down(n)
     end)
 
     Process.sleep(200)
 
     :ok =
-      SuperCache.Cluster.Bootstrap.start!(
+      Bootstrap.start!(
         key_pos: 0,
         partition_pos: 0,
         cluster: :distributed,

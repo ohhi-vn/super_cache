@@ -109,7 +109,7 @@ defmodule SuperCache.Buffer do
   following `start/1` never races the old processes for their names.
   """
   @spec stop() :: :ok
-  def stop() do
+  def stop do
     SuperCache.Log.debug(fn -> "super_cache, buffer, stopping all buffers..." end)
 
     case :persistent_term.get(@pt_key, nil) do
@@ -160,27 +160,31 @@ defmodule SuperCache.Buffer do
         {:error, :not_started}
 
       names_tuple ->
-        # scheduler_id is 1-based; wrap with rem for safety.
-        idx = rem(:erlang.system_info(:scheduler_id) - 1, tuple_size(names_tuple))
-        buffer_name = elem(names_tuple, idx)
+        enqueue_to_buffer(names_tuple, data)
+    end
+  end
 
-        case LibQueue.add(buffer_name, data) do
-          :ok ->
-            SuperCache.Log.debug(fn ->
-              "super_cache, buffer, enqueued to #{inspect(buffer_name)} (idx: #{idx})"
-            end)
+  defp enqueue_to_buffer(names_tuple, data) do
+    # scheduler_id is 1-based; wrap with rem for safety.
+    idx = rem(:erlang.system_info(:scheduler_id) - 1, tuple_size(names_tuple))
+    buffer_name = elem(names_tuple, idx)
 
-            :ok
+    case LibQueue.add(buffer_name, data) do
+      :ok ->
+        SuperCache.Log.debug(fn ->
+          "super_cache, buffer, enqueued to #{inspect(buffer_name)} (idx: #{idx})"
+        end)
 
-          {:error, :process_down} ->
-            # The runner should restart the queue shortly; surface the drop
-            # loudly instead of losing writes silently.
-            Logger.warning(
-              "super_cache, buffer, enqueue to #{inspect(buffer_name)} dropped: buffer restarting"
-            )
+        :ok
 
-            {:error, :process_down}
-        end
+      {:error, :process_down} ->
+        # The runner should restart the queue shortly; surface the drop
+        # loudly instead of losing writes silently.
+        Logger.warning(
+          "super_cache, buffer, enqueue to #{inspect(buffer_name)} dropped: buffer restarting"
+        )
+
+        {:error, :process_down}
     end
   end
 
@@ -226,14 +230,18 @@ defmodule SuperCache.Buffer do
         retry_or_give_up(name, restarts, "stream crashed (#{inspect(reason)})")
 
       :ended ->
-        if buffers_started?() do
-          # Queue died unexpectedly while the buffer system is active.
-          retry_or_give_up(name, restarts, "queue ended while buffers still running")
-        else
-          SuperCache.Log.debug(fn ->
-            "super_cache, buffer, stream #{inspect(name)} finished normally"
-          end)
-        end
+        handle_stream_end(name, restarts)
+    end
+  end
+
+  defp handle_stream_end(name, restarts) do
+    if buffers_started?() do
+      # Queue died unexpectedly while the buffer system is active.
+      retry_or_give_up(name, restarts, "queue ended while buffers still running")
+    else
+      SuperCache.Log.debug(fn ->
+        "super_cache, buffer, stream #{inspect(name)} finished normally"
+      end)
     end
   end
 
@@ -288,7 +296,7 @@ defmodule SuperCache.Buffer do
 
   # True while `start/1` is in effect. A deliberate stop/0 stores the
   # @stopped sentinel so runners exit quietly instead of recovering.
-  defp buffers_started?() do
+  defp buffers_started? do
     case :persistent_term.get(@pt_key, nil) do
       names_tuple when is_tuple(names_tuple) -> true
       _ -> false

@@ -50,6 +50,7 @@ defmodule SuperCache.Internal.Queue do
         try do
           Process.register(self(), name)
           send(parent, {:queue_registered, self(), name})
+
           SuperCache.Log.debug(fn ->
             "super_cache, internal_queue, started #{inspect(name)}"
           end)
@@ -171,12 +172,16 @@ defmodule SuperCache.Internal.Queue do
   defp resolve(pid) when is_pid(pid), do: if(Process.alive?(pid), do: pid)
 
   # There are waiting readers and buffered data – deliver immediately.
+  # Items are accumulated newest-first, so reverse them to preserve
+  # first-in, first-out enqueue order for the consumer.
   defp loop([reader | rest_readers], [_ | _] = data, name) do
+    batch = :lists.reverse(data)
+
     SuperCache.Log.debug(fn ->
-      "super_cache, internal_queue, sending #{length(data)} item(s) to #{inspect(reader)}"
+      "super_cache, internal_queue, sending #{length(batch)} item(s) to #{inspect(reader)}"
     end)
 
-    send(reader, data)
+    send(reader, batch)
     loop(rest_readers, [], name)
   end
 

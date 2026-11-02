@@ -24,7 +24,7 @@ defmodule SuperCache.Cluster.DistributedStore do
   """
 
   alias SuperCache.Cluster.Router
-  alias SuperCache.{Storage, Partition}
+  alias SuperCache.{Partition, Storage}
 
   ## Write helpers ##
 

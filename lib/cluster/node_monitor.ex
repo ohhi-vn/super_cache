@@ -113,7 +113,7 @@ defmodule SuperCache.Cluster.NodeMonitor do
 
   @impl true
   def init(opts) do
-    source     = resolve_source(opts)
+    source = resolve_source(opts)
     refresh_ms = Keyword.get(opts, :refresh_ms, @default_refresh_ms)
 
     :net_kernel.monitor_nodes(true, node_type: :all)
@@ -132,7 +132,7 @@ defmodule SuperCache.Cluster.NodeMonitor do
 
   @impl true
   def handle_call({:reconfigure, opts}, _from, state) do
-    new_source     = resolve_source(opts)
+    new_source = resolve_source(opts)
     new_refresh_ms = Keyword.get(opts, :refresh_ms, @default_refresh_ms)
 
     # Activate the new source; old refresh timer ref is superseded by the new one.
@@ -172,9 +172,9 @@ defmodule SuperCache.Cluster.NodeMonitor do
 
     new_state = %{
       state
-      | source:      new_source,
-        managed:     new_managed,
-        refresh_ms:  new_refresh_ms,
+      | source: new_source,
+        managed: new_managed,
+        refresh_ms: new_refresh_ms,
         refresh_ref: new_ref
     }
 
@@ -210,7 +210,7 @@ defmodule SuperCache.Cluster.NodeMonitor do
   # Stale timers from a superseded MFA source carry an old ref and are dropped.
   def handle_info({:refresh, ref}, %{refresh_ref: ref, source: source} = state) do
     new_nodes = source |> fetch_nodes() |> connect_all()
-    new_set   = MapSet.new(new_nodes)
+    new_set = MapSet.new(new_nodes)
 
     announce_diff(state.managed, new_set)
 
@@ -233,9 +233,9 @@ defmodule SuperCache.Cluster.NodeMonitor do
         {:all, nil}
 
       other ->
-        nodes   = other |> fetch_nodes() |> connect_all()
+        nodes = other |> fetch_nodes() |> connect_all()
         managed = MapSet.new(nodes)
-        ref     = if match?({:mfa, _}, other), do: schedule_refresh(refresh_ms), else: nil
+        ref = if match?({:mfa, _}, other), do: schedule_refresh(refresh_ms), else: nil
         {managed, ref}
     end
   end
@@ -256,7 +256,10 @@ defmodule SuperCache.Cluster.NodeMonitor do
   # so a double-announce has no visible effect other than an extra health-check.
   defp announce_diff(:all, new_set) do
     Enum.each(new_set, fn n ->
-      Logger.info("super_cache, node_monitor, re-announcing on :all→set transition: #{inspect(n)}")
+      Logger.info(
+        "super_cache, node_monitor, re-announcing on :all→set transition: #{inspect(n)}"
+      )
+
       ClusterManager.node_up(n)
     end)
   end
@@ -306,12 +309,14 @@ defmodule SuperCache.Cluster.NodeMonitor do
         unless is_list(nodes) and Enum.all?(nodes, &is_atom/1) do
           raise ArgumentError, ":nodes must be a list of node atoms"
         end
+
         {:static, nodes}
 
       mfa = Keyword.get(opts, :nodes_mfa) ->
         unless match?({m, f, a} when is_atom(m) and is_atom(f) and is_list(a), mfa) do
           raise ArgumentError, ":nodes_mfa must be a {module, function, args} tuple"
         end
+
         {:mfa, mfa}
 
       true ->
@@ -319,7 +324,7 @@ defmodule SuperCache.Cluster.NodeMonitor do
     end
   end
 
-  defp fetch_nodes(:all),             do: []
+  defp fetch_nodes(:all), do: []
   defp fetch_nodes({:static, nodes}), do: nodes
 
   defp fetch_nodes({:mfa, {m, f, a}}) do
@@ -327,26 +332,26 @@ defmodule SuperCache.Cluster.NodeMonitor do
     # An exit (e.g. the named process the MFA calls has been stopped) is NOT
     # caught by `rescue` — only by `catch :exit, _`. Without this guard,
     # a dead named process causes NodeMonitor itself to crash.
-    try do
-      apply(m, f, a)
-    rescue
-      err ->
-        Logger.error(
-          "super_cache, node_monitor, nodes_mfa #{inspect({m, f, a})} raised: #{inspect(err)}"
-        )
-        []
-    catch
-      :exit, reason ->
-        Logger.error(
-          "super_cache, node_monitor, nodes_mfa #{inspect({m, f, a})} exited: #{inspect(reason)}"
-        )
-        []
-    end
+    apply(m, f, a)
+  rescue
+    err ->
+      Logger.error(
+        "super_cache, node_monitor, nodes_mfa #{inspect({m, f, a})} raised: #{inspect(err)}"
+      )
+
+      []
+  catch
+    :exit, reason ->
+      Logger.error(
+        "super_cache, node_monitor, nodes_mfa #{inspect({m, f, a})} exited: #{inspect(reason)}"
+      )
+
+      []
   end
 
   # :all means every kernel event passes the gate.
   defp watched?(_node, :all), do: true
-  defp watched?(node, set),   do: MapSet.member?(set, node)
+  defp watched?(node, set), do: MapSet.member?(set, node)
 
   # Attempt Erlang-level connections; return the list minus self.
   defp connect_all(nodes) do
@@ -354,25 +359,23 @@ defmodule SuperCache.Cluster.NodeMonitor do
 
     nodes
     |> Enum.reject(&(&1 == me))
-    |> tap(fn peers ->
-      Enum.each(peers, fn n ->
-        case Node.connect(n) do
-          true ->
-            Logger.debug("super_cache, node_monitor, connected to #{inspect(n)}")
+    |> tap(fn peers -> Enum.each(peers, &connect_one/1) end)
+  end
 
-          false ->
-            Logger.warning(
-              "super_cache, node_monitor, could not connect to #{inspect(n)} " <>
-                "(will retry on :nodeup)"
-            )
+  defp connect_one(n) do
+    case Node.connect(n) do
+      true ->
+        Logger.debug("super_cache, node_monitor, connected to #{inspect(n)}")
 
-          :ignored ->
-            Logger.warning(
-              "super_cache, node_monitor, node not distributed — #{inspect(n)} ignored"
-            )
-        end
-      end)
-    end)
+      false ->
+        Logger.warning(
+          "super_cache, node_monitor, could not connect to #{inspect(n)} " <>
+            "(will retry on :nodeup)"
+        )
+
+      :ignored ->
+        Logger.warning("super_cache, node_monitor, node not distributed — #{inspect(n)} ignored")
+    end
   end
 
   # Returns a unique ref used to tag and validate refresh timers.

@@ -100,15 +100,15 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
     # Ensure the primary node starts with the correct config so that
     # isolated peer tests do not fail due to stale config from previous runs.
     if SuperCache.started?() do
-      SuperCache.Cluster.Bootstrap.stop()
+      Bootstrap.stop()
       Process.sleep(100)
     end
 
-    SuperCache.Cluster.Bootstrap.start!(@base_opts)
+    Bootstrap.start!(@base_opts)
 
     on_exit(fn ->
       try do
-        SuperCache.Cluster.Bootstrap.stop()
+        Bootstrap.stop()
       catch
         :exit, _ -> :ok
       end
@@ -229,11 +229,9 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
   end
 
   defp stop_peer(peer) do
-    try do
-      :peer.stop(peer)
-    catch
-      :exit, _ -> :ok
-    end
+    :peer.stop(peer)
+  catch
+    :exit, _ -> :ok
   end
 
   defp connect_and_wait(joiner_node, target_node, timeout \\ 8_000) do
@@ -250,12 +248,10 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
       end
     end)
     |> Enum.find(fn live? ->
-      if live? do
-        true
-      else
-        if System.monotonic_time(:millisecond) >= deadline, do: throw(:timeout)
-        Process.sleep(100)
-        false
+      cond do
+        live? -> true
+        System.monotonic_time(:millisecond) >= deadline -> throw(:timeout)
+        true -> Process.sleep(100) && false
       end
     end)
   catch
@@ -263,33 +259,29 @@ defmodule SuperCache.Cluster.BootstrapVerifyTest do
   end
 
   defp safe_remote_stop(node) do
-    try do
-      :erpc.call(node, Bootstrap, :stop, [], 5_000)
-    catch
-      _, _ -> :ok
-    end
+    :erpc.call(node, Bootstrap, :stop, [], 5_000)
+  catch
+    _, _ -> :ok
   end
 
   # Execute `fun` and return the ArgumentError message string.
   # Handles both a locally raised ArgumentError and an ErlangError wrapping
   # a remote ArgumentError delivered via :erpc.call.
   defp erpc_argument_error(fun) do
-    try do
-      fun.()
-      flunk("Expected ArgumentError but call returned without raising")
-    rescue
-      e in ArgumentError ->
-        e.message
+    fun.()
+    flunk("Expected ArgumentError but call returned without raising")
+  rescue
+    e in ArgumentError ->
+      e.message
 
-      e in ErlangError ->
-        case e.original do
-          {:exception, %ArgumentError{message: msg}, _} ->
-            msg
+    e in ErlangError ->
+      case e.original do
+        {:exception, %ArgumentError{message: msg}, _} ->
+          msg
 
-          other ->
-            flunk("Expected remote ArgumentError, got ErlangError: #{inspect(other)}")
-        end
-    end
+        other ->
+          flunk("Expected remote ArgumentError, got ErlangError: #{inspect(other)}")
+      end
   end
 
   defp wait_until(fun, timeout \\ 5_000) do

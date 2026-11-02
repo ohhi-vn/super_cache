@@ -18,6 +18,7 @@ defmodule SuperCache.Distributed.BatchWriteTest do
     if SuperCache.started?() do
       SuperCache.stop()
     end
+
     SuperCache.start!(key_pos: 0, partition_pos: 0)
 
     on_exit(fn ->
@@ -61,7 +62,9 @@ defmodule SuperCache.Distributed.BatchWriteTest do
 
     test "handles data across multiple partitions" do
       # Use unique keys so each record is individually retrievable
-      data = for i <- 1..1000, do: {String.to_atom("batch_multi_#{i}"), i, "value_" <> Integer.to_string(i)}
+      data =
+        for i <- 1..1000,
+            do: {String.to_atom("batch_multi_#{i}"), i, "value_" <> Integer.to_string(i)}
 
       assert :ok = SuperCache.put_batch!(data)
 
@@ -84,6 +87,7 @@ defmodule SuperCache.Distributed.BatchWriteTest do
   describe "KeyValue.add_batch/2" do
     test "adds multiple key-value pairs" do
       kv_ns = ns("add_batch")
+
       pairs = [
         {:k1, "v1"},
         {:k2, "v2"},

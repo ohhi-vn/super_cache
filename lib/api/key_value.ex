@@ -60,8 +60,9 @@ defmodule SuperCache.KeyValue do
   require Logger
   require SuperCache.Log
 
-  alias SuperCache.{Storage, Partition, Config}
-  alias SuperCache.Cluster.{Manager, Replicator, Router, DistributedHelpers}
+  alias SuperCache.Cluster.{DistributedHelpers, Manager, Replicator}
+  alias SuperCache.{Config, Partition, Storage}
+  alias SuperCache.Storage.MatchSpec
 
   ## ── Public API ──────────────────────────────────────────────────────────────
 
@@ -99,13 +100,15 @@ defmodule SuperCache.KeyValue do
   @spec get(any, any, any, keyword) :: any
   def get(kv_name, key, default \\ nil, opts \\ []) do
     if Config.distributed?() do
-      DistributedHelpers.route_read(
-        __MODULE__,
-        :local_get,
-        [kv_name, key, default],
-        idx(kv_name),
-        opts
-      )
+      DistributedHelpers.read_or_error(fn ->
+        DistributedHelpers.route_read(
+          __MODULE__,
+          :local_get,
+          [kv_name, key, default],
+          idx(kv_name),
+          opts
+        )
+      end)
     else
       local_get(kv_name, key, default)
     end
@@ -121,13 +124,15 @@ defmodule SuperCache.KeyValue do
   @spec get_all(any, any, keyword) :: [any]
   def get_all(kv_name, key, opts \\ []) do
     if Config.distributed?() do
-      DistributedHelpers.route_read(
-        __MODULE__,
-        :local_get_all,
-        [kv_name, key],
-        idx(kv_name),
-        opts
-      )
+      DistributedHelpers.read_or_error(fn ->
+        DistributedHelpers.route_read(
+          __MODULE__,
+          :local_get_all,
+          [kv_name, key],
+          idx(kv_name),
+          opts
+        )
+      end)
     else
       local_get_all(kv_name, key)
     end
@@ -354,10 +359,12 @@ defmodule SuperCache.KeyValue do
   @spec remove_batch(any, [any]) :: :ok
   def remove_batch(kv_name, keys) when is_list(keys) do
     if Config.distributed?() do
-      Enum.each(keys, fn key ->
-        ets_key = {:kv, kv_name, key}
-        Router.route_delete_by_key_partition!(ets_key, kv_name)
-      end)
+      DistributedHelpers.route_write(
+        __MODULE__,
+        :local_delete_batch,
+        [kv_name, keys],
+        idx(kv_name)
+      )
     else
       partition = Partition.get_partition(kv_name)
 
@@ -378,42 +385,42 @@ defmodule SuperCache.KeyValue do
 
     case table_type() do
       t when t in [:set, :ordered_set] ->
-        # Atomic upsert: update_element with default inserts if missing,
-        # updates in-place if present. Position 2 is the value field
-        # in the tuple {{:kv, kv_name, key}, value}.
-        case Manager.replication_mode() do
-          :strong ->
-            DistributedHelpers.apply_write(idx(kv_name), partition, [{:put, {ets_key, value}}])
-
-          _ ->
-            Storage.update_element(ets_key, partition, {2, value}, {ets_key, value})
-            Replicator.replicate(idx(kv_name), :put, {ets_key, value})
-        end
+        write_result(kv_name, partition, [{:put, {ets_key, value}}], true)
 
       _ ->
-        # :bag / :duplicate_bag — insert adds a new record (duplicates ok)
-        DistributedHelpers.apply_write(idx(kv_name), partition, [{:put, {ets_key, value}}])
+        write_result(kv_name, partition, [{:put, {ets_key, value}}], true)
     end
-
-    true
   end
 
   @doc false
   def local_delete(kv_name, key) do
-    DistributedHelpers.apply_write(idx(kv_name), Partition.get_partition(kv_name), [
-      {:delete, {:kv, kv_name, key}}
-    ])
+    write_result(
+      kv_name,
+      Partition.get_partition(kv_name),
+      [
+        {:delete, {:kv, kv_name, key}}
+      ],
+      :ok
+    )
+  end
 
-    :ok
+  @doc false
+  def local_delete_batch(kv_name, keys) do
+    partition = Partition.get_partition(kv_name)
+    ops = Enum.map(keys, fn key -> {:delete, {:kv, kv_name, key}} end)
+    write_result(kv_name, partition, ops, :ok)
   end
 
   @doc false
   def local_delete_all(kv_name) do
-    DistributedHelpers.apply_write(idx(kv_name), Partition.get_partition(kv_name), [
-      {:delete_match, {{:kv, kv_name, :_}, :_}}
-    ])
-
-    :ok
+    write_result(
+      kv_name,
+      Partition.get_partition(kv_name),
+      [
+        {:delete_match, {{:kv, kv_name, :_}, :_}}
+      ],
+      :ok
+    )
   end
 
   @doc false
@@ -423,24 +430,20 @@ defmodule SuperCache.KeyValue do
 
     case table_type() do
       t when t in [:set, :ordered_set] ->
-        case Manager.replication_mode() do
-          :strong ->
-            DistributedHelpers.apply_write(idx(kv_name), partition, [{:put, {ets_key, value}}])
-
-          _ ->
-            Storage.update_element(ets_key, partition, {2, value}, {ets_key, value})
-            Replicator.replicate(idx(kv_name), :put, {ets_key, value})
-        end
+        write_result(kv_name, partition, [{:put, {ets_key, value}}], :ok)
 
       _ ->
         # :bag / :duplicate_bag — delete all + insert (not atomic)
-        DistributedHelpers.apply_write(idx(kv_name), partition, [
-          {:delete, ets_key},
-          {:put, {ets_key, value}}
-        ])
+        write_result(
+          kv_name,
+          partition,
+          [
+            {:delete, ets_key},
+            {:put, {ets_key, value}}
+          ],
+          :ok
+        )
     end
-
-    :ok
   end
 
   @doc false
@@ -456,62 +459,72 @@ defmodule SuperCache.KeyValue do
 
     new_value = fun.(current)
 
-    case table_type() do
-      t when t in [:set, :ordered_set] ->
-        case Manager.replication_mode() do
-          :strong ->
-            DistributedHelpers.apply_write(idx(kv_name), partition, [{:put, {ets_key, new_value}}])
+    result =
+      case table_type() do
+        t when t in [:set, :ordered_set] ->
+          write_result(kv_name, partition, [{:put, {ets_key, new_value}}], new_value)
 
-          _ ->
-            Storage.update_element(ets_key, partition, {2, new_value}, {ets_key, new_value})
-            Replicator.replicate(idx(kv_name), :put, {ets_key, new_value})
-        end
+        _ ->
+          write_result(
+            kv_name,
+            partition,
+            [
+              {:delete, ets_key},
+              {:put, {ets_key, new_value}}
+            ],
+            new_value
+          )
+      end
 
-      _ ->
-        DistributedHelpers.apply_write(idx(kv_name), partition, [
-          {:delete, ets_key},
-          {:put, {ets_key, new_value}}
-        ])
-    end
-
-    new_value
+    result
   end
 
   @doc false
   def local_increment(kv_name, key, default, step) do
-    partition = Partition.get_partition(kv_name)
-    ets_key = {:kv, kv_name, key}
-
     case table_type() do
       t when t in [:set, :ordered_set] ->
-        case Manager.replication_mode() do
-          :strong ->
-            # For strong consistency, use read-modify-write via 3PC.
-            # This has a TOCTOU race but is consistent with 3PC semantics.
-            current =
-              case Storage.get(ets_key, partition) do
-                [] -> default
-                [{_, v}] -> v
-              end
-
-            new_value = current + step
-
-            DistributedHelpers.apply_write(idx(kv_name), partition, [{:put, {ets_key, new_value}}])
-
-            new_value
-
-          _ ->
-            # Atomic counter increment — update_counter is an atomic ETS op.
-            new_value = Storage.update_counter(ets_key, partition, {2, step}, {ets_key, default})
-            Replicator.replicate(idx(kv_name), :put, {ets_key, new_value})
-            new_value
-        end
+        do_local_increment(kv_name, key, default, step)
 
       _ ->
         raise ArgumentError, """
         KeyValue.increment/4 is not supported for :bag/:duplicate_bag tables.
         Use :set or :ordered_set table type for atomic counter operations.
         """
+    end
+  end
+
+  defp do_local_increment(kv_name, key, default, step) do
+    partition = Partition.get_partition(kv_name)
+    ets_key = {:kv, kv_name, key}
+
+    case Manager.replication_mode() do
+      :strong -> strong_increment(kv_name, partition, ets_key, default, step)
+      _ -> local_counter_increment(kv_name, partition, ets_key, default, step)
+    end
+  end
+
+  defp strong_increment(kv_name, partition, ets_key, default, step) do
+    case DistributedHelpers.apply_write(idx(kv_name), partition, [
+           {:increment, ets_key, default, step}
+         ]) do
+      :ok -> current_value(partition, ets_key, default)
+      {:error, _} = error -> error
+    end
+  end
+
+  defp local_counter_increment(kv_name, partition, ets_key, default, step) do
+    new_value = Storage.update_counter(ets_key, partition, {2, step}, {ets_key, default})
+
+    case Replicator.replicate(idx(kv_name), :put, {ets_key, new_value}) do
+      :ok -> new_value
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp current_value(partition, ets_key, default) do
+    case Storage.get(ets_key, partition) do
+      [] -> default
+      records -> extract_value(records, default)
     end
   end
 
@@ -522,25 +535,30 @@ defmodule SuperCache.KeyValue do
 
     case table_type() do
       t when t in [:set, :ordered_set] ->
-        # Same as local_update for set tables (atomic upsert)
-        case Manager.replication_mode() do
-          :strong ->
-            DistributedHelpers.apply_write(idx(kv_name), partition, [{:put, {ets_key, value}}])
-
-          _ ->
-            Storage.update_element(ets_key, partition, {2, value}, {ets_key, value})
-            Replicator.replicate(idx(kv_name), :put, {ets_key, value})
-        end
+        write_result(kv_name, partition, [{:put, {ets_key, value}}], :ok)
 
       _ ->
         # :bag / :duplicate_bag — delete all records for key, then insert new one
-        DistributedHelpers.apply_write(idx(kv_name), partition, [
-          {:delete, ets_key},
-          {:put, {ets_key, value}}
-        ])
+        write_result(
+          kv_name,
+          partition,
+          [
+            {:delete, ets_key},
+            {:put, {ets_key, value}}
+          ],
+          :ok
+        )
     end
+  end
 
-    :ok
+  # Apply ops through the shared replication helper and map `:ok` to the
+  # operation's documented success value. Replication failures propagate as
+  # `{:error, %SuperCache.Cluster.Error{}}`.
+  defp write_result(kv_name, partition, ops, success_value) do
+    case DistributedHelpers.apply_write(idx(kv_name), partition, ops) do
+      :ok -> success_value
+      {:error, _} = error -> error
+    end
   end
 
   ## ── Remote entry points — reads (called via :erpc in quorum/primary reads) ──
@@ -561,39 +579,42 @@ defmodule SuperCache.KeyValue do
 
   @doc false
   def local_keys(kv_name) do
-    do_match(kv_name) |> Enum.map(fn {{:kv, ^kv_name, k}, _} -> k end) |> Enum.uniq()
+    partition = Partition.get_partition(kv_name)
+    spec = [{{{:kv, kv_name, :"$1"}, :_}, [], [:"$1"]}]
+    MatchSpec.select(partition, spec) |> Enum.uniq()
   end
 
   @doc false
   def local_values(kv_name) do
-    do_match(kv_name) |> Enum.map(fn {{:kv, ^kv_name, _}, v} -> v end)
+    partition = Partition.get_partition(kv_name)
+    spec = [{{{:kv, kv_name, :_}, :"$1"}, [], [:"$1"]}]
+    MatchSpec.select(partition, spec)
   end
 
   @doc false
-  def local_count(kv_name), do: do_match(kv_name) |> length()
+  def local_count(kv_name) do
+    partition = Partition.get_partition(kv_name)
+    :ets.select_count(partition, [{{{:kv, kv_name, :_}, :_}, [], [true]}])
+  end
 
   @doc false
   def local_to_list(kv_name) do
-    do_match(kv_name) |> Enum.map(fn {{:kv, ^kv_name, k}, v} -> {k, v} end)
+    partition = Partition.get_partition(kv_name)
+    spec = [{{{:kv, kv_name, :"$1"}, :"$2"}, [], [{{:"$1", :"$2"}}]}]
+    MatchSpec.select(partition, spec)
   end
 
   ## ── Private ──────────────────────────────────────────────────────────────────
 
   defp idx(name), do: Partition.get_partition_order(name)
-  defp table_type(), do: Config.get_config(:table_type, :set)
+  defp table_type, do: Config.get_config(:table_type, :set)
 
   # Extract a single value from a list of ETS records.
   # For :set/:ordered_set tables, there is at most one record.
   # For :bag/:duplicate_bag tables, take the last (most recent) value.
-  defp extract_value([], default), do: default
-
   defp extract_value(records, _default) do
     {_, value} = List.last(records)
     value
-  end
-
-  defp do_match(kv_name) do
-    Storage.get_by_match_object({{:kv, kv_name, :_}, :_}, Partition.get_partition(kv_name))
   end
 
   # Local-mode only: atomic upsert using update_element with default.

@@ -5,6 +5,52 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0]
+
+### Changed
+
+- `KeyValue.count/2`, `keys/2`, and `values/2` now compute results with ETS
+  count and field projections instead of copying full key-value records into
+  the caller.
+- Distributed `KeyValue.remove_batch/2` removes all keys for a partition in
+  one routed operation instead of issuing one remote call per key.
+- Partition and replica batch writes insert the whole partition batch with a
+  single `Storage.put/2` call rather than one insert per record.
+- `lazy_put/1` buffer streams flush drained batches through
+  `SuperCache.put_batch!/1` and deliver items in FIFO order per scheduler
+  queue.
+- Expired read-your-writes entries are pruned with `:ets.select_delete/2`
+  instead of scanning the table into the caller.
+- `Struct` caches resolved key-field metadata in `:persistent_term` after
+  `init/2` (cleared on stop), so repeated struct operations avoid ETS and
+  `:erpc` lookups.
+- `mix dialyzer` now exits cleanly: the PLT includes `:logger`,
+  `Storage.MatchSpec` types accept non-tuple bodies, OTP 29
+  `:erpc.multicall/5` results are matched correctly, unreachable clauses are
+  removed, the optional Telemetry call is guarded, and the benchmark Mix task
+  uses current compiled match-spec APIs. No runtime behavior changes.
+
+### Fixed
+
+- `Stack` operations now bound contention spin-waiting like `Queue`, so a
+  held or abandoned lock returns the documented default instead of spinning
+  forever.
+- Concurrent queue and stack initialization serializes initialization and
+  counter updates, so a concurrent writer can no longer reset an active
+  counter to zero.
+- Queue and stack mutations release their lock on error and reclaim stale
+  locks left behind by terminated or timed-out processes.
+- `Storage.get_by_match/2` now extracts capture variables from nested tuples
+  and returns bindings in numeric variable order (`:"$1"`, `:"$2"`, ...).
+- The read-your-writes tracking table is owned by the permanent
+  `SuperCache.Cluster.WAL.Store` process, so short-lived writers no longer
+  destroy tracking state and concurrent first writes cannot race on table
+  creation.
+- Distributed `Struct.remove/1` executes on the primary partition owner
+  instead of pre-checking a possibly stale local replica.
+- Duplicate acknowledgements from the same replica no longer advance WAL
+  quorum counts.
+
 ## [1.5.0]
 
 ### Fixed
@@ -19,6 +65,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from previous holders, instead of leaving them stranded on old owners.
 - `Bootstrap.stop/0` no longer raises when the supervision tree is already
   down; it logs and returns `:ok`.
+- Sync and strong write failures now reach callers through every public write
+  surface. `Queue`, `Stack`, and `Struct` distributed writes no longer report
+  success after `DistributedHelpers.apply_write/3` fails, and forwarded write
+  failures are normalized to `SuperCache.Cluster.Error`.
+- Read failures no longer surface as empty results: primary and quorum reads
+  fall back only when the local node holds a replica, otherwise bang APIs
+  raise and non-bang APIs return `{:error, exception}`.
+- Health checks run against the owning node only. Remote partition counts come
+  from the remote node, aggregation is bounded, and probes are unique and
+  cleaned up after failures.
+- Partition handoff is single-donor and coalesced, streams bounded batches,
+  and reports exact transferred/failed counts.
 
 ### Changed
 
@@ -27,9 +85,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Expanded distributed guide: corrected health status values, NodeMonitor
   configuration examples, `DistributedStore` helper signatures, and documented
   ownership reconciliation on node join/leave.
+- Documented the write-failure contract change: sync/strong writes that cannot
+  reach quorum now raise or return an error instead of silently succeeding.
+- Async replication documentation now covers retry limits, backoff, and the
+  `async_failures`/`async_drops` counters.
 
 ### Added
 
+- Reliability counters for membership changes, handoff/transfer failures, and
+  the existing replication/read/health failure paths, exposed through
+  `SuperCache.Cluster.Stats.reliability/0`.
 - Test coverage tooling (`tools/coverage/uncovered.exs`) and a coverage round
   five suite; total line coverage raised from ~94.4% to ~95.7% with Stack,
   Storage, Metrics, Stats and Cluster.Manager at 100%.
@@ -172,7 +237,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial public release with documentation for publishing the package.
 
-[Unreleased]: https://github.com/ohhi-vn/super_cache/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/ohhi-vn/super_cache/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/ohhi-vn/super_cache/compare/v1.5.0...v1.6.0
+[1.5.0]: https://github.com/ohhi-vn/super_cache/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/ohhi-vn/super_cache/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/ohhi-vn/super_cache/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/ohhi-vn/super_cache/compare/v1.2.0...v1.2.1

@@ -18,6 +18,7 @@ defmodule SuperCache.Cluster.WALTest do
   use ExUnit.Case, async: false
 
   alias SuperCache.Cluster.WAL
+  alias SuperCache.Cluster.WAL.Store
   alias SuperCache.{Config, Partition, Storage}
 
   # ── Setup ────────────────────────────────────────────────────────────────────
@@ -59,11 +60,51 @@ defmodule SuperCache.Cluster.WALTest do
       :error, :badarg -> :ok
     end
 
+    try do
+      :ets.delete_all_objects(SuperCache.Cluster.WAL_watermarks)
+    catch
+      :error, :badarg -> :ok
+    end
+
     SuperCache.delete_all()
     :ok
   end
 
   # ── Lifecycle ────────────────────────────────────────────────────────────────
+
+  describe "WAL.Store table ownership" do
+    test "exposes the table names used by the WAL and router" do
+      assert Store.wal_table() == SuperCache.Cluster.WAL
+      assert Store.ack_table() == SuperCache.Cluster.WAL_acks
+      assert Store.watermark_table() == SuperCache.Cluster.WAL_watermarks
+      assert Store.ryw_table() == SuperCache.Cluster.Router.RywTracker
+
+      for table <- [
+            Store.wal_table(),
+            Store.ack_table(),
+            Store.watermark_table()
+          ] do
+        assert :ets.info(table, :named_table) == true
+      end
+    end
+
+    test "start_link/0 reports the already-running store" do
+      store_pid = Process.whereis(Store)
+
+      assert {:error, {:already_started, ^store_pid}} = Store.start_link()
+      assert Process.whereis(Store) == store_pid
+    end
+
+    test "init/1 reuses existing tables instead of recreating them" do
+      store_pid = Process.whereis(Store)
+      wal_table = Store.wal_table()
+
+      assert {:ok, _state} = Store.init([])
+      assert Process.whereis(Store) == store_pid
+      assert :ets.info(wal_table, :named_table) == true
+      assert :ets.member(wal_table, {:seq, :counter})
+    end
+  end
 
   describe "WAL GenServer lifecycle" do
     test "WAL process is running after application start" do
@@ -303,6 +344,21 @@ defmodule SuperCache.Cluster.WALTest do
       assert_receive {:majority_reached, ^seq}, 1_000
       refute :ets.member(SuperCache.Cluster.WAL_acks, seq)
     end
+
+    test "duplicate acknowledgements from one replica cannot satisfy quorum" do
+      seq = 3
+      # Required 3 (strict majority of a 3-copy partition).
+      :ets.insert(SuperCache.Cluster.WAL_acks, [{seq, 3, self()}, {{seq, :count}, 0}])
+
+      WAL.ack(seq, :r1@host)
+      WAL.ack(seq, :r1@host)
+      WAL.ack(seq, :r1@host)
+
+      assert [{{^seq, :count}, 1}] =
+               :ets.lookup(SuperCache.Cluster.WAL_acks, {seq, :count})
+
+      refute_receive {:majority_reached, ^seq}, 200
+    end
   end
 
   # ── Recovery ────────────────────────────────────────────────────────────────
@@ -493,10 +549,12 @@ defmodule SuperCache.Cluster.WALTest do
       # takes the replicated path. Original map restored afterwards.
       pt_key = {SuperCache.Cluster.Manager, :partition_map}
       original = :persistent_term.get(pt_key, nil)
-      :persistent_term.put(pt_key, %{0 => {node(), [:"wal_fake1@host", :"wal_fake2@host"]}})
+      :persistent_term.put(pt_key, %{0 => {node(), [:wal_fake1@host, :wal_fake2@host]}})
 
       on_exit(fn ->
-        if original, do: :persistent_term.put(pt_key, original), else: :persistent_term.erase(pt_key)
+        if original,
+          do: :persistent_term.put(pt_key, original),
+          else: :persistent_term.erase(pt_key)
       end)
 
       :ok
@@ -516,7 +574,8 @@ defmodule SuperCache.Cluster.WALTest do
       end
 
       # Local write still happened (write-ahead) and tracking rows were cleaned.
-      assert [{:wal_timeout_key, 1}] == Storage.get(:wal_timeout_key, Partition.get_partition_by_idx(0))
+      assert [{:wal_timeout_key, 1}] ==
+               Storage.get(:wal_timeout_key, Partition.get_partition_by_idx(0))
     end
 
     test "succeeds when replicas ack before the timeout" do
@@ -596,7 +655,8 @@ defmodule SuperCache.Cluster.WALTest do
 
       :ets.insert(
         SuperCache.Cluster.WAL,
-        {88_002, %{seq: 88_002, partition_idx: 0, ops: [], timestamp: System.monotonic_time(:millisecond)}}
+        {88_002,
+         %{seq: 88_002, partition_idx: 0, ops: [], timestamp: System.monotonic_time(:millisecond)}}
       )
 
       send(WAL, :cleanup)
@@ -614,7 +674,8 @@ defmodule SuperCache.Cluster.WALTest do
 
       :ets.insert(
         SuperCache.Cluster.WAL,
-        {95_001, %{seq: 95_001, partition_idx: 0, ops: [], timestamp: System.monotonic_time(:millisecond)}}
+        {95_001,
+         %{seq: 95_001, partition_idx: 0, ops: [], timestamp: System.monotonic_time(:millisecond)}}
       )
 
       assert WAL.stats().pending == base + 1

@@ -36,6 +36,22 @@ defmodule SuperCache.Cluster.HealthMonitor do
   | `:replication_lag_threshold_ms` | `500` | Max acceptable replication lag |
   | `:error_rate_threshold` | `0.05` | Max acceptable error rate (5%) |
   | `:partition_imbalance_threshold` | `0.3` | Max acceptable partition size variance (30%) |
+  | `:cycle_deadline_ms` | `30_000` | Maximum duration of one health-check cycle |
+
+  ## Node-local checks and aggregation
+
+  `run_health_checks/1` evaluates only `node()`; it never reads a peer's
+  partition tables. `cluster_health/0` aggregates `local_node_health/0` from
+  every live node through a bounded `Rpc.call/5` and falls back to the last
+  cached aggregate for unreachable nodes, marking them `:degraded` or
+  `:unknown` instead of omitting them.
+
+  Replication-lag probes use `{:health_probe, node(), make_ref()}` and are
+  removed in an `after` block even when the check fails or times out. Cycles
+  are bounded by `:cycle_deadline_ms`; a timed-out cycle records connectivity
+  as unhealthy and the remaining checks as unknown, and increments the
+  `health/timeouts` counter. Checks are skipped until the cache has completed
+  bootstrap (`Config.get_config(:started, false)` is true).
 
   ## Usage
 
@@ -63,8 +79,8 @@ defmodule SuperCache.Cluster.HealthMonitor do
   require Logger
   require SuperCache.Log
 
-  alias SuperCache.Cluster.{Manager, Metrics}
-  alias SuperCache.{Partition, Storage, Config}
+  alias SuperCache.Cluster.{Manager, Metrics, Rpc}
+  alias SuperCache.{Config, Partition, Storage}
 
   # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -79,9 +95,6 @@ defmodule SuperCache.Cluster.HealthMonitor do
   # Health data stored in ETS for fast reads.
   # Key: {node, check_type} → value: %{status, timestamp, details}
   @health_table __MODULE__.HealthData
-
-  # Probe key used for replication lag measurement.
-  @probe_key {:health_probe, :latency}
 
   # ── Public API ────────────────────────────────────────────────────────────────
 
@@ -123,18 +136,16 @@ defmodule SuperCache.Cluster.HealthMonitor do
       }
   """
   @spec cluster_health() :: map
-  def cluster_health() do
-    nodes =
-      try do
-        Manager.live_nodes()
-      catch
-        :exit, _ -> [node()]
-        _, _ -> [node()]
-      end
+  def cluster_health do
+    nodes = live_nodes_safe()
 
     node_health =
       Enum.map(nodes, fn n ->
-        node_health(n)
+        if n == node() do
+          local_node_health()
+        else
+          remote_node_health(n)
+        end
       end)
 
     summary = %{
@@ -161,42 +172,86 @@ defmodule SuperCache.Cluster.HealthMonitor do
   end
 
   @doc """
+  Return the health map for the local node, computed from this node's own
+  ETS tables and metrics. Called directly by `cluster_health/0` and remotely
+  via `call/5` when aggregating peer health.
+  """
+  @spec local_node_health() :: map
+  def local_node_health do
+    checks =
+      %{
+        connectivity: get_check(node(), :connectivity),
+        replication: get_check(node(), :replication),
+        partitions: get_check(node(), :partitions),
+        error_rate: get_check(node(), :error_rate)
+      }
+
+    build_node_health(node(), checks)
+  end
+
+  @doc """
   Returns the health status for a specific node.
 
-  ## Returns
-
-      %{
-        node: node(),
-        status: :healthy | :degraded | :unhealthy | :unknown,
-        latency_ms: non_neg_integer | nil,
-        last_check: integer,
-        checks: %{
-          connectivity: %{status: :pass | :fail, latency_ms: non_neg_integer | nil},
-          replication: %{status: :pass | :fail | :unknown, lag_ms: non_neg_integer | nil},
-          partitions: %{status: :pass | :fail | :unknown, imbalance: float | nil},
-          error_rate: %{status: :pass | :fail | :unknown, rate: float | nil}
-        }
-      }
+  For the local node this reads local ETS health data. For a remote node it
+  asks that node for its own `local_node_health/0` through a bounded RPC and
+  falls back to the last aggregated result (marked degraded) when the node
+  is unreachable.
   """
   @spec node_health(node) :: map
   def node_health(node) do
-    # Verify cluster infrastructure is available
-    _nodes =
-      try do
-        Manager.live_nodes()
-      catch
-        :exit, _ -> [node()]
-        _, _ -> [node()]
-      end
+    if node == node() do
+      local_node_health()
+    else
+      remote_node_health(node)
+    end
+  end
 
-    checks =
-      %{
-        connectivity: get_check(node, :connectivity),
-        replication: get_check(node, :replication),
-        partitions: get_check(node, :partitions),
-        error_rate: get_check(node, :error_rate)
-      }
+  defp remote_node_health(target) do
+    deadline = 5_000
 
+    case Rpc.call(target, __MODULE__, :local_node_health, [], timeout: deadline) do
+      {:ok, %{} = health} ->
+        :ets.insert(@health_table, {{target, :aggregate}, health})
+        health
+
+      {:error, reason} ->
+        if health_timeout?(reason.reason, reason.reason) do
+          Metrics.increment(:health, :timeouts)
+        end
+
+        cached_or_degraded(target)
+    end
+  end
+
+  defp cached_or_degraded(target) do
+    case :ets.lookup(@health_table, {target, :aggregate}) do
+      [{_, %{} = health}] ->
+        %{health | status: :degraded, node: target}
+
+      [] ->
+        %{
+          node: target,
+          status: :unknown,
+          latency_ms: nil,
+          last_check: 0,
+          checks: %{
+            connectivity: %{status: :fail, timestamp: 0},
+            replication: %{status: :unknown, timestamp: 0},
+            partitions: %{status: :unknown, timestamp: 0},
+            error_rate: %{status: :unknown, timestamp: 0}
+          }
+        }
+    end
+  end
+
+  defp live_nodes_safe do
+    Manager.live_nodes()
+  catch
+    :exit, _ -> [node()]
+    _, _ -> [node()]
+  end
+
+  defp build_node_health(target, checks) do
     latency_ms =
       case checks.connectivity do
         %{latency_ms: ms} when is_integer(ms) -> ms
@@ -210,7 +265,7 @@ defmodule SuperCache.Cluster.HealthMonitor do
       |> Enum.max()
 
     %{
-      node: node,
+      node: target,
       status: derive_status(checks),
       latency_ms: latency_ms,
       last_check: last_check,
@@ -292,74 +347,81 @@ defmodule SuperCache.Cluster.HealthMonitor do
       }
   """
   @spec partition_balance() :: map
-  def partition_balance() do
-    num_partitions =
-      try do
-        Partition.get_num_partition()
-      catch
-        :exit, _ -> 0
-        _, _ -> 0
-      end
+  def partition_balance do
+    case safe_num_partitions() do
+      0 -> empty_partition_balance()
+      num_partitions -> build_partition_balance(num_partitions)
+    end
+  end
 
-    if num_partitions == 0 do
-      %{total_records: 0, partitions: [], partition_count: 0, avg_records_per_partition: 0.0, max_imbalance: 0.0}
-    else
-      partitions =
-      Enum.map(0..(num_partitions - 1), fn idx ->
-        {primary, _} =
-          try do
-            Manager.get_replicas(idx)
-          catch
-            :exit, _ -> {node(), []}
-            _, _ -> {node(), []}
-          end
+  defp empty_partition_balance do
+    %{
+      total_records: 0,
+      partitions: [],
+      partition_count: 0,
+      avg_records_per_partition: 0.0,
+      max_imbalance: 0.0
+    }
+  end
 
-        table =
-          try do
-            Partition.get_partition_by_idx(idx)
-          catch
-            _, _ -> nil
-          end
-
-        count =
-          if table do
-            try do
-              {_, c} = Storage.stats(table)
-              if is_integer(c), do: c, else: 0
-            catch
-              _, _ -> 0
-            end
-          else
-            0
-          end
-
-        %{
-          idx: idx,
-          record_count: count,
-          primary: primary
-        }
-      end)
-
+  defp build_partition_balance(num_partitions) do
+    partitions = Enum.map(0..(num_partitions - 1), &partition_stat/1)
     total = Enum.reduce(partitions, 0, &(&1.record_count + &2))
-    avg = if num_partitions > 0, do: total / num_partitions, else: 0
-
-    max_imbalance =
-      if avg > 0 do
-        partitions
-        |> Enum.map(fn p -> abs(p.record_count - avg) / avg end)
-        |> Enum.max()
-      else
-        0.0
-      end
+    avg = total / num_partitions
 
     %{
       total_records: total,
       partition_count: num_partitions,
       avg_records_per_partition: avg,
-      max_imbalance: max_imbalance,
+      max_imbalance: max_imbalance(partitions, avg),
       partitions: partitions
     }
   end
+
+  defp partition_stat(idx) do
+    {primary, _replicas} = safe_replicas(idx)
+    %{idx: idx, record_count: safe_partition_count(idx), primary: primary}
+  end
+
+  defp safe_num_partitions do
+    Partition.get_num_partition()
+  catch
+    :exit, _ -> 0
+    _, _ -> 0
+  end
+
+  defp safe_replicas(idx) do
+    Manager.get_replicas(idx)
+  catch
+    :exit, _ -> {node(), []}
+    _, _ -> {node(), []}
+  end
+
+  defp safe_partition_count(idx) do
+    idx |> safe_partition_table() |> count_for_table()
+  end
+
+  defp safe_partition_table(idx) do
+    Partition.get_partition_by_idx(idx)
+  catch
+    _, _ -> nil
+  end
+
+  defp count_for_table(nil), do: 0
+
+  defp count_for_table(table) do
+    {_, count} = Storage.stats(table)
+    if is_integer(count), do: count, else: 0
+  catch
+    _, _ -> 0
+  end
+
+  defp max_imbalance(_partitions, avg) when avg == 0, do: 0.0
+
+  defp max_imbalance(partitions, avg) do
+    partitions
+    |> Enum.map(fn p -> abs(p.record_count - avg) / avg end)
+    |> Enum.max()
   end
 
   @doc """
@@ -368,7 +430,7 @@ defmodule SuperCache.Cluster.HealthMonitor do
   Useful for testing or when an external monitoring system needs fresh data.
   """
   @spec force_check() :: :ok
-  def force_check() do
+  def force_check do
     GenServer.call(__MODULE__, :force_check, 30_000)
   end
 
@@ -422,50 +484,55 @@ defmodule SuperCache.Cluster.HealthMonitor do
   defp run_health_checks(opts) do
     t0 = System.monotonic_time(:millisecond)
 
-    # Gracefully handle missing cluster infrastructure (e.g., during tests or before bootstrap)
-    # Use catch to handle :exit from dead GenServer, not just rescue for exceptions
-    nodes =
-      try do
-        Manager.live_nodes()
-      catch
-        :exit, _ -> []
-        _, _ -> []
-      end
-
-    if nodes == [] do
-      Logger.debug("super_cache, health_monitor, skipping health checks (cluster not ready)")
+    if Config.get_config(:started, false) != true do
+      SuperCache.Log.debug(fn ->
+        "super_cache, health_monitor, skipping health checks (cache not started)"
+      end)
     else
-      # Run checks in parallel across all nodes, catching any crashes
-      # so one failing check doesn't crash the whole cycle
-      tasks =
-        Enum.map(nodes, fn node ->
-          Task.async(fn ->
-            try do
-              check_connectivity(node, opts)
-              check_replication(node, opts)
-              check_partitions(node, opts)
-              check_error_rate(node, opts)
-            catch
-              _, _ -> :ok
-            end
-          end)
+      # Health checks evaluate only the local node. Remote nodes are checked
+      # when cluster_health/0 aggregates their own local_node_health/0.
+      deadline = Keyword.get(opts, :cycle_deadline_ms, 30_000)
+
+      task =
+        Task.async(fn ->
+          try do
+            check_connectivity(node(), opts)
+            check_replication(node(), opts)
+            check_partitions(node(), opts)
+            check_error_rate(node(), opts)
+          catch
+            _, _ -> :ok
+          end
         end)
 
-      # Use yield_many with timeout to avoid blocking on slow/dead nodes
-      Task.yield_many(tasks, 30_000)
-      |> Enum.each(fn {task, _result} ->
-        Task.shutdown(task, :brutal_kill)
-      end)
+      case Task.yield(task, deadline) do
+        nil ->
+          Task.shutdown(task, :brutal_kill)
+          Metrics.increment(:health, :timeouts)
+          record_cycle_timeout()
+
+        _result ->
+          :ok
+      end
     end
 
     elapsed = System.monotonic_time(:millisecond) - t0
 
     SuperCache.Log.debug(fn ->
-      "super_cache, health_monitor, check cycle completed in #{elapsed}ms for #{length(nodes)} node(s)"
+      "super_cache, health_monitor, check cycle completed in #{elapsed}ms"
     end)
 
-    # Emit telemetry event if available
-    emit_telemetry(:check, %{duration_ms: elapsed, node_count: length(nodes)})
+    emit_telemetry(:check, %{duration_ms: elapsed, node_count: 1})
+  end
+
+  # If a cycle is killed at the deadline we cannot trust any partial check
+  # results; record connectivity as unhealthy and the rest as unknown.
+  defp record_cycle_timeout do
+    now = System.monotonic_time(:millisecond)
+    store_check(node(), :connectivity, %{status: :fail, latency_ms: nil, timestamp: now})
+    store_check(node(), :replication, %{status: :unknown, timestamp: now})
+    store_check(node(), :partitions, %{status: :unknown, timestamp: now})
+    store_check(node(), :error_rate, %{status: :unknown, timestamp: now})
   end
 
   # ── Private — Individual Checks ──────────────────────────────────────────────
@@ -488,6 +555,10 @@ defmodule SuperCache.Cluster.HealthMonitor do
         }
       catch
         kind, reason ->
+          if health_timeout?(kind, reason) do
+            Metrics.increment(:health, :timeouts)
+          end
+
           Logger.warning(
             "super_cache, health_monitor, connectivity check failed for #{inspect(node)}: #{inspect({kind, reason})}"
           )
@@ -513,19 +584,7 @@ defmodule SuperCache.Cluster.HealthMonitor do
 
   defp check_replication(node, opts) do
     threshold = opts[:replication_lag_threshold_ms]
-
-    # Only check replication on primary nodes
-    primary_partitions =
-      try do
-        0..(Partition.get_num_partition() - 1)
-        |> Enum.filter(fn idx ->
-          {primary, _} = Manager.get_replicas(idx)
-          primary == node
-        end)
-      catch
-        :exit, _ -> []
-        _, _ -> []
-      end
+    primary_partitions = primary_partition_indices(node)
 
     if primary_partitions == [] do
       store_check(node, :replication, %{
@@ -537,70 +596,54 @@ defmodule SuperCache.Cluster.HealthMonitor do
 
       :ok
     else
-      # Measure replication lag on a sample partition
-      sample_idx = hd(primary_partitions)
-      {_, all_replicas} =
-        try do
-          Manager.get_replicas(sample_idx)
-        catch
-          :exit, _ -> {node(), []}
-          _, _ -> {node(), []}
-        end
-
-      # A node cannot replicate to itself — filter out the current node.
-      replicas = Enum.reject(all_replicas, &(&1 == node()))
-
-      if replicas == [] do
-        store_check(node, :replication, %{
-          status: :pass,
-          lag_ms: 0,
-          timestamp: System.monotonic_time(:millisecond),
-          reason: :no_replicas
-        })
-      else
-        # Write a probe and measure time until replicas see it
-        lag = measure_replication_lag(sample_idx, node, hd(replicas))
-
-        status =
-          cond do
-            is_nil(lag) -> :unknown
-            lag <= threshold -> :pass
-            true -> :degraded
-          end
-
-        store_check(node, :replication, %{
-          status: status,
-          lag_ms: lag,
-          timestamp: System.monotonic_time(:millisecond)
-        })
-
-        if status == :degraded do
-          emit_telemetry(:alert, %{
-            type: :replication_lag,
-            node: node,
-            lag_ms: lag,
-            threshold_ms: threshold
-          })
-        end
-      end
+      check_replication_lag(node, hd(primary_partitions), threshold)
     end
+  end
+
+  defp check_replication_lag(node, sample_idx, threshold) do
+    {_, all_replicas} = safe_replicas(sample_idx)
+    # A node cannot replicate to itself — filter out the current node.
+    replicas = Enum.reject(all_replicas, &(&1 == node()))
+
+    if replicas == [] do
+      store_check(node, :replication, %{
+        status: :pass,
+        lag_ms: 0,
+        timestamp: System.monotonic_time(:millisecond),
+        reason: :no_replicas
+      })
+    else
+      lag = measure_replication_lag(sample_idx, node, hd(replicas))
+      status = replication_status(lag, threshold)
+
+      store_check(node, :replication, %{
+        status: status,
+        lag_ms: lag,
+        timestamp: System.monotonic_time(:millisecond)
+      })
+
+      maybe_alert_replication(node, status, lag, threshold)
+    end
+  end
+
+  defp replication_status(lag, _threshold) when is_nil(lag), do: :unknown
+  defp replication_status(lag, threshold) when lag <= threshold, do: :pass
+  defp replication_status(_lag, _threshold), do: :degraded
+
+  defp maybe_alert_replication(_node, status, _lag, _threshold) when status != :degraded, do: :ok
+
+  defp maybe_alert_replication(node, :degraded, lag, threshold) do
+    emit_telemetry(:alert, %{
+      type: :replication_lag,
+      node: node,
+      lag_ms: lag,
+      threshold_ms: threshold
+    })
   end
 
   defp check_partitions(node, opts) do
     threshold = opts[:partition_imbalance_threshold]
-
-    # Get partition sizes for this node's primary partitions
-    primary_partitions =
-      try do
-        0..(Partition.get_num_partition() - 1)
-        |> Enum.filter(fn idx ->
-          {primary, _} = Manager.get_replicas(idx)
-          primary == node
-        end)
-      catch
-        :exit, _ -> []
-        _, _ -> []
-      end
+    primary_partitions = primary_partition_indices(node)
 
     if primary_partitions == [] do
       store_check(node, :partitions, %{
@@ -610,41 +653,61 @@ defmodule SuperCache.Cluster.HealthMonitor do
         reason: :not_primary
       })
     else
-      sizes =
-        Enum.map(primary_partitions, fn idx ->
-          table = Partition.get_partition_by_idx(idx)
-          {_, count} = Storage.stats(table)
-          count
-        end)
-
-      avg = Enum.sum(sizes) / length(sizes)
-
-      imbalance =
-        if avg > 0 do
-          sizes
-          |> Enum.map(fn s -> abs(s - avg) / avg end)
-          |> Enum.max()
-        else
-          0.0
-        end
-
-      status = if imbalance <= threshold, do: :pass, else: :degraded
-
-      store_check(node, :partitions, %{
-        status: status,
-        imbalance: imbalance,
-        timestamp: System.monotonic_time(:millisecond)
-      })
-
-      if status == :degraded do
-        emit_telemetry(:alert, %{
-          type: :partition_imbalance,
-          node: node,
-          imbalance: imbalance,
-          threshold: threshold
-        })
-      end
+      store_partition_balance(node, primary_partitions, threshold)
     end
+  end
+
+  defp store_partition_balance(node, primary_partitions, threshold) do
+    imbalance = partition_imbalance(primary_partitions)
+    status = if imbalance <= threshold, do: :pass, else: :degraded
+
+    store_check(node, :partitions, %{
+      status: status,
+      imbalance: imbalance,
+      timestamp: System.monotonic_time(:millisecond)
+    })
+
+    maybe_alert_imbalance(node, status, imbalance, threshold)
+  end
+
+  defp partition_imbalance(primary_partitions) do
+    sizes =
+      Enum.map(primary_partitions, fn idx ->
+        table = Partition.get_partition_by_idx(idx)
+        {_, count} = Storage.stats(table)
+        count
+      end)
+
+    avg = Enum.sum(sizes) / length(sizes)
+
+    if avg > 0 do
+      sizes |> Enum.map(fn s -> abs(s - avg) / avg end) |> Enum.max()
+    else
+      0.0
+    end
+  end
+
+  defp maybe_alert_imbalance(_node, status, _imbalance, _threshold) when status != :degraded,
+    do: :ok
+
+  defp maybe_alert_imbalance(node, :degraded, imbalance, threshold) do
+    emit_telemetry(:alert, %{
+      type: :partition_imbalance,
+      node: node,
+      imbalance: imbalance,
+      threshold: threshold
+    })
+  end
+
+  defp primary_partition_indices(node) do
+    0..(Partition.get_num_partition() - 1)
+    |> Enum.filter(fn idx ->
+      {primary, _} = Manager.get_replicas(idx)
+      primary == node
+    end)
+  catch
+    :exit, _ -> []
+    _, _ -> []
   end
 
   defp check_error_rate(node, opts) do
@@ -686,30 +749,45 @@ defmodule SuperCache.Cluster.HealthMonitor do
   # ── Private — Replication Lag Measurement ─────────────────────────────────────
 
   defp measure_replication_lag(partition_idx, _primary, replica) do
+    probe_key = {:health_probe, node(), make_ref()}
     probe_value = System.monotonic_time(:microsecond)
+    table = Partition.get_partition_by_idx(partition_idx)
 
     try do
       # Write probe to primary
-      table = Partition.get_partition_by_idx(partition_idx)
-      Storage.put({@probe_key, probe_value}, table)
+      Storage.put({probe_key, probe_value}, table)
 
       # Poll replica until it sees the probe
       t0 = System.monotonic_time(:millisecond)
       max_wait = 2_000
 
-      lag = poll_replica(replica, partition_idx, @probe_key, probe_value, t0, max_wait)
-
-      # Clean up probe
-      Storage.delete(@probe_key, table)
-
-      lag
+      poll_replica(replica, partition_idx, probe_key, probe_value, t0, max_wait)
     catch
       _, _ -> nil
+    after
+      # Always remove the probe from the primary and every replica, even when
+      # the poll timed out or the replica is unreachable.
+      cleanup_probe(probe_key, table, replica)
+    end
+  end
+
+  defp cleanup_probe(probe_key, table, replica) do
+    try do
+      Storage.delete(probe_key, table)
+    catch
+      _, _ -> :ok
+    end
+
+    try do
+      :erpc.call(replica, Storage, :delete, [probe_key, table], 1_000)
+    catch
+      _, _ -> :ok
     end
   end
 
   defp poll_replica(replica, partition_idx, probe_key, probe_value, t0, max_wait) do
     if System.monotonic_time(:millisecond) - t0 > max_wait do
+      Metrics.increment(:health, :timeouts)
       nil
     else
       result =
@@ -737,6 +815,11 @@ defmodule SuperCache.Cluster.HealthMonitor do
     :ets.insert(@health_table, {{node, check_type}, data})
   end
 
+  defp health_timeout?(:error, {:erpc, :timeout}), do: true
+  defp health_timeout?(_, :timeout), do: true
+  defp health_timeout?(:exit, {:timeout, _}), do: true
+  defp health_timeout?(_, _), do: false
+
   defp get_check(node, check_type) do
     case :ets.lookup(@health_table, {node, check_type}) do
       [{_, data}] -> data
@@ -760,12 +843,13 @@ defmodule SuperCache.Cluster.HealthMonitor do
 
   # ── Private — Telemetry ──────────────────────────────────────────────────────
 
+  @dialyzer {:nowarn_function, emit_telemetry: 2}
   defp emit_telemetry(event, metadata) do
     # `:telemetry` is an optional dependency — emit only when the module and
     # function are actually loaded. Handler exceptions still propagate to
     # telemetry's own handler supervision rather than being swallowed here.
     if Code.ensure_loaded?(:telemetry) and function_exported?(:telemetry, :execute, 3) do
-      apply(:telemetry, :execute, [[:super_cache, :health, event], %{}, metadata])
+      Function.capture(:telemetry, :execute, 3).([:super_cache, :health, event], %{}, metadata)
     else
       :ok
     end

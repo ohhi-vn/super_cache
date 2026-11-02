@@ -54,8 +54,8 @@ defmodule SuperCache.Cluster.Router do
   require Logger
   require SuperCache.Log
 
+  alias SuperCache.Cluster.{DistributedHelpers, Manager, Metrics, Quorum, Replicator, Rpc, WAL}
   alias SuperCache.{Config, Partition, Storage}
-  alias SuperCache.Cluster.{Manager, Replicator, ThreePhaseCommit}
 
   @erpc_timeout 5_000
 
@@ -72,16 +72,17 @@ defmodule SuperCache.Cluster.Router do
   def route_put!(data, opts \\ []) when is_tuple(data) do
     order = get_partition_order(data)
 
-    if primary?(order) or Keyword.get(opts, :forwarded, false) do
-      local_write(order, :put, data)
-    else
-      forward(:route_put!, [data, [forwarded: true]], order)
-    end
+    result =
+      if primary?(order) or Keyword.get(opts, :forwarded, false) do
+        local_write(order, :put, data)
+      else
+        forward(:route_put!, [data, [forwarded: true]], order)
+      end
 
     # Track this write for read-your-writes consistency.
     track_write(order)
 
-    true
+    unwrap_write!(result, :put, order)
   end
 
   @doc """
@@ -108,11 +109,14 @@ defmodule SuperCache.Cluster.Router do
 
     # Send each group to its primary in a single erpc call
     Enum.each(grouped, fn {order, data_for_partition} ->
-      if primary?(order) or Keyword.get(opts, :forwarded, false) do
-        local_batch_write(order, data_for_partition)
-      else
-        forward(:route_put_batch!, [data_for_partition, [forwarded: true]], order)
-      end
+      result =
+        if primary?(order) or Keyword.get(opts, :forwarded, false) do
+          local_batch_write(order, data_for_partition)
+        else
+          forward(:route_put_batch!, [data_for_partition, [forwarded: true]], order)
+        end
+
+      unwrap_write!(result, :put_batch, order)
     end)
 
     :ok
@@ -189,29 +193,34 @@ defmodule SuperCache.Cluster.Router do
   def route_delete!(data, opts \\ []) when is_tuple(data) do
     order = get_partition_order(data)
 
-    if primary?(order) or Keyword.get(opts, :forwarded, false) do
-      key = Config.get_key!(data)
-      local_delete(order, key)
-    else
-      forward(:route_delete!, [data, [forwarded: true]], order)
-    end
+    result =
+      if primary?(order) or Keyword.get(opts, :forwarded, false) do
+        key = Config.get_key!(data)
+        local_delete(order, key)
+      else
+        forward(:route_delete!, [data, [forwarded: true]], order)
+      end
 
+    unwrap_write!(result, :delete, order)
     :ok
   end
 
   @doc "Delete all records — one routed call per partition."
   @spec route_delete_all() :: :ok
-  def route_delete_all() do
+  def route_delete_all do
     num = Config.get_config(:num_partition, Partition.get_schedulers())
 
     0..(num - 1)
     |> Enum.each(fn order ->
-      if primary?(order) do
-        local_delete_all(order)
-      else
-        {primary, _} = Manager.get_replicas(order)
-        safe_erpc(primary, __MODULE__, :route_delete_all_partition, [order, [forwarded: true]])
-      end
+      result =
+        if primary?(order) do
+          local_delete_all(order)
+        else
+          {primary, _} = Manager.get_replicas(order)
+          safe_erpc(primary, __MODULE__, :route_delete_all_partition, [order, [forwarded: true]])
+        end
+
+      unwrap_write!(result, :delete_all, order)
     end)
 
     :ok
@@ -221,12 +230,14 @@ defmodule SuperCache.Cluster.Router do
   # Single-partition delete_all; called via :erpc from route_delete_all/0.
   @spec route_delete_all_partition(non_neg_integer, keyword) :: :ok
   def route_delete_all_partition(order, opts \\ []) do
-    if primary?(order) or Keyword.get(opts, :forwarded, false) do
-      local_delete_all(order)
-    else
-      forward(:route_delete_all_partition, [order, [forwarded: true]], order)
-    end
+    result =
+      if primary?(order) or Keyword.get(opts, :forwarded, false) do
+        local_delete_all(order)
+      else
+        forward(:route_delete_all_partition, [order, [forwarded: true]], order)
+      end
 
+    unwrap_write!(result, :delete_all, order)
     :ok
   end
 
@@ -235,17 +246,20 @@ defmodule SuperCache.Cluster.Router do
   def route_delete_match!(partition_data, pattern) when is_tuple(pattern) do
     resolve_partition_orders(partition_data)
     |> Enum.each(fn order ->
-      if primary?(order) do
-        local_delete_match(order, pattern)
-      else
-        {primary, _} = Manager.get_replicas(order)
+      result =
+        if primary?(order) do
+          local_delete_match(order, pattern)
+        else
+          {primary, _} = Manager.get_replicas(order)
 
-        safe_erpc(primary, __MODULE__, :route_delete_match_partition!, [
-          order,
-          pattern,
-          [forwarded: true]
-        ])
-      end
+          safe_erpc(primary, __MODULE__, :route_delete_match_partition!, [
+            order,
+            pattern,
+            [forwarded: true]
+          ])
+        end
+
+      unwrap_write!(result, :delete_match, order)
     end)
 
     :ok
@@ -255,12 +269,14 @@ defmodule SuperCache.Cluster.Router do
   # Single-partition delete_match; called via :erpc from route_delete_match!/2.
   @spec route_delete_match_partition!(non_neg_integer, tuple, keyword) :: :ok
   def route_delete_match_partition!(order, pattern, opts \\ []) do
-    if primary?(order) or Keyword.get(opts, :forwarded, false) do
-      local_delete_match(order, pattern)
-    else
-      forward(:route_delete_match_partition!, [order, pattern, [forwarded: true]], order)
-    end
+    result =
+      if primary?(order) or Keyword.get(opts, :forwarded, false) do
+        local_delete_match(order, pattern)
+      else
+        forward(:route_delete_match_partition!, [order, pattern, [forwarded: true]], order)
+      end
 
+    unwrap_write!(result, :delete_match, order)
     :ok
   end
 
@@ -269,12 +285,14 @@ defmodule SuperCache.Cluster.Router do
   def route_delete_by_key_partition!(key, partition_data, opts \\ []) do
     order = Partition.get_partition_order(partition_data)
 
-    if primary?(order) or Keyword.get(opts, :forwarded, false) do
-      local_delete(order, key)
-    else
-      forward(:route_delete_by_key_partition!, [key, partition_data, [forwarded: true]], order)
-    end
+    result =
+      if primary?(order) or Keyword.get(opts, :forwarded, false) do
+        local_delete(order, key)
+      else
+        forward(:route_delete_by_key_partition!, [key, partition_data, [forwarded: true]], order)
+      end
 
+    unwrap_write!(result, :delete, order)
     :ok
   end
 
@@ -286,41 +304,46 @@ defmodule SuperCache.Cluster.Router do
 
     case mode do
       :strong ->
-        # 3PC applies locally inside ThreePhaseCommit.apply_local/2
-        ThreePhaseCommit.commit(order, [{op, data}])
-        true
+        # WAL applies locally and replicates to a primary-inclusive majority.
+        case WAL.commit(order, [{op, data}]) do
+          :ok -> :ok
+          {:error, reason} -> {:error, write_error(reason, op, order)}
+        end
 
       _ ->
-        result = Storage.put(data, partition)
-        Replicator.replicate(order, op, data)
-        result
+        Storage.put(data, partition)
+
+        case Replicator.replicate(order, op, data) do
+          :ok -> :ok
+          {:error, reason} when mode == :sync -> {:error, write_error(reason, op, order)}
+          _other -> :ok
+        end
     end
   end
 
   # Batch write: applies all records locally then replicates in a single call.
-  # For :strong mode, falls back to individual 3PC commits per record.
   defp local_batch_write(order, data_list) do
     mode = Manager.replication_mode()
     partition = Partition.get_partition_by_idx(order)
 
     case mode do
       :strong ->
-        # 3PC doesn't support batch natively — commit each record individually.
-        Enum.each(data_list, fn data ->
-          ThreePhaseCommit.commit(order, [{:put, data}])
-        end)
-
-        true
+        # One WAL commit for the whole batch (one per partition).
+        case WAL.commit(order, Enum.map(data_list, &{:put, &1})) do
+          :ok -> :ok
+          {:error, reason} -> {:error, write_error(reason, :put_batch, order)}
+        end
 
       _ ->
-        # Write all records locally in a single ETS operation per record,
+        # Write all records locally in a single ETS batch operation,
         # then replicate the entire batch in one erpc call.
-        Enum.each(data_list, fn data ->
-          Storage.put(data, partition)
-        end)
+        Storage.put(data_list, partition)
 
-        Replicator.replicate_batch(order, :put, data_list)
-        true
+        case Replicator.replicate_batch(order, :put, data_list) do
+          :ok -> :ok
+          {:error, reason} when mode == :sync -> {:error, write_error(reason, :put_batch, order)}
+          _other -> :ok
+        end
     end
   end
 
@@ -330,14 +353,20 @@ defmodule SuperCache.Cluster.Router do
 
     case mode do
       :strong ->
-        ThreePhaseCommit.commit(order, [{:delete, key}])
+        case WAL.commit(order, [{:delete, key}]) do
+          :ok -> :ok
+          {:error, reason} -> {:error, write_error(reason, :delete, order)}
+        end
 
       _ ->
         Storage.delete(key, partition)
-        Replicator.replicate(order, :delete, key)
-    end
 
-    :ok
+        case Replicator.replicate(order, :delete, key) do
+          :ok -> :ok
+          {:error, reason} when mode == :sync -> {:error, reason}
+          _other -> :ok
+        end
+    end
   end
 
   defp local_delete_all(order) do
@@ -346,14 +375,20 @@ defmodule SuperCache.Cluster.Router do
 
     case mode do
       :strong ->
-        ThreePhaseCommit.commit(order, [{:delete_all, nil}])
+        case WAL.commit(order, [{:delete_all, nil}]) do
+          :ok -> :ok
+          {:error, reason} -> {:error, write_error(reason, :delete_all, order)}
+        end
 
       _ ->
         Storage.delete_all(partition)
-        Replicator.replicate(order, :delete_all, nil)
-    end
 
-    :ok
+        case Replicator.replicate(order, :delete_all, nil) do
+          :ok -> :ok
+          {:error, reason} when mode == :sync -> {:error, reason}
+          _other -> :ok
+        end
+    end
   end
 
   defp local_delete_match(order, pattern) do
@@ -362,14 +397,39 @@ defmodule SuperCache.Cluster.Router do
 
     case mode do
       :strong ->
-        ThreePhaseCommit.commit(order, [{:delete_match, pattern}])
+        case WAL.commit(order, [{:delete_match, pattern}]) do
+          :ok -> :ok
+          {:error, reason} -> {:error, write_error(reason, :delete_match, order)}
+        end
 
       _ ->
         Storage.delete_match(pattern, partition)
-        Replicator.replicate(order, :delete_match, pattern)
-    end
 
-    :ok
+        case Replicator.replicate(order, :delete_match, pattern) do
+          :ok -> :ok
+          {:error, reason} when mode == :sync -> {:error, reason}
+          _other -> :ok
+        end
+    end
+  end
+
+  # Normalize a write failure to the documented distributed error type.
+  defp write_error(%SuperCache.Cluster.Error{} = error, _operation, _order), do: error
+
+  defp write_error(reason, operation, order) do
+    Rpc.normalize(reason,
+      operation: operation,
+      partition: order,
+      mode: Manager.replication_mode()
+    )
+  end
+
+  # Normalize and raise a write failure; return `true` for successful writes.
+  defp unwrap_write!(result, operation, order) do
+    case result do
+      {:error, reason} -> raise write_error(reason, operation, order)
+      _ -> true
+    end
   end
 
   ## ── Private — single-partition read dispatcher ───────────────────────────────
@@ -397,94 +457,88 @@ defmodule SuperCache.Cluster.Router do
       local_read(order, op, arg)
     else
       {primary, _} = Manager.get_replicas(order)
-      result = safe_erpc(primary, __MODULE__, :local_read, [order, op, arg])
 
-      case result do
-        list when is_list(list) ->
-          list
-
-        {:error, reason} ->
-          Logger.warning(
-            "super_cache, router, primary read failed (order=#{order}): #{inspect(reason)}"
-          )
-
-          []
+      case Rpc.call(primary, __MODULE__, :local_read, [order, op, arg],
+             operation: op,
+             partition: order,
+             node: primary,
+             mode: :primary
+           ) do
+        {:ok, list} when is_list(list) -> list
+        {:error, error} -> primary_read_fallback(order, op, arg, primary, error)
       end
     end
   end
 
   # Quorum: ask primary + all replicas in parallel; only plain terms sent via
-  # :erpc — no closures.  Returns as soon as a strict majority agrees,
-  # avoiding unnecessary waits for slow replicas.
+  # :erpc — no closures.  Quorum.await/4 terminates as soon as a strict
+  # majority agrees and enforces one deadline for the whole read.
   defp do_read(:quorum, order, op, arg) do
     {primary, replicas} = Manager.get_replicas(order)
     nodes = [primary | replicas]
     total = length(nodes)
     required = div(total, 2) + 1
 
-    tasks =
+    entries =
       Enum.map(nodes, fn n ->
-        Task.async(fn ->
-          try do
-            if n == node() do
-              local_read(order, op, arg)
-            else
-              :erpc.call(n, __MODULE__, :local_read, [order, op, arg], @erpc_timeout)
-            end
-          catch
-            kind, reason ->
-              Logger.warning(
-                "super_cache, router, quorum read failed on #{inspect(n)}: " <>
-                  inspect({kind, reason})
-              )
-
-              :error
-          end
-        end)
+        {n,
+         fn ->
+           if n == node() do
+             local_read(order, op, arg)
+           else
+             :erpc.call(n, __MODULE__, :local_read, [order, op, arg], @erpc_timeout)
+           end
+         end}
       end)
 
-    quorum_await(tasks, required, %{})
+    case Quorum.await(entries, required, @erpc_timeout + 500, pool: Quorum.Pool) do
+      {:ok, value, _voters} ->
+        value
+
+      {:error, reason, results} ->
+        # Prefer a reachable primary result; otherwise fall back to a local
+        # replica only when this node actually holds one.
+        Metrics.increment(:read, :fallbacks)
+
+        case Map.fetch(results, primary) do
+          {:ok, {:ok, value}} -> value
+          _ -> quorum_read_fallback(order, op, arg, primary, reason)
+        end
+    end
   end
 
-  # Poll tasks until a strict majority agrees on a result, or all have returned.
-  defp quorum_await(tasks, required, counts) do
-    case Task.yield_many(tasks, 100) do
-      [] ->
-        # No tasks completed yet — keep waiting.
-        quorum_await(tasks, required, counts)
+  defp quorum_read_fallback(order, op, arg, primary, reason) do
+    if DistributedHelpers.has_partition?(order) do
+      local_read(order, op, arg)
+    else
+      Metrics.increment(:read, :errors)
 
-      done ->
-        # Remove completed tasks from the pending list.
-        done_set = MapSet.new(Enum.map(done, fn {task, _} -> task end))
-        pending = Enum.reject(tasks, &MapSet.member?(done_set, &1))
+      raise Rpc.normalize(reason,
+              operation: :read,
+              partition: order,
+              node: primary,
+              mode: :quorum
+            )
+    end
+  end
 
-        # Tally results.
-        new_counts =
-          Enum.reduce(done, counts, fn {_task, result}, acc ->
-            case result do
-              {:ok, val} when is_list(val) -> Map.update(acc, val, 1, &(&1 + 1))
-              _ -> acc
-            end
-          end)
+  defp primary_read_fallback(order, op, arg, primary, reason) do
+    Logger.warning(
+      "super_cache, router, primary read failed (order=#{order}): #{inspect(reason)}"
+    )
 
-        # Check if any result has reached majority.
-        case Enum.find(new_counts, fn {_, count} -> count >= required end) do
-          {result, _} ->
-            # Kill remaining tasks — we already have our answer.
-            Enum.each(pending, &Task.shutdown(&1, :brutal_kill))
-            result
+    if DistributedHelpers.has_partition?(order) do
+      Metrics.increment(:read, :fallbacks)
+      local_read(order, op, arg)
+    else
+      Metrics.increment(:read, :errors)
 
-          nil when pending == [] ->
-            # All tasks done, no majority — fall back to the most common result.
-            case Enum.max_by(new_counts, fn {_, c} -> c end, fn -> {[], 0} end) do
-              {result, _} -> result
-              _ -> []
-            end
-
-          nil ->
-            # Still waiting for more results.
-            quorum_await(pending, required, new_counts)
-        end
+      raise Rpc.normalize(reason,
+              operation: :read,
+              partition: order,
+              node: primary,
+              mode: :primary
+            )
     end
   end
 
@@ -495,7 +549,6 @@ defmodule SuperCache.Cluster.Router do
     resolve_partitions(partition_data)
     |> Enum.flat_map(fn p ->
       case op do
-        :get -> Storage.get(arg, p)
         :match -> Storage.get_by_match(arg, p)
         :match_object -> Storage.get_by_match_object(arg, p)
       end
@@ -504,16 +557,32 @@ defmodule SuperCache.Cluster.Router do
 
   # Primary / quorum fan: resolve partition orders (integers), then for each
   # order delegate to do_read/4 which handles routing with plain-term :erpc.
+  # Errors are captured inside the task and re-raised in the caller so a
+  # failed partition surfaces as SuperCache.Cluster.Error instead of an exit.
   defp fan_read(partition_data, mode, op, arg) do
-    resolve_partition_orders(partition_data)
-    |> Task.async_stream(
-      fn order -> do_read(mode, order, op, arg) end,
-      timeout: @erpc_timeout + 500
-    )
-    |> Enum.flat_map(fn
-      {:ok, list} when is_list(list) -> list
-      _ -> []
-    end)
+    results =
+      resolve_partition_orders(partition_data)
+      |> Task.async_stream(
+        fn order -> safe_do_read(mode, order, op, arg) end,
+        timeout: @erpc_timeout + 500,
+        on_timeout: :kill_task
+      )
+      |> Enum.map(fn
+        {:ok, {:ok, list}} -> {:ok, list}
+        {:ok, {:error, error}} -> {:error, error}
+        {:exit, reason} -> {:error, Rpc.normalize({:exit, reason}, operation: op, mode: mode)}
+      end)
+
+    case Enum.find(results, &match?({:error, _}, &1)) do
+      {:error, error} -> raise error
+      nil -> Enum.flat_map(results, fn {:ok, list} -> list end)
+    end
+  end
+
+  defp safe_do_read(mode, order, op, arg) do
+    {:ok, do_read(mode, order, op, arg)}
+  rescue
+    error -> {:error, error}
   end
 
   ## ── Private — forwarding helpers ─────────────────────────────────────────────
@@ -529,17 +598,15 @@ defmodule SuperCache.Cluster.Router do
   end
 
   defp safe_erpc(target, mod, fun, args) do
-    try do
-      :erpc.call(target, mod, fun, args, @erpc_timeout)
-    catch
-      kind, reason ->
-        Logger.warning(
-          "super_cache, router, erpc #{inspect(fun)} failed → #{inspect(target)}: " <>
-            inspect({kind, reason})
-        )
+    :erpc.call(target, mod, fun, args, @erpc_timeout)
+  catch
+    kind, reason ->
+      Logger.warning(
+        "super_cache, router, erpc #{inspect(fun)} failed → #{inspect(target)}: " <>
+          inspect({kind, reason})
+      )
 
-        {:error, {kind, reason}}
-    end
+      {:error, {kind, reason}}
   end
 
   ## ── Private — partition resolution ──────────────────────────────────────────
@@ -590,9 +657,12 @@ defmodule SuperCache.Cluster.Router do
 
   @doc false
   @spec ensure_ryw_table() :: :ok
-  def ensure_ryw_table() do
+  def ensure_ryw_table do
     case :ets.info(@ryw_table) do
       :undefined ->
+        # Fallback for isolated tests or environments where WAL.Store
+        # has not started (e.g., direct unit tests). In production the
+        # table is created by SuperCache.Cluster.WAL.Store at boot.
         :ets.new(@ryw_table, [
           :set,
           :public,
@@ -609,19 +679,13 @@ defmodule SuperCache.Cluster.Router do
   @doc false
   @spec prune_ryw(integer) :: :ok
   def prune_ryw(now) do
-    # Iterate over all entries and delete expired ones for the calling process.
-    # Using foldl avoids the complexity of match specs with tuple keys.
-    :ets.foldl(
-      fn {{pid, order}, expiry}, acc ->
-        if pid == self() and expiry < now do
-          :ets.delete(@ryw_table, {pid, order})
-        end
+    # Use :ets.select_delete/2 to prune expired entries for the calling process
+    # without copying non-matching rows into the calling process's memory.
+    :ets.select_delete(@ryw_table, [
+      {{{self(), :_}, :"$1"}, [{:<, :"$1", now}], [true]}
+    ])
 
-        acc
-      end,
-      :ok,
-      @ryw_table
-    )
+    :ok
   end
 
   defp get_partition_order(data) do

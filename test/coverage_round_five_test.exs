@@ -5,8 +5,8 @@ defmodule SuperCache.CoverageRoundFiveTest do
 
   * `SuperCache` — `started?/0` exit-guard, `get_by_match!/3` with explicit opts
   * `SuperCache.Bootstrap` — invalid option rejection
-  * `SuperCache.Buffer` / `SuperCache.Internal.Stream` — stream crash retry and
-    restart-budget exhaustion, push failure logging
+  * `SuperCache.Buffer` / `SuperCache.Internal.Stream` — push failure logging
+    (crash-restart budgets live in `coverage_round_six_test.exs`)
   * `SuperCache.Config` / `SuperCache.Sup` — terminate callbacks
   * `SuperCache.Cluster.HealthMonitor` — dead-infrastructure fallbacks,
     degraded partitions/error-rate alerts (via telemetry stub)
@@ -20,8 +20,9 @@ defmodule SuperCache.CoverageRoundFiveTest do
 
   use ExUnit.Case, async: false
 
-  alias SuperCache.Cluster.{HealthMonitor, Manager, Replicator, ThreePhaseCommit, WAL}
   alias SuperCache.{Bootstrap, Config, Partition, Storage}
+  alias SuperCache.Cluster.{HealthMonitor, Manager, Replicator, ThreePhaseCommit, WAL}
+  alias SuperCache.Cluster.Metrics
 
   @moduletag :sequential
   @moduletag timeout: 120_000
@@ -89,10 +90,10 @@ defmodule SuperCache.CoverageRoundFiveTest do
     deadline = System.monotonic_time(:millisecond) + timeout
 
     repeat = fn repeat ->
-      if fun.() do
-        true
-      else
-        if System.monotonic_time(:millisecond) >= deadline, do: false, else: (Process.sleep(25) && repeat.(repeat))
+      cond do
+        fun.() -> true
+        System.monotonic_time(:millisecond) >= deadline -> false
+        true -> Process.sleep(25) && repeat.(repeat)
       end
     end
 
@@ -125,6 +126,10 @@ defmodule SuperCache.CoverageRoundFiveTest do
     end
 
     test "health monitor reports gracefully while cluster processes are killed" do
+      # Populate local health data first so the assertions below describe a
+      # completed cycle rather than an empty table.
+      assert :ok == HealthMonitor.force_check()
+
       manager_pid = Process.whereis(Manager)
 
       # Hide the registered name — every GenServer.call now exits instantly,
@@ -206,8 +211,8 @@ defmodule SuperCache.CoverageRoundFiveTest do
     end
 
     test "100% error rate flips the check to degraded and emits telemetry" do
-      SuperCache.Cluster.Metrics.increment({:api, :put}, :calls)
-      SuperCache.Cluster.Metrics.increment({:api, :put}, :errors)
+      Metrics.increment({:api, :put}, :calls)
+      Metrics.increment({:api, :put}, :errors)
 
       assert :ok == HealthMonitor.force_check()
       health = HealthMonitor.node_health(node())
@@ -299,16 +304,15 @@ defmodule SuperCache.CoverageRoundFiveTest do
       end)
     end
 
-    test "quorum read with only an unreachable primary returns empty" do
+    test "quorum read with only an unreachable primary reports the documented error" do
       order = Partition.get_partition_order(:quorum_dead_primary)
 
       with_partition_map(%{order => {@bogus, []}}, fn ->
-        result =
+        assert_raise SuperCache.Cluster.Error, fn ->
           SuperCache.get_by_key_partition!(:quorum_dead_primary, :quorum_dead_primary,
             read_mode: :quorum
           )
-
-        assert [] == result
+        end
       end)
     end
   end
@@ -367,50 +371,6 @@ defmodule SuperCache.CoverageRoundFiveTest do
     end
   end
 
-  # ── Buffer stream crash budget ────────────────────────────────────────────────
-
-  describe "buffer crash-restart budget" do
-    setup do
-      restart_cache!(local_opts())
-      :ok
-    end
-
-    test "rapid queue crashes exhaust the restart budget then recover on restart" do
-      names =
-        case :persistent_term.get({SuperCache.Buffer, :buffer_names}, nil) do
-          t when is_tuple(t) -> Tuple.to_list(t)
-          _ -> []
-        end
-
-      # If buffers are not registered under the expected key the crash-budget
-      # mechanics cannot be exercised — skip quietly instead of failing.
-      unless names == [] do
-        Enum.each(1..11, fn _ ->
-          name = hd(names)
-
-          case Process.whereis(name) do
-            nil ->
-              Process.sleep(50)
-
-            pid ->
-              Process.exit(pid, :kill)
-          end
-
-          # Wait for the runner to notice and spawn the next generation.
-          wait_until(fn -> is_pid(Process.whereis(name)) end, 400)
-          Process.sleep(20)
-        end)
-
-        # Budget exhausted — runners gave up. A fresh start cycle revives them.
-        SuperCache.Buffer.stop()
-        SuperCache.Buffer.start(:erlang.system_info(:schedulers_online))
-
-        first = hd(names)
-        assert wait_until(fn -> is_pid(Process.whereis(first)) end, 2_000)
-      end
-    end
-  end
-
   # ── Local-mode stack edge cases ───────────────────────────────────────────────
 
   describe "stack local concurrency edges" do
@@ -421,13 +381,16 @@ defmodule SuperCache.CoverageRoundFiveTest do
 
     test "push retries while an updating marker blocks a missing counter" do
       part = Partition.get_partition(:stk_marker_push)
-      Storage.put({{:stack, :updating, :stk_marker_push}, true}, part)
+
+      Storage.put(
+        {{:stack, :updating, :stk_marker_push}, {self(), System.monotonic_time(:millisecond)}},
+        part
+      )
 
       clearer =
         Task.async(fn ->
           Process.sleep(30)
-          Storage.delete({{:stack, :updating, :stk_marker_push}}, part)
-          Storage.put({{:stack, :counter, :stk_marker_push}, 0}, part)
+          Storage.delete({:stack, :updating, :stk_marker_push}, part)
         end)
 
       assert true == SuperCache.Stack.push(:stk_marker_push, "v")
@@ -511,7 +474,7 @@ defmodule SuperCache.CoverageRoundFiveTest do
 
     test "kv get with default on missing key" do
       assert :fallback ==
-               apply(SuperCache.KeyValue, :local_get, [:cov_kv_miss, :nope, :fallback])
+               SuperCache.KeyValue.local_get(:cov_kv_miss, :nope, :fallback)
     end
 
     test "struct add/remove/remove_all wrap distributed results" do
@@ -529,7 +492,7 @@ defmodule SuperCache.CoverageRoundFiveTest do
       clearer =
         Task.async(fn ->
           Process.sleep(30)
-          Storage.delete({{:stack, :updating, :dstk_marker}}, part)
+          Storage.delete({:stack, :updating, :dstk_marker}, part)
           Storage.put({{:stack, :counter, :dstk_marker}, 0}, part)
         end)
 
@@ -544,7 +507,7 @@ defmodule SuperCache.CoverageRoundFiveTest do
       clearer =
         Task.async(fn ->
           Process.sleep(30)
-          Storage.delete({{:stack, :updating, :dstk_pop}}, part)
+          Storage.delete({:stack, :updating, :dstk_pop}, part)
           Storage.put({{:stack, :counter, :dstk_pop}, 0}, part)
         end)
 
