@@ -25,7 +25,7 @@ defmodule SuperCache.Cluster.DistributedHelpers do
   require Logger
   require SuperCache.Log
 
-  alias SuperCache.Cluster.{Manager, Metrics, Quorum, Replicator, Rpc, WAL}
+  alias SuperCache.Cluster.{Manager, Metrics, Quorum, Raft, Replicator, Rpc, WAL}
   alias SuperCache.{Config, Storage}
 
   # Inline hot-path cluster-mode check so callers don't pay a call overhead.
@@ -86,11 +86,26 @@ defmodule SuperCache.Cluster.DistributedHelpers do
             {:error, normalize_error(reason, idx, :strong)}
         end
 
+      :raft ->
+        # The Raft state machine is the only place that writes to ETS in this
+        # mode, so no local pre-apply is performed here.
+        case Raft.submit(idx, {:batch, raft_commands(ops)}, operation: {__MODULE__, :apply_write}) do
+          {:ok, _reply} -> :ok
+          {:error, reason} -> {:error, normalize_error(reason, idx, :raft)}
+        end
+
       mode ->
         Enum.reduce_while(ops, :ok, fn op, _acc ->
           replicate_op_result(op, partition, idx, mode)
         end)
     end
+  end
+
+  defp raft_commands(ops) do
+    Enum.map(ops, fn
+      {:increment, key, default, step} -> {:increment, {key, default, step}}
+      {op, arg} -> {op, arg}
+    end)
   end
 
   defp replicate_op_result(op, partition, idx, mode) do

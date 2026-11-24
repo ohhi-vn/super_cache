@@ -33,7 +33,7 @@ defmodule SuperCache.Cluster.Replicator do
 
   require Logger
 
-  alias SuperCache.Cluster.{Manager, Metrics, Quorum, WAL}
+  alias SuperCache.Cluster.{Manager, Metrics, Quorum, Raft, WAL}
   alias SuperCache.{Partition, Storage}
 
   @batch_size 500
@@ -58,7 +58,9 @@ defmodule SuperCache.Cluster.Replicator do
     mode = SuperCache.Config.get_config(:replication_mode, :async)
     {_primary, replicas} = Manager.get_replicas(partition_idx)
 
-    if replicas == [] do
+    # Raft mode always goes through the replicated log, even for a single-node
+    # cluster; the other modes have nothing to replicate without replicas.
+    if replicas == [] and mode != :raft do
       :ok
     else
       metric_key = :"replicate_#{mode}"
@@ -218,45 +220,21 @@ defmodule SuperCache.Cluster.Replicator do
   @spec replicate_batch(non_neg_integer, atom, [any]) :: :ok | {:error, term}
   def replicate_batch(partition_idx, op_name, op_args) when is_list(op_args) do
     {_primary, replicas} = Manager.get_replicas(partition_idx)
+    mode = SuperCache.Config.get_config(:replication_mode, :async)
 
-    if replicas == [] do
+    if replicas == [] and mode != :raft do
       :ok
     else
       t0 = System.monotonic_time(:microsecond)
 
       result =
         try do
-          # OTP version differences: classic releases return {replies,
-          # bad_nodes}; newer OTP returns a flat per-node result list where
-          # failures appear as error entries.
-          failures =
-            multicall_failures(
-              :erpc.multicall(
-                replicas,
-                __MODULE__,
-                :apply_op_batch,
-                [partition_idx, op_name, op_args],
-                10_000
-              ),
-              length(replicas)
-            )
-
-          if failures > 0 do
-            Logger.warning(
-              "super_cache, replicator, batch replication incomplete for partition " <>
-                "#{partition_idx}: #{failures}/#{length(replicas)} replica(s) failed"
-            )
-
-            {:error, {:replication_incomplete, failures}}
-          else
-            :ok
-          end
+          dispatch_batch(mode, partition_idx, op_name, op_args, replicas)
         rescue
           err -> {:error, err}
         end
 
       elapsed = System.monotonic_time(:microsecond) - t0
-      mode = SuperCache.Config.get_config(:replication_mode, :async)
       metric_key = :"replicate_batch_#{mode}"
       Metrics.increment({:api, metric_key}, :calls)
       Metrics.push_latency({:api_latency_us, metric_key}, elapsed)
@@ -271,6 +249,45 @@ defmodule SuperCache.Cluster.Replicator do
       end
 
       result
+    end
+  end
+
+  defp dispatch_batch(:raft, partition_idx, op_name, op_args, _replicas) do
+    commands = Enum.map(op_args, fn arg -> {op_name, arg} end)
+
+    case Raft.submit(partition_idx, {:batch, commands},
+           operation: {__MODULE__, :replicate_batch},
+           timeout: 10_000
+         ) do
+      {:ok, _reply} -> :ok
+      {:error, _} = err -> err
+    end
+  end
+
+  defp dispatch_batch(_mode, partition_idx, op_name, op_args, replicas) do
+    # OTP version differences: classic releases return {replies, bad_nodes};
+    # newer OTP returns a flat per-node result list with error entries.
+    failures =
+      multicall_failures(
+        :erpc.multicall(
+          replicas,
+          __MODULE__,
+          :apply_op_batch,
+          [partition_idx, op_name, op_args],
+          10_000
+        ),
+        length(replicas)
+      )
+
+    if failures > 0 do
+      Logger.warning(
+        "super_cache, replicator, batch replication incomplete for partition " <>
+          "#{partition_idx}: #{failures}/#{length(replicas)} replica(s) failed"
+      )
+
+      {:error, {:replication_incomplete, failures}}
+    else
+      :ok
     end
   end
 
@@ -447,6 +464,7 @@ defmodule SuperCache.Cluster.Replicator do
   defp failure_field(:async), do: :async_failures
   defp failure_field(:sync), do: :sync_failures
   defp failure_field(:strong), do: :strong_failures
+  defp failure_field(:raft), do: :raft_failures
   defp failure_field(_mode), do: :async_failures
 
   # ── Private ──────────────────────────────────────────────────────────────────
@@ -503,5 +521,15 @@ defmodule SuperCache.Cluster.Replicator do
     # WAL-based strong consistency: replaces heavy 3PC.
     # ~200µs latency vs ~1500µs for 3PC.
     WAL.commit(partition_idx, [{op_name, op_arg}])
+  end
+
+  defp do_replicate(:raft, partition_idx, op_name, op_arg, _replicas) do
+    case Raft.submit(partition_idx, {op_name, op_arg},
+           operation: {__MODULE__, :replicate},
+           timeout: max(@replica_timeout, 20_000)
+         ) do
+      {:ok, _reply} -> :ok
+      {:error, _} = err -> err
+    end
   end
 end

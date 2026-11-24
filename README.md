@@ -12,7 +12,7 @@ High-performance in-memory caching library for Elixir backed by partitioned ETS 
 - **Partitioned ETS Storage** — Reduces contention by splitting data across multiple ETS tables
 - **Multiple Data Structures** — Tuples, key-value namespaces, queues, stacks, and struct storage
 - **Distributed Clustering** — Automatic node discovery, partition assignment, and replication
-- **Configurable Consistency** — Choose between async, sync (quorum), or strong (WAL) replication
+- **Configurable Consistency** — Choose between async, sync (quorum), strong (WAL), or opt-in Raft consensus replication
 - **Batch Operations** — High-throughput bulk writes with `put_batch!/1`, `add_batch/2`, `remove_batch/2`
 - **Performance Optimized** — Compile-time log elimination, partition resolution inlining, worker pools, and early termination quorum reads
 - **Health Monitoring** — Built-in cluster health checks with telemetry integration
@@ -292,7 +292,7 @@ config :super_cache,
   key_pos:            0,
   partition_pos:      0,
   cluster:            :distributed,
-  replication_mode:   :async,      # :async | :sync | :strong
+  replication_mode:   :async,      # :async | :sync | :strong | :raft
   replication_factor: 2,           # primary + 1 replica
   table_type:         :set,
   num_partition:      8            # Must match across ALL nodes
@@ -313,6 +313,7 @@ config :super_cache,
 | `:async` | Eventual consistency | ~50-100µs | High-throughput caches, session data |
 | `:sync` | Majority ack (adaptive quorum) | ~100-300µs | Balanced durability/performance |
 | `:strong` | WAL-based strong consistency | ~200µs | Critical data requiring durability |
+| `:raft` | Raft consensus log via `raft_ex` (opt-in) | higher; fsync-bound | Workloads needing leader election and a real replicated log |
 
 **Async Mode**: Fire-and-forget replication via `Task.Supervisor` worker pool. Returns immediately after local write.
 
@@ -388,6 +389,27 @@ config :super_cache, :wal,
   max_pending: 10_000       # max uncommitted entries
 ```
 
+### Raft Configuration (opt-in)
+
+Set `replication_mode: :raft` on **every** node (mixed modes are rejected at
+bootstrap). Each partition gets its own Raft cluster whose members are that
+partition's primary and replicas; committed commands are applied to the local
+ETS partition by the state machine.
+
+```elixir
+config :super_cache, :raft,
+  data_dir: "/var/lib/my_app/super_cache_raft",  # use a durable path in production
+  command_timeout_ms: 2_000,
+  wal_sync_method: :datasync,                    # :fsync | :datasync | :none
+  wal_max_size_bytes: 256_000_000
+```
+
+`raft_ex` is experimental and dual-licensed MPL-2.0 / Apache-2.0. Read modes
+keep their existing semantics — enabling `:raft` does not make local reads
+linearizable. Raft status and failures appear in
+`SuperCache.cluster_stats().raft` and
+`SuperCache.Cluster.Stats.reliability().raft_failures`.
+
 ## Examples
 
 The `examples/` directory contains runnable examples:
@@ -412,7 +434,7 @@ mix run examples/distributed_mode_example.exs
 | `table_type` | atom | `:set` | ETS table type (`:set`, `:bag`, `:ordered_set`, `:duplicate_bag`) |
 | `table_prefix` | string | `"SuperCache.Storage.Ets"` | Prefix for ETS table atom names |
 | `cluster` | atom | `:local` | `:local` or `:distributed` |
-| `replication_mode` | atom | `:async` | `:async`, `:sync`, or `:strong` |
+| `replication_mode` | atom | `:async` | `:async`, `:sync`, `:strong`, or `:raft` |
 | `replication_factor` | integer | `2` | Total copies (primary + replicas) |
 | `cluster_peers` | list | `[]` | List of peer node atoms |
 | `auto_start` | boolean | `false` | Auto-start on application boot |
@@ -549,6 +571,14 @@ mix test --warnings-as-errors
 MIT License. See [LICENSE](LICENSE) for details.
 
 ## Changelog
+
+### v1.6.1
+
+- **Opt-in `:raft` replication mode** — added `raft_ex` as a dependency and a
+  Raft-backed write path: one Raft cluster per partition, a state machine that
+  applies committed operations to ETS, leader routing, normalized failures,
+  bootstrap/membership lifecycle, and `raft` observability in stats and health.
+  Existing `:async`, `:sync`, and `:strong` modes are unchanged.
 
 ### v1.3.0
 

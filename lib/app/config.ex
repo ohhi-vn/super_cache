@@ -15,7 +15,7 @@ defmodule SuperCache.Config do
   - `:num_partition` — number of ETS partitions
   - `:table_type` — ETS table type (`:set`, `:bag`, etc.)
   - `:table_prefix` — prefix for ETS table atom names
-  - `:replication_mode` — `:async`, `:sync`, or `:strong`
+  - `:replication_mode` — `:async`, `:sync`, `:strong`, or `:raft`
   - `:replication_factor` — total copies (primary + replicas)
   - `:started` — liveness flag set by bootstrap
 

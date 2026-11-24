@@ -158,9 +158,9 @@ defmodule SuperCache do
   """
   @spec lazy_put(tuple) :: :ok | {:error, :not_started} | {:error, :process_down}
   def lazy_put(data) when is_tuple(data) do
-    if Config.distributed?() and Manager.replication_mode() == :strong do
+    if Config.distributed?() and Manager.replication_mode() in [:strong, :raft] do
       Logger.warning(
-        "super_cache, lazy_put called in :strong replication mode — falling back to put!"
+        "super_cache, lazy_put called in #{Manager.replication_mode()} replication mode — falling back to put!"
       )
 
       put!(data)

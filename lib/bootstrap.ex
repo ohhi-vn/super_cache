@@ -24,7 +24,7 @@ defmodule SuperCache.Bootstrap do
   | Option               | Type    | Default  | Description                        |
   |----------------------|---------|----------|------------------------------------|
   | `:replication_factor`| integer | `2`      | Total copies (primary + replicas)  |
-  | `:replication_mode`  | atom    | `:async` | `:async`, `:sync`, or `:strong`    |
+  | `:replication_mode`  | atom    | `:async` | `:async`, `:sync`, `:strong`, or `:raft` |
 
   ## Examples
 
@@ -367,12 +367,12 @@ defmodule SuperCache.Bootstrap do
       nil ->
         :ok
 
-      mode when mode in [:async, :sync, :strong] ->
+      mode when mode in [:async, :sync, :strong, :raft] ->
         :ok
 
       other ->
         raise ArgumentError,
-              "unsupported replication_mode: #{inspect(other)}, expected :async, :sync, or :strong"
+              "unsupported replication_mode: #{inspect(other)}, expected :async, :sync, :strong, or :raft"
     end
   end
 

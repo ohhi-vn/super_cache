@@ -66,6 +66,10 @@ defmodule SuperCache.Application do
       # WAL store — owns the WAL/ack/watermark ETS tables so they survive a
       # WAL GenServer crash.
       {SuperCache.Cluster.WAL.Store, []},
+      # Raft adapter store — owns the applied-index ETS table. Idle unless
+      # `replication_mode: :raft` is configured.
+      {SuperCache.Cluster.Raft.Store, []},
+      {SuperCache.Cluster.Raft.Group.Reconciler, []},
       # WAL for fast strong consistency — replaces heavy 3PC.
       {SuperCache.Cluster.WAL, []},
       # Metrics store.

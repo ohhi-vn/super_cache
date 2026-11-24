@@ -310,6 +310,9 @@ defmodule SuperCache.Cluster.Router do
           {:error, reason} -> {:error, write_error(reason, op, order)}
         end
 
+      :raft ->
+        raft_write(order, op, data)
+
       _ ->
         Storage.put(data, partition)
 
@@ -333,6 +336,9 @@ defmodule SuperCache.Cluster.Router do
           :ok -> :ok
           {:error, reason} -> {:error, write_error(reason, :put_batch, order)}
         end
+
+      :raft ->
+        raft_write_batch(order, data_list)
 
       _ ->
         # Write all records locally in a single ETS batch operation,
@@ -358,6 +364,9 @@ defmodule SuperCache.Cluster.Router do
           {:error, reason} -> {:error, write_error(reason, :delete, order)}
         end
 
+      :raft ->
+        raft_write(order, :delete, key)
+
       _ ->
         Storage.delete(key, partition)
 
@@ -379,6 +388,9 @@ defmodule SuperCache.Cluster.Router do
           :ok -> :ok
           {:error, reason} -> {:error, write_error(reason, :delete_all, order)}
         end
+
+      :raft ->
+        raft_write(order, :delete_all, nil)
 
       _ ->
         Storage.delete_all(partition)
@@ -402,6 +414,9 @@ defmodule SuperCache.Cluster.Router do
           {:error, reason} -> {:error, write_error(reason, :delete_match, order)}
         end
 
+      :raft ->
+        raft_write(order, :delete_match, pattern)
+
       _ ->
         Storage.delete_match(pattern, partition)
 
@@ -410,6 +425,22 @@ defmodule SuperCache.Cluster.Router do
           {:error, reason} when mode == :sync -> {:error, reason}
           _other -> :ok
         end
+    end
+  end
+
+  # In :raft mode the state machine performs the local ETS write when the log
+  # entry commits, so the router must not pre-apply it.
+  defp raft_write(order, op, data) do
+    case Replicator.replicate(order, op, data) do
+      :ok -> :ok
+      {:error, reason} -> {:error, write_error(reason, op, order)}
+    end
+  end
+
+  defp raft_write_batch(order, data_list) do
+    case Replicator.replicate_batch(order, :put, data_list) do
+      :ok -> :ok
+      {:error, reason} -> {:error, write_error(reason, :put_batch, order)}
     end
   end
 
@@ -598,7 +629,16 @@ defmodule SuperCache.Cluster.Router do
   end
 
   defp safe_erpc(target, mod, fun, args) do
-    :erpc.call(target, mod, fun, args, @erpc_timeout)
+    timeout =
+      if Manager.replication_mode() == :raft do
+        # Raft must replicate and commit before returning; that can take
+        # longer than the local/quorum paths used by the other modes.
+        max(@erpc_timeout, 20_000)
+      else
+        @erpc_timeout
+      end
+
+    :erpc.call(target, mod, fun, args, timeout)
   catch
     kind, reason ->
       Logger.warning(

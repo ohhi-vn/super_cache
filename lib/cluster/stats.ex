@@ -34,7 +34,7 @@ defmodule SuperCache.Cluster.Stats do
   metrics to an external system.
   """
 
-  alias SuperCache.Cluster.{Manager, Metrics, TxnRegistry}
+  alias SuperCache.Cluster.{Manager, Metrics, Raft, TxnRegistry}
   alias SuperCache.{Partition, Storage}
 
   # ── Cluster overview ─────────────────────────────────────────────────────────
@@ -47,7 +47,7 @@ defmodule SuperCache.Cluster.Stats do
   - `:nodes` — list of live nodes
   - `:node_count` — number of live nodes
   - `:replication_factor` — configured replication factor
-  - `:replication_mode` — `:async | :sync | :strong`
+  - `:replication_mode` — `:async | :sync | :strong | :raft`
   - `:num_partitions` — total partition count (`0` before partition init)
   - `:partitions` — list of per-partition maps (see `partitions/0`)
   - `:total_records` — sum of ETS record counts across all local partitions
@@ -87,6 +87,10 @@ defmodule SuperCache.Cluster.Stats do
       node_count: Manager.live_nodes() |> length(),
       replication_factor: Manager.replication_factor(),
       replication_mode: Manager.replication_mode(),
+      raft: %{
+        running: Raft.System.running?(),
+        groups: Raft.Group.tracked()
+      },
       reliability: reliability(),
       num_partitions: num_partitions,
       total_records: total,
@@ -355,6 +359,7 @@ defmodule SuperCache.Cluster.Stats do
   - `:async_drops` — async replication deliveries dropped (pool full or replica error)
   - `:sync_failures` — sync quorum failures
   - `:strong_failures` — strong (WAL) write failures
+  - `:raft_failures` — Raft-mode write failures
   - `:wal_backpressure` — strong writes rejected due to WAL backpressure
   - `:read_fallbacks` — reads that fell back to a stale replica or primary
   - `:health_timeouts` — health-check timeouts
@@ -371,6 +376,7 @@ defmodule SuperCache.Cluster.Stats do
         async_drops: 0,
         sync_failures: 0,
         strong_failures: 0,
+        raft_failures: 0,
         wal_backpressure: 0,
         read_fallbacks: 0,
         health_timeouts: 0,
@@ -394,6 +400,7 @@ defmodule SuperCache.Cluster.Stats do
       async_drops: Map.get(replication, :async_drops, 0),
       sync_failures: Map.get(replication, :sync_failures, 0),
       strong_failures: Map.get(replication, :strong_failures, 0),
+      raft_failures: Map.get(replication, :raft_failures, 0),
       wal_backpressure: Map.get(wal, :backpressure, 0),
       read_fallbacks: Map.get(read, :fallbacks, 0),
       health_timeouts: Map.get(health, :timeouts, 0),

@@ -4,7 +4,7 @@ defmodule SuperCache.MixProject do
   def project do
     [
       app: :super_cache,
-      version: "1.6.0",
+      version: "1.7.0",
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -52,6 +52,9 @@ defmodule SuperCache.MixProject do
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       {:benchee, "~> 1.5", only: :dev},
       {:excoveralls, "~> 0.18", only: :test},
+
+      # Opt-in Raft consensus replication (`:raft` replication mode).
+      {:raft_ex, "~> 0.3.1"},
 
       # Code quality
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
@@ -145,7 +148,15 @@ defmodule SuperCache.MixProject do
       coveralls: ["test --cover", "coveralls.html"],
 
       # Code Quality
-      quality: ["format --check-formatted", "credo --strict", "dialyzer"]
+      quality: ["format --check-formatted", "credo --strict", "dialyzer"],
+
+      # Run every gate that must pass before committing. The test stage spawns
+      # a fresh Mix process in the test environment; cluster tests stay opt-in
+      # via `mix test.cluster`.
+      precommit: [
+        "quality",
+        "cmd env MIX_ENV=test mix test --exclude cluster"
+      ]
     ]
   end
 

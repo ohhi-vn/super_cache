@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0]
+
+### Added
+
+- Opt-in `replication_mode: :raft` backed by `raft_ex`: one Raft cluster per
+  partition, committed commands applied to ETS by a state machine, leader
+  routing, normalized `SuperCache.Cluster.Error` failures, Raft group
+  lifecycle tied to bootstrap/membership, and `raft` status plus
+  `raft_failures` in cluster statistics and health reports.
+- Optional `config :super_cache, :raft` settings (`data_dir`,
+  `command_timeout_ms`, `wal_sync_method`, `wal_max_size_bytes`).
+
 ## [1.6.0]
 
 ### Changed

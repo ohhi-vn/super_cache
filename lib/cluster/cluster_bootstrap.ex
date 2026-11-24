@@ -11,7 +11,7 @@ defmodule SuperCache.Cluster.Bootstrap do
   |----------------------|--------------------------|----------------|------------------------------------------|
   | `:cluster`           | atom                     | `:distributed` | `:local` or `:distributed`               |
   | `:replication_factor`| integer                  | `2`            | Total copies (primary + replicas)        |
-  | `:replication_mode`  | atom                     | `:async`       | `:async`, `:sync`, or `:strong` (3PC)    |
+  | `:replication_mode`  | atom                     | `:async`       | `:async`, `:sync`, `:strong`, or `:raft` |
   | `:num_partition`     | integer                  | scheduler count| Number of ETS partitions                 |
   | `:table_type`        | atom                     | `:set`         | ETS table type                           |
 
@@ -85,6 +85,7 @@ defmodule SuperCache.Cluster.Bootstrap do
 
   alias SuperCache.{Buffer, Config, Partition, Storage}
   alias SuperCache.Cluster.{Manager, NodeMonitor, ThreePhaseCommit}
+  alias SuperCache.Cluster.Raft.Applied
 
   @default_opts [
     key_pos: 0,
@@ -96,7 +97,7 @@ defmodule SuperCache.Cluster.Bootstrap do
   ]
 
   @valid_table_types [:set, :ordered_set, :bag, :duplicate_bag]
-  @valid_rep_modes [:async, :sync, :strong]
+  @valid_rep_modes [:async, :sync, :strong, :raft]
 
   # Keys forwarded verbatim to NodeMonitor.reconfigure/1.
   # All three are optional; omitting them preserves NodeMonitor's current
@@ -176,6 +177,12 @@ defmodule SuperCache.Cluster.Bootstrap do
     Storage.start(num_partition)
     Buffer.start(Partition.get_schedulers())
 
+    # Raft needs both storage and the partition map before its groups start.
+    if Config.get_config(:replication_mode) == :raft do
+      Logger.info("super_cache, cluster.bootstrap, starting Raft system")
+      :ok = SuperCache.Cluster.Raft.System.start!()
+    end
+
     # Resolve any in-doubt 3PC transactions from a previous crash.
     if Config.get_config(:replication_mode) == :strong do
       Logger.info("super_cache, cluster.bootstrap, running 3PC crash recovery")
@@ -212,10 +219,19 @@ defmodule SuperCache.Cluster.Bootstrap do
 
     Buffer.stop()
 
+    if Config.get_config(:replication_mode) == :raft do
+      :ok = SuperCache.Cluster.Raft.System.stop()
+    end
+
     case Config.get_config(:num_partition) do
       nil -> :ok
       n -> Storage.stop(n)
     end
+
+    # Storage drops every ETS partition, so any surviving applied-index
+    # watermark would make the next Raft replay skip entries whose data no
+    # longer exists.
+    Applied.reset_all()
 
     Partition.stop()
     SuperCache.Struct.clear_key_field_cache()

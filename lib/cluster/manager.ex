@@ -54,6 +54,8 @@ defmodule SuperCache.Cluster.Manager do
   require SuperCache.Log
 
   alias SuperCache.Cluster.{Metrics, Replicator}
+  alias SuperCache.Cluster.Raft.{Group, System}
+  alias SuperCache.Cluster.Raft.Group.Reconciler
   alias SuperCache.{Config, Partition}
 
   @pt_key {__MODULE__, :partition_map}
@@ -108,7 +110,7 @@ defmodule SuperCache.Cluster.Manager do
       SuperCache.Cluster.Manager.replication_mode()
       # => :async
   """
-  @spec replication_mode() :: :async | :sync | :strong
+  @spec replication_mode() :: :async | :sync | :strong | :raft
   def replication_mode do
     Config.get_config(:replication_mode, :async)
   end
@@ -160,11 +162,13 @@ defmodule SuperCache.Cluster.Manager do
         # Our own node is always considered live; no health-check needed.
         updated = Enum.uniq([new_node | nodes])
         update_partition_map(updated)
+        schedule_raft_reconcile()
         {:noreply, %{state | nodes: updated}}
 
       node_running?(new_node) ->
         updated = Enum.uniq([new_node | nodes])
         update_partition_map(updated)
+        schedule_raft_reconcile()
         spawn(fn -> sync_to_node(new_node) end)
         Logger.info("super_cache, cluster_manager, node up: #{inspect(new_node)}")
         {:noreply, %{state | nodes: updated}}
@@ -187,6 +191,7 @@ defmodule SuperCache.Cluster.Manager do
       # (should not happen, but defensive).
       updated = nodes |> List.delete(dead_node) |> ensure_self()
       update_partition_map(updated)
+      schedule_raft_reconcile()
       Logger.warning("super_cache, cluster_manager, node down: #{inspect(dead_node)}")
       {:noreply, %{state | nodes: updated}}
     else
@@ -217,6 +222,7 @@ defmodule SuperCache.Cluster.Manager do
       node_running?(target) ->
         updated = Enum.uniq([target | nodes])
         update_partition_map(updated)
+        schedule_raft_reconcile()
         spawn(fn -> sync_to_node(target) end)
 
         Logger.info(
@@ -257,14 +263,66 @@ defmodule SuperCache.Cluster.Manager do
   # records still live on the previous holders.  `sync_to_node/1` only pushes
   # data to *joining* nodes, so without reconciliation those records would
   # never reach nodes that gained ownership after a join or a leave.
+  defp schedule_raft_reconcile do
+    if Config.get_config(:replication_mode, :async) == :raft and System.running?() do
+      spawn(fn -> reconcile_local_raft_groups() end)
+    end
+  end
+
+  defp reconcile_local_raft_groups do
+    Group.local_partitions()
+    |> Enum.filter(fn idx ->
+      {primary, _replicas} = get_replicas(idx)
+      primary == node()
+    end)
+    |> Enum.each(&Reconciler.reconcile/1)
+  end
+
   defp update_partition_map(nodes) do
     old_map = :persistent_term.get(@pt_key, %{})
     new_map = build_partition_map(nodes)
     :persistent_term.put(@pt_key, new_map)
     Metrics.increment(:membership, :changes)
 
+    drop_stale_raft_groups(old_map, new_map)
     spawn(fn -> reconcile_ownership(old_map, new_map) end)
     :ok
+  end
+
+  # A node that was primary for a partition may have formed its Raft group
+  # before the rest of the cluster was visible. If primacy later moves to
+  # another node, that local group keeps electing itself with a stale member
+  # set and competes with the new primary's group (same cluster/server name).
+  # Stop it so only the current primary owns group formation.
+  defp drop_stale_raft_groups(old_map, new_map) do
+    if Config.get_config(:replication_mode, :async) == :raft and System.running?() do
+      Enum.each(Group.tracked(), &stop_stale_group_if_needed(&1, old_map, new_map))
+    end
+  end
+
+  defp stop_stale_group_if_needed(idx, old_map, new_map) do
+    {old_primary, _old_replicas} = Map.get(old_map, idx, {node(), []})
+    {new_primary, new_replicas} = Map.get(new_map, idx, {node(), []})
+
+    cond do
+      node() not in [new_primary | new_replicas] ->
+        stop_stale_group(idx, :not_a_member)
+
+      old_primary == node() and new_primary != node() ->
+        stop_stale_group(idx, :primary_changed)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp stop_stale_group(idx, reason) do
+    Logger.info(
+      "super_cache, cluster_manager, stopping local raft group for partition " <>
+        "#{idx} (#{reason})"
+    )
+
+    Group.stop(idx)
   end
 
   # Pull partitions this node newly holds from their previous holders.

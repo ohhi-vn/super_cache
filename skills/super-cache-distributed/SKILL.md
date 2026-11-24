@@ -1,6 +1,6 @@
 ---
 name: super-cache-distributed
-description: Use when an application depending on super_cache must run as a multi-node cluster — enabling distributed mode, choosing replication modes (:async/:sync/:strong), read consistency (local/primary/quorum), node join/leave behaviour, health monitoring, and cluster troubleshooting. Load this before configuring or debugging SuperCache across nodes.
+description: Use when an application depending on super_cache must run as a multi-node cluster — enabling distributed mode, choosing replication modes (:async/:sync/:strong/:raft), read consistency (local/primary/quorum), node join/leave behaviour, health monitoring, and cluster troubleshooting. Load this before configuring or debugging SuperCache across nodes.
 ---
 
 # SuperCache — Distributed Mode
@@ -20,7 +20,7 @@ SuperCache.Cluster.Bootstrap.start!(
   num_partition: 8,            # identical on every node
   cluster: :distributed,
   replication_factor: 2,       # primary + 1 replica per partition
-  replication_mode: :async     # :async | :sync | :strong
+  replication_mode: :async     # :async | :sync | :strong | :raft
 )
 ```
 
@@ -49,13 +49,29 @@ SuperCache.Cluster.NodeMonitor.reconfigure(nodes: [:"node1@...", :"node2@..."]) 
 | `:async` | Eventual; fire-and-forget via supervised worker pool | Caches, sessions — default |
 | `:sync`  | Returns after majority ack (adaptive quorum)          | Durable-but-fast |
 | `:strong`| WAL-based; local write + async replicate + majority ack (~200µs) | Must survive primary crash |
+| `:raft`  | Raft consensus via `raft_ex`; commit to replicated log before success | Need a real consensus log and leader election (experimental upstream) |
 
 ```elixir
 # WAL tuning (only used by :strong):
 config :super_cache, :wal,
   majority_timeout: 2_000,
   cleanup_interval: 5_000
+
+# Raft tuning (only used by :raft); all nodes must agree on replication_mode:
+config :super_cache, :raft,
+  data_dir: "/var/lib/my_app/super_cache_raft",  # set a durable path in production
+  command_timeout_ms: 2_000,
+  wal_sync_method: :datasync,                    # :fsync | :datasync | :none
+  wal_max_size_bytes: 256_000_000
 ```
+
+`:raft` is opt-in, off by default, and requires `raft_ex`. One Raft cluster is
+created per partition; its members are the partition's primary and replicas.
+The state machine applies committed commands to the local ETS partition, so the
+Raft log is the source of truth — do not expect `:raft` to be as fast as
+`:async`. Read modes are unchanged: enabling `:raft` does **not** by itself
+make local reads linearizable. The upstream library is experimental and
+dual-licensed MPL-2.0/Apache-2.0; check licensing before shipping.
 
 ## Read consistency
 
@@ -98,6 +114,8 @@ HealthMonitor.partition_balance()
 HealthMonitor.force_check()
 
 SuperCache.cluster_stats()
+# => %{..., raft: %{running: true|false, groups: [0, 1, ...]}, reliability: %{raft_failures: 0, ...}}
+SuperCache.Cluster.Stats.reliability().raft_failures
 SuperCache.Cluster.WAL.stats()               # %{pending: _, acks_pending: _}
 ```
 

@@ -41,7 +41,7 @@ config :super_cache,
   key_pos:            0,
   partition_pos:      0,
   cluster:            :distributed,
-  replication_mode:   :async,      # :async | :sync | :strong
+  replication_mode:   :async,      # :async | :sync | :strong | :raft
   replication_factor: 2,           # primary + 1 replica
   table_type:         :set,
   num_partition:      8            # Must match across ALL nodes
@@ -55,7 +55,7 @@ read without a GenServer hop, so the hot distributed path never blocks on the
 Config process.  A suspended or down Config process still serves all three
 values:
 
-- `:replication_mode` — `:async`, `:sync`, or `:strong`
+- `:replication_mode` — `:async`, `:sync`, `:strong`, or `:raft`
 - `:replication_factor` — total copies (primary included)
 - `:started` — liveness flag set by bootstrap
 
@@ -139,6 +139,7 @@ SuperCache offers three replication modes, each trading off latency vs. durabili
 | `:async` | Eventual consistency | ~50-100µs | High-throughput caches, session data, non-critical state |
 | `:sync` | Majority ack (adaptive quorum) | ~100-300µs | Balanced durability/performance, user preferences |
 | `:strong` | WAL-based strong consistency | ~200µs | Critical data requiring durability, financial state |
+| `:raft` | Raft consensus log (`raft_ex`, opt-in) | fsync-bound | Workloads needing leader election and a replicated log |
 
 ### Async Mode
 
@@ -212,6 +213,53 @@ config :super_cache, :wal,
 
 **Pros**: Strong consistency with low latency, crash-safe, automatic recovery
 **Cons**: Slightly more memory for WAL entries, requires majority for writes
+
+### Raft Mode (opt-in)
+
+`:raft` replaces the hand-rolled replication protocol with Raft consensus from
+the `raft_ex` dependency. All nodes must start with the same
+`replication_mode: :raft`; mixed-mode clusters are rejected at bootstrap.
+
+```elixir
+config :super_cache,
+  replication_mode: :raft
+
+config :super_cache, :raft,
+  data_dir: "/var/lib/my_app/super_cache_raft",  # set a durable path in production
+  command_timeout_ms: 2_000,
+  wal_sync_method: :datasync,                    # :fsync | :datasync | :none
+  wal_max_size_bytes: 256_000_000
+```
+
+**How it works**:
+
+1. Each partition maps to one Raft cluster. Its members are the partition's
+   primary and replicas from the SuperCache partition map.
+2. A write is submitted to the Raft group. Raft handles leader election and
+   leader redirects; the caller waits for the entry to be committed by a
+   majority.
+3. On every member, the committed entry is applied to the local ETS partition
+   by `SuperCache.Cluster.Raft.Machine`. An applied-index watermark makes replay
+   idempotent, including non-idempotent operations such as `increment`.
+4. Membership changes (node join/leave) are reconciled with the current
+   partition map; a new owner is first seeded through the existing partition
+   handoff.
+
+**Guarantees and limits**:
+
+- A write never reports success before its Raft entry is committed and applied.
+- Failures (lost leadership, quorum timeout, unreachable peer) are normalized
+  to `SuperCache.Cluster.Error`.
+- Read modes are unchanged. `:raft` does **not** make a local read linearizable;
+  use `:primary` or `:quorum` reads when you need stronger read semantics.
+- `raft_ex` is experimental (pre-1.0, unstable APIs) and dual-licensed
+  MPL-2.0 / Apache-2.0. Confirm licensing before a release.
+- Latency is higher than the in-memory WAL used by `:strong` because Raft
+  persists its log; tune with `wal_sync_method`.
+
+Raft state is visible through `SuperCache.cluster_stats().raft`,
+`SuperCache.Cluster.Stats.reliability().raft_failures`, and
+`SuperCache.Cluster.HealthMonitor.local_node_health().raft`.
 
 ## Read Modes
 

@@ -80,6 +80,8 @@ defmodule SuperCache.Cluster.HealthMonitor do
   require SuperCache.Log
 
   alias SuperCache.Cluster.{Manager, Metrics, Rpc}
+  alias SuperCache.Cluster.Raft.Group
+  alias SuperCache.Cluster.Raft.System, as: RaftSystem
   alias SuperCache.{Config, Partition, Storage}
 
   # ── Configuration ─────────────────────────────────────────────────────────────
@@ -187,6 +189,10 @@ defmodule SuperCache.Cluster.HealthMonitor do
       }
 
     build_node_health(node(), checks)
+    |> Map.put(:raft, %{
+      running: RaftSystem.running?(),
+      groups: Group.tracked()
+    })
   end
 
   @doc """

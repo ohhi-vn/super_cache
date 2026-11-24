@@ -190,8 +190,12 @@ defmodule SuperCache.HealthMonitorDeepTest do
   end
 
   test "skips checks until the cache has completed bootstrap" do
-    :ets.delete_all_objects(@table)
     SuperCache.Config.set_config(:started, false)
+
+    # Drain checks queued by earlier tests before clearing the table: their
+    # async tasks can otherwise write a result after our assertions.
+    assert :ok = HealthMonitor.force_check()
+    :ets.delete_all_objects(@table)
 
     try do
       assert :ok = HealthMonitor.force_check()
