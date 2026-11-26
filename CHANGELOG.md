@@ -5,6 +5,44 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0]
+
+### Added
+
+- `benchmarks/results/raft-comparison.md`: measured comparison of `:raft`
+  against `:async`, `:sync`, and `:strong` at 1 / 3 / 4 / 5 nodes with both
+  two-voter and three-voter Raft groups, including throughput, per-operation
+  latency, and the read-barrier analysis.
+- `BENCH_RF` environment variable for `benchmarks/distributed_benchmark.exs`
+  to set `replication_factor` (default 2, matching the previous hard-coded
+  value).
+- Unit coverage in `raft_adapter_coverage_test.exs` for retrying promotion
+  after `:not_caught_up` and for promoting a member that is already present.
+
+### Changed
+
+- **Raft membership repair**: `Raft.Group.Reconciler` now retries promotion
+  against a deadline, tolerates `:already_member` / `:already_voter`, propagates
+  join failures instead of discarding them with `Enum.each/2`, and falls back to
+  forming the group from the current partition map when a join cannot converge.
+  Multi-node Raft groups now actually reach a multi-voter quorum instead of
+  remaining a single-voter group.
+- `Cluster.Manager` no longer independently prepares new Raft members; the
+  Reconciler is the sole owner of `Group.prepare_member/2`, removing a race
+  that could force-delete a server the Reconciler had just started.
+- README performance section now reports measured distributed-mode latency for
+  all four replication modes at both `replication_factor` 2 and 3.
+
+### Notes
+
+- The `form_cluster/3` fallback rebuilds the Raft group from scratch and
+  discards its log. In the benchmark runs it fires during startup before any
+  writes; triggering it after committed writes would lose data. A safer
+  in-place membership repair is needed before relying on this path in
+  production.
+- Raft writes measure ~8–10× slower than `:strong` with two voters and ~50×
+  slower with three voters; quorum reads remain effectively mode-independent.
+
 ## [1.8.0]
 
 ### Added

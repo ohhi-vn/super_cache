@@ -295,13 +295,11 @@ defmodule SuperCache.Cluster.Manager do
 
     drop_stale_raft_groups(old_map, new_map)
 
-    spawn(fn ->
-      if Config.get_config(:replication_mode, :async) == :raft do
-        prepare_raft_members(old_map, new_map)
-      end
-
-      reconcile_ownership(old_map, new_map)
-    end)
+    # Raft member preparation belongs to the Reconciler: it prepares a member
+    # immediately before starting and joining it. Preparing here as well races
+    # with that flow and can force-delete a server the Reconciler just started,
+    # leaving the peer unable to catch up and permanently promotable.
+    spawn(fn -> reconcile_ownership(old_map, new_map) end)
 
     :ok
   end
@@ -387,38 +385,6 @@ defmodule SuperCache.Cluster.Manager do
 
     Enum.each(new_map, fn {idx, {primary, replicas}} ->
       reconcile_partition(idx, primary, replicas, old_map, me, live)
-    end)
-  end
-
-  defp prepare_raft_members(old_map, new_map) do
-    # Cold/restarting node: prior view has no remote peers, so nothing is
-    # "new" from this node's perspective. Stable members prepare joiners.
-    remote_peers? =
-      old_map
-      |> Map.values()
-      |> Enum.flat_map(fn {p, r} -> [p | r] end)
-      |> Enum.any?(&(&1 != node()))
-
-    if map_size(old_map) == 0 or not remote_peers? do
-      :ok
-    else
-      Enum.each(new_map, &prepare_raft_partition(&1, old_map))
-    end
-  end
-
-  defp prepare_raft_partition({idx, {primary, replicas}}, old_map) do
-    new_members = Enum.uniq([primary | replicas])
-    {old_primary, old_replicas} = Map.get(old_map, idx, {nil, []})
-    old_members = Enum.uniq([old_primary | old_replicas]) |> Enum.reject(&is_nil/1)
-
-    new_members
-    |> Enum.reject(&(&1 in old_members))
-    |> Enum.each(fn target ->
-      Logger.info(
-        "super_cache, cluster_manager, preparing new raft member #{inspect(target)} for partition #{idx}"
-      )
-
-      _ = Group.prepare_member(idx, target)
     end)
   end
 

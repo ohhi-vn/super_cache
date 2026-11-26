@@ -54,8 +54,31 @@ See [Usage Guide](guides/Usage.md) for the complete API reference and
 | `get!` (local) | ~2.1M ops/sec |
 | `KeyValue.add_batch` (10k) | ~1.1M ops/sec |
 
+### Distributed modes (3 nodes, µs per operation)
+
+Lower is better. Raft figures use a real replicated group (2 or 3 voters).
+
+| Mode | RF | `put!` | `get! :primary` | `get! :quorum` |
+|------|----|--------|-----------------|----------------|
+| `:async` | 2 | 23 µs | 0.76 µs | 78 µs |
+| `:sync` | 2 | 106 µs | 0.45 µs | 60 µs |
+| `:strong` | 2 | 106 µs | 0.46 µs | 57 µs |
+| `:raft` | 2 | 1,111 µs | 5.63 µs | 72 µs |
+| `:async` | 3 | 16 µs | 1.08 µs | 101 µs |
+| `:sync` | 3 | 102 µs | 0.47 µs | 79 µs |
+| `:strong` | 3 | 122 µs | 0.42 µs | 82 µs |
+| `:raft` | 3 | 6,768 µs | 48.49 µs | 82 µs |
+
+Raft writes are fsync- and quorum-bound (~8–10× slower than `strong` with two
+voters, ~50× with three). Raft primary reads also pay a query barrier and, when
+the client is not the leader, an RPC round-trip. Quorum reads cost about the
+same in every mode. Write latency is roughly flat as cluster size grows once
+the voter count is fixed.
+
 Distributed latency and cluster-size scaling (1 / 3 / 5 nodes) are recorded in
-`benchmarks/results/distributed-scaling.md`.
+`benchmarks/results/distributed-scaling.md`; the full Raft comparison and the
+multi-voter membership fix are documented in
+`benchmarks/results/raft-comparison.md`.
 
 ## Guides
 

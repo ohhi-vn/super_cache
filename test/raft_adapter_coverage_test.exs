@@ -191,6 +191,45 @@ defmodule SuperCache.Cluster.RaftAdapterCoverageTest do
     assert :persistent_term.get({__MODULE__, :catch_up_polls}, 0) >= 3
   end
 
+  test "promotion is retried when raft_ex reports not_caught_up" do
+    leader = {Group.name(0), :leader_node}
+    desired = [{Group.name(0), node()}]
+
+    :ok =
+      RaftAdapterFake.install(
+        find_leader: [{:ok, leader}],
+        members: [{:ok, [], leader}, {:ok, desired, leader}],
+        promote_member: [
+          {:error, :not_caught_up},
+          {:error, :not_caught_up},
+          {:ok, [], :leader}
+        ]
+      )
+
+    assert :ok = Reconciler.reconcile(0)
+
+    promotions =
+      RaftAdapterFake.trace()
+      |> Enum.filter(&match?({:promote_member, _}, &1))
+
+    assert length(promotions) == 3
+  end
+
+  test "an already promotable member is promoted instead of re-added" do
+    leader = {Group.name(0), :leader_node}
+    desired = [{Group.name(0), node()}]
+
+    :ok =
+      RaftAdapterFake.install(
+        find_leader: [{:ok, leader}],
+        members: [{:ok, [], leader}, {:ok, desired, leader}],
+        add_member: [{:error, :already_member}]
+      )
+
+    assert :ok = Reconciler.reconcile(0)
+    assert Enum.any?(RaftAdapterFake.trace(), &match?({:promote_member, _}, &1))
+  end
+
   test "add_member failures are reported" do
     leader = {:super_cache_raft_partition_0, node()}
 

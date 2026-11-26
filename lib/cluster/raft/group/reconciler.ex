@@ -29,6 +29,11 @@ defmodule SuperCache.Cluster.Raft.Group.Reconciler do
   # the short `:command_timeout_ms` used for writes.
   @membership_timeout 10_000
 
+  # Promotion can be rejected while a freshly started member replays the
+  # leader's log. Budget enough time for that catch-up without letting a failed
+  # reconcile leave the member permanently promotable.
+  @promotion_timeout 15_000
+
   @doc "Start the reconciler (owned by the application supervision tree)."
   @spec start_link(keyword) :: {:ok, pid} | {:error, term}
   def start_link(opts \\ []) do
@@ -71,8 +76,22 @@ defmodule SuperCache.Cluster.Raft.Group.Reconciler do
     case Adapter.find_leader(cluster_name) do
       {:ok, leader} ->
         case reconcile_with_leader(leader, desired, cluster_name, partition_idx) do
-          {:error, :noproc} -> form_cluster(desired, cluster_name, partition_idx)
-          other -> other
+          {:error, :noproc} ->
+            form_cluster(desired, cluster_name, partition_idx)
+
+          {:error, reason} when reason in [:catch_up_timeout, :not_caught_up] ->
+            # An incremental join can leave a peer stuck as promotable (its
+            # match_index never advances). Rebuild from the current partition
+            # map so the group has the full voter set.
+            Logger.warning(
+              "super_cache, raft.group, join failed (#{inspect(reason)}) — " <>
+                "forming cluster from current membership"
+            )
+
+            form_cluster(desired, cluster_name, partition_idx)
+
+          other ->
+            other
         end
 
       {:error, _} ->
@@ -86,13 +105,18 @@ defmodule SuperCache.Cluster.Raft.Group.Reconciler do
         {to_add, to_remove} = Group.diff_members(current, desired)
 
         Enum.each(to_remove, &leave(&1, leader))
-        Enum.each(to_add, &join(&1, leader, desired, cluster_name, partition_idx))
 
-        case await_members(leader, desired, @membership_timeout) do
+        case join_all(to_add, leader, desired, cluster_name, partition_idx) do
           :ok ->
-            # Only stop removed servers once their removal is committed.
-            Enum.each(to_remove, &stop_server/1)
-            :ok
+            case await_members(leader, desired, @membership_timeout) do
+              :ok ->
+                # Only stop removed servers once their removal is committed.
+                Enum.each(to_remove, &stop_server/1)
+                :ok
+
+              {:error, _} = err ->
+                err
+            end
 
           {:error, _} = err ->
             err
@@ -100,6 +124,23 @@ defmodule SuperCache.Cluster.Raft.Group.Reconciler do
 
       {:error, _} = err ->
         err
+    end
+  end
+
+  defp join_all([], _leader, _desired, _cluster_name, _partition_idx), do: :ok
+
+  defp join_all([server_id | rest], leader, desired, cluster_name, partition_idx) do
+    case join(server_id, leader, desired, cluster_name, partition_idx) do
+      :ok ->
+        join_all(rest, leader, desired, cluster_name, partition_idx)
+
+      {:error, reason} when reason in [:catch_up_timeout, :not_caught_up] ->
+        {:error, reason}
+
+      # Other join failures are reported and skipped, matching the previous
+      # best-effort behaviour of Enum.each.
+      {:error, _} ->
+        join_all(rest, leader, desired, cluster_name, partition_idx)
     end
   end
 
@@ -115,33 +156,78 @@ defmodule SuperCache.Cluster.Raft.Group.Reconciler do
   end
 
   defp do_add_member(leader, server_id) do
-    with {:ok, _, _} <-
-           Adapter.add_member(leader, server_id, :promotable, @membership_timeout),
-         :ok <- await_catch_up(leader, server_id, @membership_timeout),
-         {:ok, _, _} <- Adapter.promote_member(leader, server_id, @membership_timeout) do
+    deadline = :erlang.monotonic_time(:millisecond) + @promotion_timeout
+
+    with :ok <- ensure_promotable(leader, server_id),
+         :ok <- await_catch_up(leader, server_id, deadline),
+         :ok <- promote_when_caught_up(leader, server_id, deadline) do
       :ok
     else
       other ->
         Logger.warning("super_cache, raft.group, add_member failed: #{inspect(other)}")
-        {:error, other}
+        other
+    end
+  end
+
+  # A previous reconcile may already have added the server as a promotable
+  # member without promoting it, so re-adding is not required to retry.
+  defp ensure_promotable(leader, server_id) do
+    case Adapter.add_member(leader, server_id, :promotable, @membership_timeout) do
+      {:ok, _, _} -> :ok
+      {:error, :already_member} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  # raft_ex rejects promotion while the peer's match_index trails the leader's
+  # commit_index. The metrics pre-check can return early when either side does
+  # not expose an index, so retry :not_caught_up until the deadline instead of
+  # leaving the member permanently promotable.
+  defp promote_when_caught_up(leader, server_id, deadline) do
+    remaining = deadline - :erlang.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      {:error, :catch_up_timeout}
+    else
+      case Adapter.promote_member(leader, server_id, min(remaining, @membership_timeout)) do
+        {:ok, _, _} ->
+          :ok
+
+        {:error, :already_voter} ->
+          :ok
+
+        {:error, :not_caught_up} ->
+          case await_catch_up(leader, server_id, deadline) do
+            :ok ->
+              Process.sleep(100)
+              promote_when_caught_up(leader, server_id, deadline)
+
+            {:error, _} = error ->
+              error
+          end
+
+        {:error, _} = error ->
+          error
+      end
     end
   end
 
   # Promotion is safe only once the joining server has caught up with the
   # leader's committed log. When either side does not expose metrics we let the
   # engine's own catch-up check decide, rather than blocking a valid join.
-  defp await_catch_up(_leader, _server_id, remaining) when remaining <= 0,
-    do: {:error, :catch_up_timeout}
-
-  defp await_catch_up(leader, server_id, remaining) do
-    leader_index = commit_index(Adapter.key_metrics(leader, 2_000))
-    member_index = commit_index(Adapter.key_metrics(server_id, 2_000))
-
-    if is_integer(leader_index) and is_integer(member_index) and member_index < leader_index do
-      Process.sleep(100)
-      await_catch_up(leader, server_id, remaining - 100)
+  defp await_catch_up(leader, server_id, deadline) do
+    if :erlang.monotonic_time(:millisecond) >= deadline do
+      {:error, :catch_up_timeout}
     else
-      :ok
+      leader_index = commit_index(Adapter.key_metrics(leader, 2_000))
+      member_index = commit_index(Adapter.key_metrics(server_id, 2_000))
+
+      if is_integer(leader_index) and is_integer(member_index) and member_index < leader_index do
+        Process.sleep(100)
+        await_catch_up(leader, server_id, deadline)
+      else
+        :ok
+      end
     end
   end
 

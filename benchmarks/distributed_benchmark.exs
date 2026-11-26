@@ -20,6 +20,10 @@ defmodule SuperCache.DistributedBenchmark do
   The script starts an N-node cluster for each replication mode and
   reports throughput and per-operation latency for puts, primary reads, and
   quorum reads.
+
+  Set `BENCH_RF` to change `replication_factor` (default 2), e.g.
+  `BENCH_RF=3 BENCH_NODES=5 ...`. A factor of 3 gives Raft a three-voter
+  group, which is the recommended production minimum.
   """
 
   @opts [
@@ -38,6 +42,13 @@ defmodule SuperCache.DistributedBenchmark do
   defp total_nodes do
     case System.get_env("BENCH_NODES") do
       nil -> 3
+      v -> String.to_integer(v)
+    end
+  end
+
+  defp replication_factor do
+    case System.get_env("BENCH_RF") do
+      nil -> 2
       v -> String.to_integer(v)
     end
   end
@@ -90,7 +101,10 @@ defmodule SuperCache.DistributedBenchmark do
         @opts
       end
 
-    opts = Keyword.put(base_opts, :replication_mode, mode)
+    opts =
+      base_opts
+      |> Keyword.put(:replication_mode, mode)
+      |> Keyword.put(:replication_factor, replication_factor())
 
     if mode == :raft do
       local_dir = Path.join(raft_dir, "local")
