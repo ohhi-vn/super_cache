@@ -393,11 +393,29 @@ SuperCache.stop()
 
 ### Distributed Latency (Typical LAN)
 
-| Operation | Async | Sync (Quorum) | Strong (WAL) |
-|-----------|-------|---------------|--------------|
-| Write | ~50-100µs | ~100-300µs | ~200µs |
-| Read (local) | ~10µs | ~10µs | ~10µs |
-| Read (quorum) | ~100-200µs | ~100-200µs | ~100-200µs |
+| Operation | Async | Sync (Quorum) | Strong (WAL) | Raft |
+|-----------|-------|---------------|--------------|------|
+| Write | ~50-100µs | ~100-300µs | ~200µs | ~700-1500µs |
+| Read (local) | ~10µs | ~10µs | ~10µs | ~3-4µs |
+| Read (quorum) | ~100-200µs | ~100-200µs | ~100-200µs | ~50-55µs |
+
+Measured cluster-size scaling (1 / 3 / 5 nodes, `replication_factor: 2`,
+`num_partition: 8`, 500 puts + 1,000 primary/quorum reads) is recorded in
+`benchmarks/results/distributed-scaling.md`. Run it yourself with:
+
+```bash
+# 1 node
+BENCH_NODES=1 elixir --name bench@127.0.0.1 --cookie bench_secret \\
+  -S mix run benchmarks/distributed_benchmark.exs
+
+# 3 nodes (default)
+elixir --name bench@127.0.0.1 --cookie bench_secret \\
+  -S mix run benchmarks/distributed_benchmark.exs
+
+# 5 nodes
+BENCH_NODES=5 elixir --name bench@127.0.0.1 --cookie bench_secret \\
+  -S mix run benchmarks/distributed_benchmark.exs
+```
 
 ### Profiling with :fprof
 
