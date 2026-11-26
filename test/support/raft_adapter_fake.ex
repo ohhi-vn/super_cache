@@ -38,6 +38,18 @@ defmodule SuperCache.Test.RaftAdapterFake do
   def add_member(leader, server_id, timeout),
     do: call(:add_member, [leader, server_id, timeout], {:ok, [], :leader})
 
+  def add_member(leader, server_id, membership, timeout),
+    do: call(:add_member, [leader, server_id, membership, timeout], {:ok, [], :leader})
+
+  def promote_member(leader, server_id, timeout),
+    do: call(:promote_member, [leader, server_id, timeout], {:ok, [], :leader})
+
+  def demote_member(leader, server_id, timeout),
+    do: call(:demote_member, [leader, server_id, timeout], {:ok, [], :leader})
+
+  def transfer_leadership(leader, target, timeout),
+    do: call(:transfer_leadership, [leader, target, timeout], :ok)
+
   def remove_member(leader, server_id, timeout),
     do: call(:remove_member, [leader, server_id, timeout], {:ok, [], :leader})
 
@@ -45,6 +57,9 @@ defmodule SuperCache.Test.RaftAdapterFake do
     do: call(:start_server, [system, cluster_name, server_id, machine, desired], :ok)
 
   def stop_server(system, server_id), do: call(:stop_server, [system, server_id], :ok)
+
+  def force_delete_server(system, server_id),
+    do: call(:force_delete_server, [system, server_id], :ok)
 
   def start_cluster(system, cluster_name, machine, desired, timeout),
     do: call(:start_cluster, [system, cluster_name, machine, desired, timeout], {:ok, [], []})
@@ -59,6 +74,19 @@ defmodule SuperCache.Test.RaftAdapterFake do
 
   def process_command(server, command, timeout),
     do: call(:process_command, [server, command, timeout], {:ok, :ok, :leader})
+
+  def local_query(server, query, timeout),
+    do: call(:local_query, [server, query, timeout], {:ok, :ok, :leader})
+
+  def leader_query(server, query, timeout),
+    do: call(:leader_query, [server, query, timeout], {:ok, :ok, :leader})
+
+  def consistent_query(server, query, timeout),
+    do: call(:consistent_query, [server, query, timeout], {:ok, :ok, :leader})
+
+  def key_metrics(server, timeout), do: call(:key_metrics, [server, timeout], %{})
+
+  def member_overview(server, timeout), do: call(:member_overview, [server, timeout], %{})
 
   defp call(name, args, default) do
     state = :persistent_term.get(@key, %{responses: %{}, trace: [], trace_pid: nil})

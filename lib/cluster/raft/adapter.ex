@@ -54,6 +54,26 @@ defmodule SuperCache.Cluster.Raft.Adapter do
   @spec add_member(term, term, timeout) :: term
   def add_member(leader, server_id, timeout), do: backend().add_member(leader, server_id, timeout)
 
+  @doc "Delegate to the backend's `RaftEx.add_member/4` with an explicit membership role."
+  @spec add_member(term, term, atom, timeout) :: term
+  def add_member(leader, server_id, membership, timeout),
+    do: backend().add_member(leader, server_id, membership, timeout)
+
+  @doc "Delegate to the backend's `RaftEx.promote_member/3`."
+  @spec promote_member(term, term, timeout) :: term
+  def promote_member(leader, server_id, timeout),
+    do: backend().promote_member(leader, server_id, timeout)
+
+  @doc "Delegate to the backend's `RaftEx.demote_member/3`."
+  @spec demote_member(term, term, timeout) :: term
+  def demote_member(leader, server_id, timeout),
+    do: backend().demote_member(leader, server_id, timeout)
+
+  @doc "Delegate to the backend's `RaftEx.transfer_leadership/3`."
+  @spec transfer_leadership(term, term, timeout) :: term
+  def transfer_leadership(leader, target, timeout),
+    do: backend().transfer_leadership(leader, target, timeout)
+
   @doc "Delegate to the backend's `RaftEx.remove_member/3`."
   @spec remove_member(term, term, timeout) :: term
   def remove_member(leader, server_id, timeout),
@@ -78,8 +98,33 @@ defmodule SuperCache.Cluster.Raft.Adapter do
   def start_or_restart_cluster(system, cluster_name, machine, desired, timeout),
     do: backend().start_or_restart_cluster(system, cluster_name, machine, desired, timeout)
 
+  @doc "Delegate to the backend's `RaftEx.force_delete_server/2`."
+  @spec force_delete_server(term, term) :: term
+  def force_delete_server(system, server_id), do: backend().force_delete_server(system, server_id)
+
   @doc "Delegate to the backend's `RaftEx.process_command/3`."
   @spec process_command(term, term, timeout) :: term
   def process_command(server, command, timeout),
     do: backend().process_command(server, command, timeout)
+
+  @doc "Delegate to the backend's `RaftEx.local_query/3`."
+  @spec local_query(term, term, timeout) :: term
+  def local_query(server, query, timeout), do: backend().local_query(server, query, timeout)
+
+  @doc "Delegate to the backend's `RaftEx.leader_query/3`."
+  @spec leader_query(term, term, timeout) :: term
+  def leader_query(server, query, timeout), do: backend().leader_query(server, query, timeout)
+
+  @doc "Delegate to the backend's `RaftEx.consistent_query/3`."
+  @spec consistent_query(term, term, timeout) :: term
+  def consistent_query(server, query, timeout),
+    do: backend().consistent_query(server, query, timeout)
+
+  @doc "Delegate to the backend's `RaftEx.key_metrics/2`."
+  @spec key_metrics(term, timeout) :: term
+  def key_metrics(server, timeout), do: backend().key_metrics(server, timeout)
+
+  @doc "Delegate to the backend's `RaftEx.member_overview/2`."
+  @spec member_overview(term, timeout) :: term
+  def member_overview(server, timeout), do: backend().member_overview(server, timeout)
 end

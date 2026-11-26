@@ -35,6 +35,7 @@ defmodule SuperCache.Cluster.Stats do
   """
 
   alias SuperCache.Cluster.{Manager, Metrics, Raft, TxnRegistry}
+  alias SuperCache.Cluster.Raft.Topology
   alias SuperCache.{Partition, Storage}
 
   # ── Cluster overview ─────────────────────────────────────────────────────────
@@ -89,7 +90,9 @@ defmodule SuperCache.Cluster.Stats do
       replication_mode: Manager.replication_mode(),
       raft: %{
         running: Raft.System.running?(),
-        groups: Raft.Group.tracked()
+        groups: Raft.Group.tracked(),
+        group_details: Raft.Group.all_status(),
+        topology: Topology.status()
       },
       reliability: reliability(),
       num_partitions: num_partitions,
@@ -359,7 +362,8 @@ defmodule SuperCache.Cluster.Stats do
   - `:async_drops` — async replication deliveries dropped (pool full or replica error)
   - `:sync_failures` — sync quorum failures
   - `:strong_failures` — strong (WAL) write failures
-  - `:raft_failures` — Raft-mode write failures
+  - `:raft_failures` — Raft-mode write and query failures
+  - `:raft_leadership_transfer_failures` — planned leadership handoffs that fell back
   - `:wal_backpressure` — strong writes rejected due to WAL backpressure
   - `:read_fallbacks` — reads that fell back to a stale replica or primary
   - `:health_timeouts` — health-check timeouts
@@ -377,6 +381,7 @@ defmodule SuperCache.Cluster.Stats do
         sync_failures: 0,
         strong_failures: 0,
         raft_failures: 0,
+        raft_leadership_transfer_failures: 0,
         wal_backpressure: 0,
         read_fallbacks: 0,
         health_timeouts: 0,
@@ -401,6 +406,7 @@ defmodule SuperCache.Cluster.Stats do
       sync_failures: Map.get(replication, :sync_failures, 0),
       strong_failures: Map.get(replication, :strong_failures, 0),
       raft_failures: Map.get(replication, :raft_failures, 0),
+      raft_leadership_transfer_failures: Map.get(replication, :leadership_transfer_failures, 0),
       wal_backpressure: Map.get(wal, :backpressure, 0),
       read_fallbacks: Map.get(read, :fallbacks, 0),
       health_timeouts: Map.get(health, :timeouts, 0),

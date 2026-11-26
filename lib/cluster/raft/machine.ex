@@ -13,7 +13,9 @@ defmodule SuperCache.Cluster.Raft.Machine do
 
   Application is guarded by the Raft log index stored in
   `SuperCache.Cluster.Raft.Applied`; a replayed index is acknowledged without
-  re-applying its operations.
+  re-applying its operations. The machine state also carries the highest
+  applied index so snapshots checkpoint it as metadata, and installing a
+  snapshot restores the ETS watermark.
   """
 
   @behaviour RaftEx.Domain.Machine
@@ -24,14 +26,19 @@ defmodule SuperCache.Cluster.Raft.Machine do
 
   @impl RaftEx.Domain.Machine
   def init(conf) do
-    %{partition_idx: Map.fetch!(conf, :partition_idx)}
+    %{
+      partition_idx: Map.fetch!(conf, :partition_idx),
+      applied: Map.get(conf, :applied, 0)
+    }
   end
 
   @impl RaftEx.Domain.Machine
   def apply(meta, command, %{partition_idx: partition_idx} = state) do
     index = Map.get(meta, :index, 0)
 
-    if Applied.claim(partition_idx, index) do
+    if Applied.applied?(partition_idx, index) do
+      {%{state | applied: max(index, Map.get(state, :applied, 0))}, {:ok, :already_applied}}
+    else
       result =
         try do
           apply_command(command, partition_idx)
@@ -39,10 +46,22 @@ defmodule SuperCache.Cluster.Raft.Machine do
           err -> {:error, {:apply_failed, err}}
         end
 
-      {state, result}
-    else
-      {state, {:ok, :already_applied}}
+      case result do
+        {:error, _} = err ->
+          {state, err}
+
+        _ ->
+          Applied.record(partition_idx, index)
+          {%{state | applied: index}, result}
+      end
     end
+  end
+
+  @impl RaftEx.Domain.Machine
+  def snapshot_installed(meta, state, _old_meta, _old_state) do
+    index = Map.get(meta, :index, Map.get(state, :applied, 0))
+    Applied.record(Map.fetch!(state, :partition_idx), index)
+    []
   end
 
   defp apply_command({:batch, ops}, partition_idx) when is_list(ops) do

@@ -8,7 +8,12 @@ defmodule SuperCache.Cluster.Raft.Config do
         data_dir: "/var/lib/my_app/super_cache_raft",
         command_timeout_ms: 2_000,
         wal_sync_method: :datasync,
-        wal_max_size_bytes: 256_000_000
+        wal_max_size_bytes: 256_000_000,
+        election_timeout_min: 500,
+        election_timeout_max: 2_000,
+        heartbeat_interval: 100,
+        segment_max_entries: 4096,
+        segment_max_size_bytes: 64_000_000
 
   The default `data_dir` is a per-node directory in the system temp dir;
   deployments that need durable Raft logs across restarts should set it
@@ -19,7 +24,12 @@ defmodule SuperCache.Cluster.Raft.Config do
     data_dir: nil,
     command_timeout_ms: 2_000,
     wal_sync_method: :datasync,
-    wal_max_size_bytes: 256_000_000
+    wal_max_size_bytes: 256_000_000,
+    election_timeout_min: 500,
+    election_timeout_max: 2_000,
+    heartbeat_interval: 100,
+    segment_max_entries: 4_096,
+    segment_max_size_bytes: 64_000_000
   ]
 
   @sync_methods [:fsync, :datasync, :none]
@@ -72,7 +82,26 @@ defmodule SuperCache.Cluster.Raft.Config do
       raise ArgumentError, ":raft wal_max_size_bytes must be a positive integer"
     end
 
+    validate_positive!(config, :election_timeout_min)
+    validate_positive!(config, :election_timeout_max)
+    validate_positive!(config, :heartbeat_interval)
+    validate_positive!(config, :segment_max_entries)
+    validate_positive!(config, :segment_max_size_bytes)
+
+    if Keyword.fetch!(config, :election_timeout_min) >
+         Keyword.fetch!(config, :election_timeout_max) do
+      raise ArgumentError, ":raft election_timeout_min must not exceed election_timeout_max"
+    end
+
     :ok
+  end
+
+  defp validate_positive!(config, key) do
+    value = Keyword.fetch!(config, key)
+
+    unless is_integer(value) and value > 0 do
+      raise ArgumentError, ":raft #{key} must be a positive integer"
+    end
   end
 
   @doc "Forget the memoized default data directory (used by tests)."

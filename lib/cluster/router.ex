@@ -55,6 +55,7 @@ defmodule SuperCache.Cluster.Router do
   require SuperCache.Log
 
   alias SuperCache.Cluster.{DistributedHelpers, Manager, Metrics, Quorum, Replicator, Rpc, WAL}
+  alias SuperCache.Cluster.Raft.Query, as: RaftQuery
   alias SuperCache.{Config, Partition, Storage}
 
   @erpc_timeout 5_000
@@ -477,6 +478,7 @@ defmodule SuperCache.Cluster.Router do
 
   # Local: read directly from the local ETS table — no network hop.
   defp do_read(:local, order, op, arg) do
+    :ok = maybe_raft_barrier(:local, order, op)
     local_read(order, op, arg)
   end
 
@@ -484,21 +486,15 @@ defmodule SuperCache.Cluster.Router do
   # the primary via :erpc passing only plain terms (op atom + arg), never
   # a closure.
   defp do_read(:primary, order, op, arg) do
-    if primary?(order) do
-      local_read(order, op, arg)
-    else
-      {primary, _} = Manager.get_replicas(order)
+    :ok = maybe_raft_barrier(:primary, order, op)
+    primary_read(order, op, arg)
+  end
 
-      case Rpc.call(primary, __MODULE__, :local_read, [order, op, arg],
-             operation: op,
-             partition: order,
-             node: primary,
-             mode: :primary
-           ) do
-        {:ok, list} when is_list(list) -> list
-        {:error, error} -> primary_read_fallback(order, op, arg, primary, error)
-      end
-    end
+  # Consistent: confirm leadership with a voter quorum through the Raft query
+  # path, then read the leader's ETS partition using the primary routing.
+  defp do_read(:consistent, order, op, arg) do
+    :ok = maybe_raft_barrier(:consistent, order, op)
+    primary_read(order, op, arg)
   end
 
   # Quorum: ask primary + all replicas in parallel; only plain terms sent via
@@ -535,6 +531,48 @@ defmodule SuperCache.Cluster.Router do
           {:ok, {:ok, value}} -> value
           _ -> quorum_read_fallback(order, op, arg, primary, reason)
         end
+    end
+  end
+
+  defp primary_read(order, op, arg) do
+    if primary?(order) do
+      local_read(order, op, arg)
+    else
+      {primary, _} = Manager.get_replicas(order)
+
+      case Rpc.call(primary, __MODULE__, :local_read, [order, op, arg],
+             operation: op,
+             partition: order,
+             node: primary,
+             mode: :primary
+           ) do
+        {:ok, list} when is_list(list) -> list
+        {:error, error} -> primary_read_fallback(order, op, arg, primary, error)
+      end
+    end
+  end
+
+  # In non-Raft modes the read path is untouched. In Raft mode the matching
+  # query barrier runs before the ETS read; a failed barrier is normalized to
+  # the documented distributed error rather than returning a stale value.
+  defp maybe_raft_barrier(mode, order, op) do
+    if Manager.replication_mode() == :raft do
+      case RaftQuery.barrier(mode, order) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Metrics.increment(:replication, :raft_failures)
+
+          raise Rpc.normalize(reason,
+                  operation: op,
+                  partition: order,
+                  node: node(),
+                  mode: :raft
+                )
+      end
+    else
+      :ok
     end
   end
 

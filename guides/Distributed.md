@@ -242,8 +242,24 @@ config :super_cache, :raft,
    by `SuperCache.Cluster.Raft.Machine`. An applied-index watermark makes replay
    idempotent, including non-idempotent operations such as `increment`.
 4. Membership changes (node join/leave) are reconciled with the current
-   partition map; a new owner is first seeded through the existing partition
-   handoff.
+   partition map. In `:raft` mode a member that joins a group rebuilds its
+   partition from the committed Raft log; it does **not** receive an ETS
+   handoff, so non-idempotent operations such as `increment` are applied
+   exactly once. Joining members are added with the `:promotable` role and are
+   promoted to `:voter` only after they catch up with the leader's committed
+   log. A member that leaves is demoted before removal (the last voter is
+   never demoted), then has its local group stopped and its partition and
+   applied-index watermark cleared.
+5. Leader loss is recovered automatically: when a majority of a group is still
+   available a new leader is elected and writes resume. A write that fails only
+   because leadership moved is retried within the configured deadline; a write
+   whose outcome is unknown (timeout) is never resubmitted.
+6. A **planned** primary move is different from a crash: while this node still
+   leads the group it first checks that the incoming primary is a caught-up
+   voter, then asks the leader to transfer leadership to it before the local
+   group is stopped. If the target is ineligible or the request fails, the
+   transfer is counted as a Raft failure and the normal formation/election path
+   takes over. An unplanned leader failure never triggers an explicit transfer.
 
 **Guarantees and limits**:
 
@@ -254,12 +270,43 @@ config :super_cache, :raft,
   use `:primary` or `:quorum` reads when you need stronger read semantics.
 - `raft_ex` is experimental (pre-1.0, unstable APIs) and dual-licensed
   MPL-2.0 / Apache-2.0. Confirm licensing before a release.
+- **Two-voter groups are not recommended.** A Raft group needs a strict
+  majority to commit, so a group with only two voters has no quorum once one
+  member is lost and is prone to election livelock under concurrent elections.
+  Use `replication_factor: 3` (or higher) with at least three live nodes in
+  production; single-node groups remain valid for development.
 - Latency is higher than the in-memory WAL used by `:strong` because Raft
   persists its log; tune with `wal_sync_method`.
 
-Raft state is visible through `SuperCache.cluster_stats().raft`,
-`SuperCache.Cluster.Stats.reliability().raft_failures`, and
-`SuperCache.Cluster.HealthMonitor.local_node_health().raft`.
+**Sizing (N + 1)**:
+
+For a cluster with `replication_factor: N`, running `N + 1` nodes is
+recommended so a spare node remains available for failover and repair. With
+fewer nodes Raft mode still starts and writes still commit, but the topology
+is reported as `:underprovisioned` (a warning is logged on the transition
+into that state, and `SuperCache.cluster_stats().raft.topology.status` and
+`SuperCache.Cluster.HealthMonitor.local_node_health().raft` reflect it).
+Single-node and small clusters remain valid for development.
+
+**Observability**:
+
+`SuperCache.cluster_stats().raft` contains `running`, `groups` (the list of
+locally tracked partition indexes), `group_details` (per-group `idx`,
+`running`, `role`, `leader`, `member_count`, `members`, plus `metrics` with
+term/commit/applied index and state and `member_roles` with each member's Raft
+role), and `topology`
+(`node_count`, `replication_factor`, `recommended_nodes`, `status`,
+`evaluated_at`). `raft_failures` is exposed through the reliability counters.
+
+**Catch-up limitation**:
+
+A joining member rebuilds from the retained Raft log, so join time is
+proportional to log length. The state machine carries its highest applied index
+so Raft snapshots checkpoint the applied-index watermark; installing a snapshot
+restores that watermark in `Raft.Applied`, and a cleared watermark makes replay
+apply committed entries again. Snapshots carry machine metadata rather than ETS
+contents, so log entries still needed to rebuild a partition must be retained.
+The mode is opt-in and the limitation is documented.
 
 ## Read Modes
 

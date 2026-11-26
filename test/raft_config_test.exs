@@ -24,6 +24,11 @@ defmodule SuperCache.Cluster.Raft.ConfigTest do
     assert Config.get(:command_timeout_ms) == 2_000
     assert Config.get(:wal_sync_method) == :datasync
     assert Config.get(:wal_max_size_bytes) == 256_000_000
+    assert Config.get(:election_timeout_min) == 500
+    assert Config.get(:election_timeout_max) == 2_000
+    assert Config.get(:heartbeat_interval) == 100
+    assert Config.get(:segment_max_entries) == 4_096
+    assert Config.get(:segment_max_size_bytes) == 64_000_000
     assert is_binary(Config.get(:data_dir))
     assert :ok = Config.validate!()
   end
@@ -40,6 +45,39 @@ defmodule SuperCache.Cluster.Raft.ConfigTest do
     assert Config.get(:command_timeout_ms) == 5_000
     assert Config.get(:wal_sync_method) == :fsync
     assert :ok = Config.validate!()
+  end
+
+  test "0.4.0 engine settings can be overridden" do
+    Application.put_env(:super_cache, :raft,
+      election_timeout_min: 800,
+      election_timeout_max: 1_600,
+      heartbeat_interval: 50,
+      segment_max_entries: 128,
+      segment_max_size_bytes: 1_000_000
+    )
+
+    assert Config.get(:election_timeout_min) == 800
+    assert Config.get(:election_timeout_max) == 1_600
+    assert :ok = Config.validate!()
+  end
+
+  test "rejects an invalid election timeout" do
+    Application.put_env(:super_cache, :raft, election_timeout_min: 0)
+    assert_raise ArgumentError, ~r/election_timeout_min/, fn -> Config.validate!() end
+  end
+
+  test "rejects election min greater than max" do
+    Application.put_env(:super_cache, :raft,
+      election_timeout_min: 2_000,
+      election_timeout_max: 1_000
+    )
+
+    assert_raise ArgumentError, ~r/election_timeout_min/, fn -> Config.validate!() end
+  end
+
+  test "rejects an invalid segment setting" do
+    Application.put_env(:super_cache, :raft, segment_max_entries: -1)
+    assert_raise ArgumentError, ~r/segment_max_entries/, fn -> Config.validate!() end
   end
 
   test "rejects an invalid timeout" do

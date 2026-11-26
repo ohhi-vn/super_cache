@@ -13,6 +13,7 @@ defmodule SuperCache.Cluster.Raft.Group do
 
   alias SuperCache.Cluster.{Manager, Raft}
   alias SuperCache.Cluster.Raft.Adapter
+  alias SuperCache.Cluster.Raft.Applied
   alias SuperCache.Config
 
   @groups_key {__MODULE__, :groups}
@@ -128,6 +129,60 @@ defmodule SuperCache.Cluster.Raft.Group do
     :ok
   end
 
+  @doc """
+  Prepare a node for joining a partition's group.
+
+  Discards stale local state for the partition so the member rebuilds from
+  the committed log: it force-deletes the local Raft server (persisted log
+  and `last_applied`), clears the local ETS partition, and resets the
+  applied-index watermark. Safe to repeat.
+
+  When `target` differs from this node, the work runs on `target` via
+  `:erpc`; the local variant is `prepare_member_local/1`.
+  """
+  @spec prepare_member(non_neg_integer, node) :: :ok | {:error, term}
+  def prepare_member(partition_idx, target \\ node()) do
+    if target == node() do
+      do_prepare_member(partition_idx)
+    else
+      :erpc.call(target, __MODULE__, :prepare_member_local, [partition_idx], 15_000)
+    end
+  catch
+    kind, reason ->
+      Logger.warning("super_cache, raft.group, prepare_member failed: #{inspect({kind, reason})}")
+      {:error, {kind, reason}}
+  end
+
+  @doc false
+  @spec prepare_member_local(non_neg_integer) :: :ok | {:error, term}
+  def prepare_member_local(partition_idx) do
+    do_prepare_member(partition_idx)
+  catch
+    kind, reason ->
+      Logger.warning(
+        "super_cache, raft.group, prepare_member_local failed: #{inspect({kind, reason})}"
+      )
+
+      {:error, {kind, reason}}
+  end
+
+  defp do_prepare_member(partition_idx) do
+    system = SuperCache.Cluster.Raft.System.system_name()
+    _ = Adapter.force_delete_server(system, server_id(partition_idx))
+    clear_local_partition(partition_idx)
+    Applied.reset(partition_idx)
+    :ok
+  end
+
+  defp clear_local_partition(partition_idx) do
+    case SuperCache.Partition.get_partition_by_idx(partition_idx) do
+      nil -> :ok
+      partition -> SuperCache.Storage.delete_all(partition)
+    end
+  rescue
+    _ -> :ok
+  end
+
   @doc "Stop the local Raft server for a partition."
   @spec stop(non_neg_integer) :: :ok | {:error, term}
   def stop(partition_idx) do
@@ -152,9 +207,108 @@ defmodule SuperCache.Cluster.Raft.Group do
     :ok
   end
 
+  @doc "Return a bounded status snapshot for a partition's local group."
+  @spec status(non_neg_integer) :: map
+  def status(partition_idx) do
+    running = Process.whereis(name(partition_idx)) != nil
+
+    {role, leader, members, metrics, member_roles} =
+      if running, do: group_status(partition_idx), else: {:unknown, nil, [], %{}, %{}}
+
+    %{
+      idx: partition_idx,
+      running: running,
+      role: role,
+      leader: leader,
+      member_count: length(members),
+      members: members,
+      metrics: metrics,
+      member_roles: member_roles
+    }
+  rescue
+    _ ->
+      %{
+        idx: partition_idx,
+        running: false,
+        role: :unknown,
+        leader: nil,
+        member_count: 0,
+        members: [],
+        metrics: %{},
+        member_roles: %{}
+      }
+  end
+
+  defp group_status(partition_idx) do
+    leader = leader_for(partition_idx)
+    members = members_for(partition_idx)
+
+    role =
+      cond do
+        leader == server_id(partition_idx) -> :leader
+        leader != nil -> :follower
+        true -> :unknown
+      end
+
+    {role, leader, members, metrics_for(partition_idx), member_roles_for(partition_idx)}
+  end
+
+  defp leader_for(partition_idx) do
+    case Adapter.find_leader(cluster_name(partition_idx)) do
+      {:ok, leader} -> leader
+      _ -> nil
+    end
+  end
+
+  defp members_for(partition_idx) do
+    case Adapter.members({name(partition_idx), node()}, 1_000) do
+      {:ok, members, _} -> members
+      _ -> []
+    end
+  end
+
+  defp metrics_for(partition_idx) do
+    case Adapter.key_metrics({name(partition_idx), node()}, 1_000) do
+      map when is_map(map) ->
+        Map.take(map, [
+          :term,
+          :commit_index,
+          :last_applied,
+          :snapshot_index,
+          :last_index,
+          :state,
+          :membership
+        ])
+
+      _ ->
+        %{}
+    end
+  end
+
+  defp member_roles_for(partition_idx) do
+    case Adapter.member_overview({name(partition_idx), node()}, 1_000) do
+      %{cluster: cluster} when is_map(cluster) ->
+        Map.new(cluster, fn {id, info} -> {id, member_role(info)} end)
+
+      _ ->
+        %{}
+    end
+  end
+
+  defp member_role(%{voter_status: %{membership: role}}), do: role
+  defp member_role(%{membership: role}) when is_atom(role), do: role
+  defp member_role(_), do: :unknown
+
   @doc "Return the partition indexes with a local group started."
   @spec tracked() :: [non_neg_integer]
   def tracked, do: :persistent_term.get(@groups_key, [])
+  @doc "Return status snapshots for all locally tracked groups."
+  @spec all_status() :: [map]
+  def all_status do
+    Enum.map(tracked(), &status/1)
+  rescue
+    _ -> []
+  end
 
   @doc "Forget all tracked groups without stopping their servers."
   @spec untrack_all() :: :ok
@@ -174,14 +328,14 @@ defmodule SuperCache.Cluster.Raft.Group do
   end
 
   defp await_local_server(partition_idx, timeout \\ 5_000) do
-    await_local_server_loop(partition_idx, System.monotonic_time(:millisecond) + timeout)
+    await_local_server_loop(partition_idx, :erlang.monotonic_time(:millisecond) + timeout)
   end
 
   defp await_local_server_loop(partition_idx, deadline) do
     if Process.whereis(name(partition_idx)) != nil do
       :ok
     else
-      remaining = deadline - System.monotonic_time(:millisecond)
+      remaining = deadline - :erlang.monotonic_time(:millisecond)
 
       if remaining > 0 do
         Process.sleep(10)

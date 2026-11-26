@@ -30,7 +30,15 @@ defmodule SuperCache.Cluster.Raft do
       mode: :raft
     ]
 
-    case submit_with_retry(server, partition_idx, command, timeout, 1) do
+    deadline = :erlang.monotonic_time(:millisecond) + timeout
+
+    result =
+      submit_with_retry(server, partition_idx, command, timeout, deadline, 3)
+
+    case result do
+      {:ok, :ok, _leader} ->
+        {:ok, :ok}
+
       {:ok, reply, _leader} ->
         {:ok, reply}
 
@@ -45,48 +53,129 @@ defmodule SuperCache.Cluster.Raft do
     end
   end
 
-  # A group can lose its leader between membership events. Reconcile once and
-  # retry rather than failing a write that the partition's primary can recover.
-  defp submit_with_retry(server, partition_idx, command, timeout, retries) do
-    case submit_once(server, partition_idx, command, timeout, 0) do
-      {:error, :no_leader} when retries > 0 ->
-        {primary, _replicas} = Manager.get_replicas(partition_idx)
+  # Bounded retry for leader-placement failures only. Ambiguous timeouts are
+  # never resubmitted because the command may already be committed.
+  defp submit_with_retry(_server, _partition_idx, _command, _timeout, _deadline, attempts)
+       when attempts <= 0 do
+    {:error, :no_leader}
+  end
 
-        if primary == node() and System.running?() do
-          _ = Reconciler.reconcile(partition_idx)
+  defp submit_with_retry(server, partition_idx, command, timeout, deadline, attempts) do
+    if :erlang.monotonic_time(:millisecond) >= deadline or attempts <= 0 do
+      {:error, :no_leader}
+    else
+      remaining = max(1, deadline - :erlang.monotonic_time(:millisecond))
+      call_timeout = min(timeout, remaining)
 
-          submit_with_retry(
-            server_for(partition_idx),
+      case submit_once(server, partition_idx, command, call_timeout) do
+        {:ok, reply, leader} ->
+          normalize_reply(reply, leader)
+
+        {:error, {:not_leader, leader}} ->
+          retry_with_leader(
+            {Group.name(partition_idx), leader},
             partition_idx,
             command,
             timeout,
-            retries - 1
+            deadline,
+            attempts
           )
-        else
-          {:error, :no_leader}
-        end
 
-      other ->
-        other
+        {:error, reason} when reason in [:not_leader, :no_leader, :noproc] ->
+          handle_no_leader(server, partition_idx, command, timeout, deadline, attempts, reason)
+
+        {:error, {:exit, {:nodedown, _}}} ->
+          handle_nodedown(partition_idx, command, timeout, deadline, attempts)
+
+        other ->
+          other
+      end
     end
   end
 
-  defp submit_once(server, partition_idx, command, timeout, attempts) do
+  defp retry_with_leader(server, partition_idx, command, timeout, deadline, attempts) do
+    if attempts > 1 do
+      submit_with_retry(server, partition_idx, command, timeout, deadline, attempts - 1)
+    else
+      {:error, :not_leader}
+    end
+  end
+
+  defp handle_no_leader(server, partition_idx, command, timeout, deadline, attempts, reason) do
+    if reason == :no_leader do
+      maybe_reconcile_and_retry(server, partition_idx, command, timeout, deadline, attempts)
+    else
+      case Adapter.find_leader(Group.cluster_name(partition_idx)) do
+        {:ok, leader} when attempts > 1 ->
+          submit_with_retry(
+            {Group.name(partition_idx), leader},
+            partition_idx,
+            command,
+            timeout,
+            deadline,
+            attempts - 1
+          )
+
+        _ ->
+          maybe_reconcile_and_retry(server, partition_idx, command, timeout, deadline, attempts)
+      end
+    end
+  end
+
+  defp handle_nodedown(partition_idx, command, timeout, deadline, attempts) do
+    case Adapter.find_leader(Group.cluster_name(partition_idx)) do
+      {:ok, leader} when attempts > 1 ->
+        submit_with_retry(
+          {Group.name(partition_idx), leader},
+          partition_idx,
+          command,
+          timeout,
+          deadline,
+          attempts - 1
+        )
+
+      _ ->
+        {:error, {:exit, {:nodedown, :node}}}
+    end
+  end
+
+  defp maybe_reconcile_and_retry(_server, partition_idx, command, timeout, deadline, attempts) do
+    {primary, _replicas} = Manager.get_replicas(partition_idx)
+
+    if primary == node() and System.running?() and attempts > 1 do
+      _ = Reconciler.reconcile(partition_idx)
+
+      submit_with_retry(
+        server_for(partition_idx),
+        partition_idx,
+        command,
+        timeout,
+        deadline,
+        attempts - 1
+      )
+    else
+      {:error, :no_leader}
+    end
+  end
+
+  defp normalize_reply(:ok, leader), do: {:ok, :ok, leader}
+  defp normalize_reply({:ok, :already_applied}, leader), do: {:ok, :ok, leader}
+  defp normalize_reply({:error, reason}, _leader), do: {:error, reason}
+  defp normalize_reply(other, leader), do: {:ok, other, leader}
+
+  defp submit_once(server, _partition_idx, command, timeout) do
     case Adapter.process_command(server, command, timeout) do
-      {:ok, _reply, _leader} = success ->
-        success
+      {:ok, reply, leader} ->
+        {:ok, reply, leader}
 
-      {:error, {:not_leader, leader}} when attempts == 0 ->
-        submit_once({Group.name(partition_idx), leader}, partition_idx, command, timeout, 1)
+      {:error, {:not_leader, leader}} ->
+        {:error, {:not_leader, leader}}
 
-      {:error, :not_leader} when attempts == 0 ->
-        case Adapter.find_leader(Group.cluster_name(partition_idx)) do
-          {:ok, leader} ->
-            submit_once({Group.name(partition_idx), leader}, partition_idx, command, timeout, 1)
+      {:error, reason} ->
+        {:error, reason}
 
-          _ ->
-            {:error, :no_leader}
-        end
+      {:timeout, server_id} ->
+        {:timeout, server_id}
 
       other ->
         other

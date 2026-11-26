@@ -33,6 +33,31 @@ defmodule SuperCache.Cluster.Raft.Applied do
     end
   end
 
+  @doc """
+  Return whether `index` has already been applied to `partition_idx`.
+
+  An index at or below the stored watermark is considered applied.
+  """
+  @spec applied?(non_neg_integer, non_neg_integer) :: boolean
+  def applied?(partition_idx, index) when is_integer(index) and index >= 0 do
+    index <= get(partition_idx)
+  end
+
+  @doc """
+  Record that `index` has been successfully applied to `partition_idx`,
+  advancing the watermark only when `index` is greater than the current one.
+  """
+  @spec record(non_neg_integer, non_neg_integer) :: :ok
+  def record(partition_idx, index) when is_integer(index) and index >= 0 do
+    current = get(partition_idx)
+
+    if index > current do
+      :ets.insert(Store.applied_table(), {partition_idx, index})
+    end
+
+    :ok
+  end
+
   @doc "Reset a partition's watermark (used by tests and teardown)."
   @spec reset(non_neg_integer) :: :ok
   def reset(partition_idx) do

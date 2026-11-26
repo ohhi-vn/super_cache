@@ -38,6 +38,11 @@ defmodule SuperCache.Cluster.Raft.System do
     |> Map.put(:wal_data_dir, Keyword.fetch!(config, :data_dir))
     |> Map.put(:wal_sync_method, Keyword.fetch!(config, :wal_sync_method))
     |> Map.put(:wal_max_size_bytes, Keyword.fetch!(config, :wal_max_size_bytes))
+    |> Map.put(:election_timeout_min, Keyword.fetch!(config, :election_timeout_min))
+    |> Map.put(:election_timeout_max, Keyword.fetch!(config, :election_timeout_max))
+    |> Map.put(:heartbeat_interval, Keyword.fetch!(config, :heartbeat_interval))
+    |> Map.put(:segment_max_entries, Keyword.fetch!(config, :segment_max_entries))
+    |> Map.put(:segment_max_size_bytes, Keyword.fetch!(config, :segment_max_size_bytes))
     |> Map.put(:names, Adapter.derive_names(@system_name))
   end
 

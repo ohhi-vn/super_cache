@@ -80,7 +80,7 @@ defmodule SuperCache.Cluster.HealthMonitor do
   require SuperCache.Log
 
   alias SuperCache.Cluster.{Manager, Metrics, Rpc}
-  alias SuperCache.Cluster.Raft.Group
+  alias SuperCache.Cluster.Raft.{Group, Topology}
   alias SuperCache.Cluster.Raft.System, as: RaftSystem
   alias SuperCache.{Config, Partition, Storage}
 
@@ -188,10 +188,27 @@ defmodule SuperCache.Cluster.HealthMonitor do
         error_rate: get_check(node(), :error_rate)
       }
 
-    build_node_health(node(), checks)
+    health = build_node_health(node(), checks)
+
+    topology = Topology.status()
+
+    raft_status =
+      if topology != nil and topology.status == :underprovisioned do
+        if health.status == :unhealthy do
+          health.status
+        else
+          :degraded
+        end
+      else
+        health.status
+      end
+
+    health
+    |> Map.put(:status, raft_status)
     |> Map.put(:raft, %{
       running: RaftSystem.running?(),
-      groups: Group.tracked()
+      groups: Group.tracked(),
+      topology: topology
     })
   end
 

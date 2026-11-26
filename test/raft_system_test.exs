@@ -47,6 +47,18 @@ defmodule SuperCache.Cluster.Raft.SystemTest do
     %{data_dir: data_dir}
   end
 
+  test "system config carries the 0.4.0 engine settings", %{data_dir: data_dir} do
+    config = RaftSystem.system_config()
+
+    assert config.data_dir == data_dir
+    assert config.wal_data_dir == data_dir
+    assert config.election_timeout_min == 500
+    assert config.election_timeout_max == 2_000
+    assert config.heartbeat_interval == 100
+    assert config.segment_max_entries == 4_096
+    assert Map.has_key?(config, :names)
+  end
+
   test "starts and stops a system with a local group", %{data_dir: data_dir} do
     assert RaftSystem.running?()
     assert :ok = RaftSystem.start!()

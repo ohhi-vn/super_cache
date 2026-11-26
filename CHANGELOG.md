@@ -5,6 +5,59 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0]
+
+### Added
+
+- Advisory Raft topology diagnostic: with `replication_mode: :raft`, compares
+  the live node count with `replication_factor + 1` on every membership
+  change, logs a warning on the transition into `:underprovisioned`, and
+  exposes `topology` in `SuperCache.cluster_stats().raft` and local health.
+- `raft.groups` is preserved; `raft.group_details` now reports each tracked
+  group's partition, running state, role, leader, member count, and members.
+- Bounded leader retry in `SuperCache.Cluster.Raft.submit/3` for
+  leader-placement failures; ambiguous timeouts are never resubmitted.
+- `Raft.Group.prepare_member/2` rebuilds a joining member from the committed
+  Raft log (discarding stale local server state, ETS partition, and
+  applied-index watermark) instead of accepting an ETS handoff.
+- `Applied.applied?/2` and `Applied.record/2` so the watermark advances only
+  after successful application; committed-but-unapplied commands are reported
+  as failures.
+- `raft_ex` 0.4.0 integration: role-aware Raft membership (new members join as
+  `:promotable` and are promoted after catch-up, departing members are demoted
+  before removal), graceful leadership transfer on planned primary moves with
+  fallback to the normal election path, and Raft-native local/leader/consistent
+  query paths with an opt-in `:consistent` read mode.
+- Snapshot metadata now checkpoints the applied-index watermark so replay stays
+  idempotent across restarts and ETS recreation.
+- Raft stats and group details include engine metrics (term, commit/applied
+  index, state) and member roles; leadership-transfer and query failures are
+  counted as Raft failures.
+
+### Changed
+
+- **BREAKING dependency**: `raft_ex` is now `~> 0.4.0` (was `~> 0.3.1`).
+  Upstream renamed internal predicate helpers and moved default-system startup
+  to the `:raft_ex` application environment; SuperCache starts its own named
+  system and has no call sites for the renamed helpers. New optional settings
+  `election_timeout_min`, `election_timeout_max`, `heartbeat_interval`,
+  `segment_max_entries`, and `segment_max_size_bytes` are validated at bootstrap.
+- Log entries needed to rebuild ETS partitions are retained: snapshot
+  checkpoints carry metadata only, so compaction must not discard committed
+  entries that a restart still needs to replay.
+
+- In `:raft` mode, `Manager.reconcile_ownership/2` and `sync_to_node/1` no
+  longer push ETS partitions; members rebuild from the Raft log.
+- `Raft.Machine.apply/3` propagates apply failures instead of reporting
+  success.
+
+### Notes
+
+- Running `replication_factor: N` with `N + 1` nodes is recommended for a
+  spare; single-node and smaller clusters remain valid.
+- Log entries needed for restart replay are retained: join time is proportional
+  to the retained Raft log.
+
 ## [1.7.0]
 
 ### Added

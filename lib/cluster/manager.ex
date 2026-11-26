@@ -54,7 +54,7 @@ defmodule SuperCache.Cluster.Manager do
   require SuperCache.Log
 
   alias SuperCache.Cluster.{Metrics, Replicator}
-  alias SuperCache.Cluster.Raft.{Group, System}
+  alias SuperCache.Cluster.Raft.{Applied, Group, Leadership, System, Topology}
   alias SuperCache.Cluster.Raft.Group.Reconciler
   alias SuperCache.{Config, Partition}
 
@@ -152,6 +152,11 @@ defmodule SuperCache.Cluster.Manager do
 
     :persistent_term.put(@pt_key, build_partition_map(nodes))
     Logger.info("super_cache, cluster_manager, initial nodes: #{inspect(nodes)}")
+
+    if Config.get_config(:replication_mode, :async) == :raft do
+      Topology.refresh(nodes)
+    end
+
     {:noreply, %{nodes: nodes}}
   end
 
@@ -231,7 +236,7 @@ defmodule SuperCache.Cluster.Manager do
 
         {:noreply, %{state | nodes: updated}}
 
-      attempt < 10 ->
+      attempt < 30 ->
         # Back-off: 500 ms * attempt (capped at 5 s).
         delay = min(500 * attempt, 5_000)
         Process.send_after(self(), {:retry_node_up, target, attempt + 1}, delay)
@@ -284,8 +289,20 @@ defmodule SuperCache.Cluster.Manager do
     :persistent_term.put(@pt_key, new_map)
     Metrics.increment(:membership, :changes)
 
+    if Config.get_config(:replication_mode, :async) == :raft do
+      Topology.refresh(nodes)
+    end
+
     drop_stale_raft_groups(old_map, new_map)
-    spawn(fn -> reconcile_ownership(old_map, new_map) end)
+
+    spawn(fn ->
+      if Config.get_config(:replication_mode, :async) == :raft do
+        prepare_raft_members(old_map, new_map)
+      end
+
+      reconcile_ownership(old_map, new_map)
+    end)
+
     :ok
   end
 
@@ -309,9 +326,35 @@ defmodule SuperCache.Cluster.Manager do
         stop_stale_group(idx, :not_a_member)
 
       old_primary == node() and new_primary != node() ->
+        transfer_leadership_if_planned(idx, new_primary)
         stop_stale_group(idx, :primary_changed)
 
       true ->
+        :ok
+    end
+  end
+
+  # A planned primary move lets the current leader hand over to the incoming
+  # primary before this node tears down its group. Failures are counted and
+  # deliberately ignored: the group is still stopped and the new primary's
+  # reconciler falls back to the normal formation/election path.
+  defp transfer_leadership_if_planned(idx, new_primary) do
+    case Leadership.transfer(idx, new_primary) do
+      :ok ->
+        :ok
+
+      :not_needed ->
+        :ok
+
+      {:error, reason} ->
+        Metrics.increment(:replication, :raft_failures)
+        Metrics.increment(:replication, :leadership_transfer_failures)
+
+        Logger.warning(
+          "super_cache, cluster_manager, leadership transfer for partition #{idx} " <>
+            "to #{inspect(new_primary)} failed: #{inspect(reason)}; falling back to election"
+        )
+
         :ok
     end
   end
@@ -323,6 +366,15 @@ defmodule SuperCache.Cluster.Manager do
     )
 
     Group.stop(idx)
+
+    if reason == :not_a_member do
+      case SuperCache.Partition.get_partition_by_idx(idx) do
+        nil -> :ok
+        partition -> SuperCache.Storage.delete_all(partition)
+      end
+
+      Applied.reset(idx)
+    end
   end
 
   # Pull partitions this node newly holds from their previous holders.
@@ -338,13 +390,50 @@ defmodule SuperCache.Cluster.Manager do
     end)
   end
 
+  defp prepare_raft_members(old_map, new_map) do
+    # Cold/restarting node: prior view has no remote peers, so nothing is
+    # "new" from this node's perspective. Stable members prepare joiners.
+    remote_peers? =
+      old_map
+      |> Map.values()
+      |> Enum.flat_map(fn {p, r} -> [p | r] end)
+      |> Enum.any?(&(&1 != node()))
+
+    if map_size(old_map) == 0 or not remote_peers? do
+      :ok
+    else
+      Enum.each(new_map, &prepare_raft_partition(&1, old_map))
+    end
+  end
+
+  defp prepare_raft_partition({idx, {primary, replicas}}, old_map) do
+    new_members = Enum.uniq([primary | replicas])
+    {old_primary, old_replicas} = Map.get(old_map, idx, {nil, []})
+    old_members = Enum.uniq([old_primary | old_replicas]) |> Enum.reject(&is_nil/1)
+
+    new_members
+    |> Enum.reject(&(&1 in old_members))
+    |> Enum.each(fn target ->
+      Logger.info(
+        "super_cache, cluster_manager, preparing new raft member #{inspect(target)} for partition #{idx}"
+      )
+
+      _ = Group.prepare_member(idx, target)
+    end)
+  end
+
   defp reconcile_partition(idx, primary, replicas, old_map, me, live) do
     holders_now = [primary | replicas]
     {old_primary, old_replicas} = Map.get(old_map, idx, {nil, []})
     holders_before = Enum.uniq([old_primary | old_replicas])
 
     if me in holders_now and me not in holders_before do
-      handle_donor(idx, select_donor(old_primary, old_replicas, me, live), me)
+      if Config.get_config(:replication_mode, :async) == :raft do
+        # Raft members rebuild from the committed log; no ETS handoff.
+        :ok
+      else
+        handle_donor(idx, select_donor(old_primary, old_replicas, me, live), me)
+      end
     end
   end
 
@@ -407,6 +496,14 @@ defmodule SuperCache.Cluster.Manager do
 
   # Push all partitions this node is the deterministic donor for to `target`.
   defp sync_to_node(target) do
+    if Config.get_config(:replication_mode, :async) == :raft do
+      :ok
+    else
+      do_sync_to_node(target)
+    end
+  end
+
+  defp do_sync_to_node(target) do
     num_parts = Config.get_config(:num_partition, Partition.get_schedulers())
     live = live_set()
 

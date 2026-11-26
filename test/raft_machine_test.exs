@@ -29,16 +29,65 @@ defmodule SuperCache.Cluster.Raft.MachineTest do
     %{state: state, partition_idx: partition_idx}
   end
 
-  test "init keeps the configured partition", %{state: state} do
-    assert state == %{partition_idx: 0}
+  test "init keeps the configured partition and starts at index zero", %{state: state} do
+    assert state == %{partition_idx: 0, applied: 0}
   end
 
   test "applies a put command to the local partition", %{state: state, partition_idx: idx} do
     record = {:raft_machine_key, "value"}
     partition = Partition.get_partition_by_idx(idx)
 
-    assert {^state, :ok} = Machine.apply(%{index: 1}, {:put, record}, state)
+    assert {%{applied: 1}, :ok} = Machine.apply(%{index: 1}, {:put, record}, state)
     assert Storage.get(:raft_machine_key, partition) == [record]
+  end
+
+  test "checkpoint advances on success and ignores replayed indexes", %{state: state} do
+    assert {%{applied: 3} = checkpointed, :ok} =
+             Machine.apply(%{index: 3}, {:put, {:raft_checkpoint, 1}}, state)
+
+    assert Applied.get(0) == 3
+
+    assert {^checkpointed, {:ok, :already_applied}} =
+             Machine.apply(%{index: 2}, {:put, {:raft_checkpoint, 2}}, checkpointed)
+
+    assert Applied.get(0) == 3
+  end
+
+  test "a failed apply does not advance the checkpoint", %{partition_idx: idx} do
+    bad_state = %{partition_idx: 999, applied: 0}
+
+    assert {^bad_state, {:error, {:apply_failed, _}}} =
+             Machine.apply(%{index: 20}, {:put, {:unknown_partition, 1}}, bad_state)
+
+    assert bad_state.applied == 0
+    assert Applied.get(idx) == 0
+  end
+
+  test "a cleared watermark replays an already applied increment", %{state: state} do
+    partition = Partition.get_partition_by_idx(0)
+    command = {:increment, {:raft_replay_counter, 0, 1}}
+
+    assert {_state, :ok} = Machine.apply(%{index: 4}, command, state)
+    assert Storage.get(:raft_replay_counter, partition) == [{:raft_replay_counter, 1}]
+
+    Applied.reset(0)
+
+    assert {_state, :ok} = Machine.apply(%{index: 4}, command, state)
+    assert Storage.get(:raft_replay_counter, partition) == [{:raft_replay_counter, 2}]
+  end
+
+  test "installing a snapshot restores the applied watermark" do
+    Applied.reset(0)
+
+    assert [] =
+             Machine.snapshot_installed(
+               %{index: 7},
+               %{partition_idx: 0, applied: 7},
+               %{},
+               %{partition_idx: 0, applied: 0}
+             )
+
+    assert Applied.get(0) == 7
   end
 
   test "a replayed index does not re-apply an increment", %{state: state, partition_idx: idx} do

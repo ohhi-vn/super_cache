@@ -113,6 +113,8 @@ defmodule SuperCache.MetricsTest do
     Metrics.increment(:replication, :async_drops)
     Metrics.increment(:replication, :sync_failures)
     Metrics.increment(:replication, :strong_failures)
+    Metrics.increment(:replication, :raft_failures)
+    Metrics.increment(:replication, :leadership_transfer_failures)
     Metrics.increment(:wal, :backpressure)
     Metrics.increment(:read, :fallbacks)
     Metrics.increment(:health, :timeouts)
@@ -127,6 +129,11 @@ defmodule SuperCache.MetricsTest do
     assert after_reliability.async_drops == before.async_drops + 1
     assert after_reliability.sync_failures == before.sync_failures + 1
     assert after_reliability.strong_failures == before.strong_failures + 1
+    assert after_reliability.raft_failures == before.raft_failures + 1
+
+    assert after_reliability.raft_leadership_transfer_failures ==
+             before.raft_leadership_transfer_failures + 1
+
     assert after_reliability.wal_backpressure == before.wal_backpressure + 1
     assert after_reliability.read_fallbacks == before.read_fallbacks + 1
     assert after_reliability.health_timeouts == before.health_timeouts + 1

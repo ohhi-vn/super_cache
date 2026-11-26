@@ -7,7 +7,7 @@ defmodule SuperCache.Cluster.RaftAdapterCoverageTest do
 
   use ExUnit.Case, async: false
 
-  alias SuperCache.Cluster.{Manager, Raft}
+  alias SuperCache.Cluster.{Manager, Metrics, Raft}
   alias SuperCache.Cluster.Raft.{Group, Group.Reconciler, Store}
   alias SuperCache.Cluster.Raft.System, as: RaftSystem
   alias SuperCache.Test.RaftAdapterFake
@@ -67,11 +67,54 @@ defmodule SuperCache.Cluster.RaftAdapterCoverageTest do
     :ok
   end
 
+  # ── Adapter boundary ───────────────────────────────────────────────────────
+
+  test "adapter exposes the 0.4.0 membership, leadership, query, and metrics APIs" do
+    alias SuperCache.Cluster.Raft.Adapter
+
+    server = {Group.name(0), node()}
+    query = {:erlang, :self, []}
+
+    assert {:ok, [], :leader} = Adapter.add_member(server, server, :promotable, 1_000)
+    assert {:ok, [], :leader} = Adapter.promote_member(server, server, 1_000)
+    assert {:ok, [], :leader} = Adapter.demote_member(server, server, 1_000)
+    assert :ok = Adapter.transfer_leadership(server, server, 1_000)
+    assert {:ok, :ok, :leader} = Adapter.local_query(server, query, 1_000)
+    assert {:ok, :ok, :leader} = Adapter.leader_query(server, query, 1_000)
+    assert {:ok, :ok, :leader} = Adapter.consistent_query(server, query, 1_000)
+    assert %{} = Adapter.key_metrics(server, 1_000)
+    assert %{} = Adapter.member_overview(server, 1_000)
+
+    trace = RaftAdapterFake.trace()
+
+    for name <- [
+          :add_member,
+          :promote_member,
+          :demote_member,
+          :transfer_leadership,
+          :local_query,
+          :leader_query,
+          :consistent_query,
+          :key_metrics,
+          :member_overview
+        ] do
+      assert Enum.any?(trace, &match?({^name, _}, &1)), "missing #{name} call in adapter trace"
+    end
+
+    assert Enum.any?(trace, &match?({:add_member, [_, _, :promotable, 1_000]}, &1))
+  end
+
   # ── Reconciler ──────────────────────────────────────────────────────────────
 
   test "reconcile ignores partitions owned by another primary" do
     assert :ok = Reconciler.reconcile(1)
-    assert RaftAdapterFake.trace() == []
+
+    # Earlier tests can leave a spawned reconciliation in flight; only calls
+    # for this partition indicate that reconcile/1 did the wrong work.
+    refute Enum.any?(RaftAdapterFake.trace(), fn
+             {:find_leader, [cluster]} -> cluster == Group.cluster_name(1)
+             _ -> false
+           end)
   end
 
   test "reconcile forms a cluster when no leader can be found" do
@@ -100,9 +143,52 @@ defmodule SuperCache.Cluster.RaftAdapterCoverageTest do
 
     trace = RaftAdapterFake.trace()
     assert Enum.any?(trace, &match?({:remove_member, [^leader, {_, :old_node}, 10_000]}, &1))
+    assert Enum.any?(trace, &match?({:demote_member, [^leader, {_, :old_node}, 10_000]}, &1))
+
+    demote_index = Enum.find_index(trace, &match?({:demote_member, _}, &1))
+    remove_index = Enum.find_index(trace, &match?({:remove_member, _}, &1))
+    assert demote_index != nil and remove_index != nil and demote_index < remove_index
+
     assert Enum.any?(trace, &match?({:start_server, _}, &1))
-    assert Enum.any?(trace, &match?({:add_member, [^leader, {_, _}, 10_000]}, &1))
+    assert Enum.any?(trace, &match?({:add_member, [^leader, {_, _}, :promotable, 10_000]}, &1))
+    assert Enum.any?(trace, &match?({:promote_member, [^leader, {_, _}, 10_000]}, &1))
+
+    add_index = Enum.find_index(trace, &match?({:add_member, _}, &1))
+    promote_index = Enum.find_index(trace, &match?({:promote_member, _}, &1))
+    assert add_index != nil and promote_index != nil and add_index < promote_index
+
     assert Enum.any?(trace, &match?({:stop_server, [:super_cache_raft, {_, :old_node}]}, &1))
+  end
+
+  test "promotion waits until the joining member catches up" do
+    leader = {Group.name(0), :leader_node}
+    desired = [{Group.name(0), node()}]
+
+    :ok =
+      RaftAdapterFake.install(
+        find_leader: [{:ok, leader}],
+        members: [{:ok, [], leader}, {:ok, desired, leader}],
+        key_metrics: fn
+          ^leader, _timeout ->
+            %{commit_index: 5}
+
+          _server, _timeout ->
+            polls = :persistent_term.get({__MODULE__, :catch_up_polls}, 0) + 1
+            :persistent_term.put({__MODULE__, :catch_up_polls}, polls)
+
+            if polls >= 3, do: %{commit_index: 5}, else: %{commit_index: 1}
+        end
+      )
+
+    on_exit(fn -> :persistent_term.erase({__MODULE__, :catch_up_polls}) end)
+
+    assert :ok = Reconciler.reconcile(0)
+
+    trace = RaftAdapterFake.trace()
+    assert Enum.any?(trace, &match?({:add_member, _}, &1))
+    assert Enum.any?(trace, &match?({:promote_member, _}, &1))
+    assert Enum.any?(trace, &match?({:key_metrics, _}, &1))
+    assert :persistent_term.get({__MODULE__, :catch_up_polls}, 0) >= 3
   end
 
   test "add_member failures are reported" do
@@ -134,6 +220,30 @@ defmodule SuperCache.Cluster.RaftAdapterCoverageTest do
       )
 
     assert :ok = Reconciler.reconcile(0)
+  end
+
+  test "the last voter is not demoted or removed" do
+    leader = {:super_cache_raft_partition_0, node()}
+    stale_id = {Group.name(0), :old_node}
+    desired = Group.member_ids(0)
+
+    :ok =
+      RaftAdapterFake.install(
+        find_leader: [{:ok, leader}],
+        members: [{:ok, [stale_id], leader}, {:ok, desired, leader}],
+        member_overview: %{
+          cluster: %{
+            stale_id => %{voter_status: %{membership: :voter}},
+            hd(desired) => %{voter_status: %{membership: :promotable}}
+          }
+        }
+      )
+
+    assert :ok = Reconciler.reconcile(0)
+
+    trace = RaftAdapterFake.trace()
+    refute Enum.any?(trace, &match?({:demote_member, _}, &1))
+    refute Enum.any?(trace, &match?({:remove_member, _}, &1))
   end
 
   test "a stale server is stopped and restarted before joining" do
@@ -201,6 +311,78 @@ defmodule SuperCache.Cluster.RaftAdapterCoverageTest do
     :persistent_term.put(@pt_map, %{0 => :invalid})
 
     assert {:error, %MatchError{}} = Reconciler.reconcile(0)
+  end
+
+  # ── Leadership transfer ────────────────────────────────────────────────────
+
+  test "leadership is transferred to a caught-up voter" do
+    alias SuperCache.Cluster.Raft.Leadership
+
+    :persistent_term.put(@pt_started, true)
+    leader = {Group.name(0), :old_node}
+    target = {Group.name(0), node()}
+
+    :ok =
+      RaftAdapterFake.install(
+        find_leader: [{:ok, leader}],
+        member_overview: %{cluster: %{target => %{voter_status: %{membership: :voter}}}},
+        key_metrics: fn
+          ^leader, _timeout -> %{commit_index: 5}
+          _target, _timeout -> %{commit_index: 5}
+        end
+      )
+
+    assert :ok = Leadership.transfer(0, node())
+    assert Enum.any?(RaftAdapterFake.trace(), &match?({:transfer_leadership, _}, &1))
+  end
+
+  test "leadership is not transferred to a non-voter" do
+    alias SuperCache.Cluster.Raft.Leadership
+
+    :persistent_term.put(@pt_started, true)
+    leader = {Group.name(0), :old_node}
+    target = {Group.name(0), node()}
+
+    :ok =
+      RaftAdapterFake.install(
+        find_leader: [{:ok, leader}],
+        member_overview: %{cluster: %{target => %{voter_status: %{membership: :promotable}}}}
+      )
+
+    assert {:error, :target_not_voter} = Leadership.transfer(0, node())
+    refute Enum.any?(RaftAdapterFake.trace(), &match?({:transfer_leadership, _}, &1))
+  end
+
+  test "leadership is not transferred to a lagging member" do
+    alias SuperCache.Cluster.Raft.Leadership
+
+    :persistent_term.put(@pt_started, true)
+    leader = {Group.name(0), :old_node}
+    target = {Group.name(0), node()}
+
+    :ok =
+      RaftAdapterFake.install(
+        find_leader: [{:ok, leader}],
+        member_overview: %{cluster: %{target => %{voter_status: %{membership: :voter}}}},
+        key_metrics: fn
+          ^leader, _timeout -> %{commit_index: 5}
+          _target, _timeout -> %{commit_index: 2}
+        end
+      )
+
+    assert {:error, :target_not_caught_up} = Leadership.transfer(0, node())
+    refute Enum.any?(RaftAdapterFake.trace(), &match?({:transfer_leadership, _}, &1))
+  end
+
+  test "leadership transfer is skipped when the target already leads" do
+    alias SuperCache.Cluster.Raft.Leadership
+
+    :persistent_term.put(@pt_started, true)
+    leader = {Group.name(0), node()}
+    :ok = RaftAdapterFake.install(find_leader: [{:ok, leader}])
+
+    assert :ok = Leadership.transfer(0, node())
+    refute Enum.any?(RaftAdapterFake.trace(), &match?({:transfer_leadership, _}, &1))
   end
 
   # ── Public façade ───────────────────────────────────────────────────────────
@@ -334,6 +516,43 @@ defmodule SuperCache.Cluster.RaftAdapterCoverageTest do
     assert {:error, :server_still_running} = Group.stop(0)
   end
 
+  test "group status exposes engine metrics and member roles" do
+    register_local_server()
+    server = {Group.name(0), node()}
+
+    :ok =
+      RaftAdapterFake.install(
+        find_leader: [{:ok, server}],
+        members: [{:ok, [server], server}],
+        key_metrics: %{term: 4, commit_index: 9, last_applied: 9, state: :leader},
+        member_overview: %{
+          cluster: %{server => %{voter_status: %{membership: :voter}}}
+        }
+      )
+
+    status = Group.status(0)
+
+    assert status.idx == 0
+    assert status.role == :leader
+    assert status.member_count == 1
+    assert status.metrics.term == 4
+    assert status.metrics.commit_index == 9
+    assert status.metrics.last_applied == 9
+    assert status.member_roles == %{server => :voter}
+  end
+
+  test "group status keeps its original fields when the engine is unavailable" do
+    :persistent_term.put(@pt_groups, [0])
+
+    status = Group.status(0)
+
+    assert Map.has_key?(status, :idx)
+    assert Map.has_key?(status, :running)
+    assert Map.has_key?(status, :role)
+    assert status.metrics == %{}
+    assert status.member_roles == %{}
+  end
+
   test "ensure_started is a no-op for a tracked group" do
     :persistent_term.put(@pt_groups, [0])
 
@@ -431,6 +650,34 @@ defmodule SuperCache.Cluster.RaftAdapterCoverageTest do
            )
 
     assert Group.tracked() == [0]
+  end
+
+  test "a failed planned leadership transfer is counted and reconciliation continues" do
+    SuperCache.Config.set_config(:replication_mode, :raft)
+    SuperCache.Config.set_config(:num_partition, 3)
+    :persistent_term.put(@pt_started, true)
+    :persistent_term.put(@pt_groups, [0, 1, 2])
+
+    old_map = Map.new(0..2, &{&1, {node(), []}})
+    :persistent_term.put(@pt_map, old_map)
+    :ok = RaftAdapterFake.install(find_leader: [{:error, :no_leader}])
+
+    before = Map.get(Metrics.get_all(:replication), :leadership_transfer_failures, 0)
+
+    {:noreply, _state} =
+      Manager.handle_cast({:node_down, node()}, %{nodes: [:raft_a, :raft_b, node()]})
+
+    assert wait_until(
+             fn ->
+               Map.get(Metrics.get_all(:replication), :leadership_transfer_failures, 0) > before
+             end,
+             2_000
+           )
+
+    assert wait_until(
+             fn -> Enum.any?(RaftAdapterFake.trace(), &match?({:stop_server, _}, &1)) end,
+             2_000
+           )
   end
 
   # ── Store ───────────────────────────────────────────────────────────────────

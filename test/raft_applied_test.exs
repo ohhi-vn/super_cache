@@ -21,6 +21,16 @@ defmodule SuperCache.Cluster.Raft.AppliedTest do
     assert Applied.get(101) == 2
   end
 
+  test "reset_all clears watermarks when storage tables are recreated" do
+    Applied.record(101, 5)
+    Applied.record(102, 9)
+
+    assert :ok = Applied.reset_all()
+
+    assert Applied.get(101) == 0
+    assert Applied.get(102) == 0
+  end
+
   test "replaying a lower or equal index does not re-apply an increment" do
     counter = :ets.new(:raft_apply_counter, [:set, :private])
     :ets.insert(counter, {:increments, 0})

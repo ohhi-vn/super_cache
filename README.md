@@ -332,9 +332,14 @@ SuperCache.get!({:user, 1}, read_mode: :primary)
 
 # Quorum read (majority agreement, early termination)
 SuperCache.get!({:user, 1}, read_mode: :quorum)
+
+# Consistent read — opt-in, Raft mode only (quorum-confirmed leadership)
+SuperCache.get!({:user, 1}, read_mode: :consistent)
 ```
 
 **Quorum reads** use early termination — returns as soon as a strict majority agrees, avoiding waits for slow replicas.
+
+**Consistent reads** are available in `replication_mode: :raft`. They confirm leadership with a voter quorum through Raft before reading the leader's partition, and fail with `SuperCache.Cluster.Error` if the quorum cannot be confirmed. The mode is opt-in per call; existing read modes are unchanged.
 
 ### Manual Bootstrap
 
@@ -404,11 +409,20 @@ config :super_cache, :raft,
   wal_max_size_bytes: 256_000_000
 ```
 
-`raft_ex` is experimental and dual-licensed MPL-2.0 / Apache-2.0. Read modes
+`raft_ex` is experimental and dual-licensed MPL-2.0 / Apache-2.0. Two-voter
+groups are not recommended in production (no quorum after a single loss and a
+higher risk of election livelock); use `replication_factor: 3` or higher with
+at least three live nodes. Read modes
 keep their existing semantics — enabling `:raft` does not make local reads
 linearizable. Raft status and failures appear in
 `SuperCache.cluster_stats().raft` and
 `SuperCache.Cluster.Stats.reliability().raft_failures`.
+
+For a cluster with `replication_factor: N`, running `N + 1` nodes is
+recommended so a spare remains for failover; smaller clusters still start but
+report `:underprovisioned` in `SuperCache.cluster_stats().raft.topology` and
+local health. A joining member rebuilds its partition from the committed Raft
+log (no ETS handoff); join time is proportional to log length.
 
 ## Examples
 

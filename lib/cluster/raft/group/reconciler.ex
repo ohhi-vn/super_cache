@@ -104,19 +104,90 @@ defmodule SuperCache.Cluster.Raft.Group.Reconciler do
   end
 
   defp join(server_id, leader, desired, cluster_name, partition_idx) do
-    case start_server(server_id, desired, cluster_name, partition_idx) do
-      :ok ->
-        case Adapter.add_member(leader, server_id, @membership_timeout) do
-          {:ok, _, _} ->
-            :ok
+    {_name, target_node} = server_id
+    name = Group.name(partition_idx)
 
-          other ->
-            Logger.warning("super_cache, raft.group, add_member failed: #{inspect(other)}")
-            {:error, other}
-        end
+    with :ok <- Group.prepare_member(partition_idx, target_node),
+         :ok <- start_server(server_id, desired, cluster_name, partition_idx) do
+      wait_for_server(target_node, name, 5_000)
+      do_add_member(leader, server_id)
+    end
+  end
 
-      {:error, _} = err ->
-        err
+  defp do_add_member(leader, server_id) do
+    with {:ok, _, _} <-
+           Adapter.add_member(leader, server_id, :promotable, @membership_timeout),
+         :ok <- await_catch_up(leader, server_id, @membership_timeout),
+         {:ok, _, _} <- Adapter.promote_member(leader, server_id, @membership_timeout) do
+      :ok
+    else
+      other ->
+        Logger.warning("super_cache, raft.group, add_member failed: #{inspect(other)}")
+        {:error, other}
+    end
+  end
+
+  # Promotion is safe only once the joining server has caught up with the
+  # leader's committed log. When either side does not expose metrics we let the
+  # engine's own catch-up check decide, rather than blocking a valid join.
+  defp await_catch_up(_leader, _server_id, remaining) when remaining <= 0,
+    do: {:error, :catch_up_timeout}
+
+  defp await_catch_up(leader, server_id, remaining) do
+    leader_index = commit_index(Adapter.key_metrics(leader, 2_000))
+    member_index = commit_index(Adapter.key_metrics(server_id, 2_000))
+
+    if is_integer(leader_index) and is_integer(member_index) and member_index < leader_index do
+      Process.sleep(100)
+      await_catch_up(leader, server_id, remaining - 100)
+    else
+      :ok
+    end
+  end
+
+  defp commit_index(%{commit_index: index}) when is_integer(index), do: index
+  defp commit_index(_), do: nil
+
+  defp wait_for_server(target_node, name, timeout) do
+    deadline = :erlang.monotonic_time(:millisecond) + timeout
+
+    if target_node == node() do
+      wait_for_local_server(name, deadline)
+    else
+      wait_for_remote_server(target_node, name, deadline)
+    end
+  end
+
+  defp wait_for_local_server(name, deadline) do
+    if Process.whereis(name) != nil do
+      :ok
+    else
+      if :erlang.monotonic_time(:millisecond) < deadline do
+        Process.sleep(10)
+        wait_for_local_server(name, deadline)
+      else
+        :ok
+      end
+    end
+  end
+
+  defp wait_for_remote_server(target_node, name, deadline) do
+    registered? =
+      try do
+        :erpc.call(target_node, Process, :whereis, [name], 2_000) != nil
+      catch
+        _, _ -> false
+      end
+
+    if registered? do
+      :ok
+    else
+      if :erlang.monotonic_time(:millisecond) < deadline do
+        Process.sleep(10)
+        wait_for_remote_server(target_node, name, deadline)
+      else
+        :ok
+      end
     end
   end
 
@@ -157,15 +228,39 @@ defmodule SuperCache.Cluster.Raft.Group.Reconciler do
   end
 
   defp leave(server_id, leader) do
-    case Adapter.remove_member(leader, server_id, @membership_timeout) do
-      {:ok, _, _} ->
-        :ok
+    if last_voter?(leader, server_id) do
+      Logger.warning(
+        "super_cache, raft.group, refusing to demote the last voter #{inspect(server_id)}"
+      )
 
-      other ->
-        Logger.warning("super_cache, raft.group, remove_member failed: #{inspect(other)}")
-        {:error, other}
+      {:error, :last_voter}
+    else
+      with {:ok, _, _} <- Adapter.demote_member(leader, server_id, @membership_timeout),
+           {:ok, _, _} <- Adapter.remove_member(leader, server_id, @membership_timeout) do
+        :ok
+      else
+        other ->
+          Logger.warning("super_cache, raft.group, remove_member failed: #{inspect(other)}")
+          {:error, other}
+      end
     end
   end
+
+  defp last_voter?(leader, server_id) do
+    case Adapter.member_overview(leader, @membership_timeout) do
+      %{cluster: cluster} when is_map(cluster) ->
+        cluster
+        |> Enum.reject(fn {id, _info} -> id == server_id end)
+        |> Enum.all?(fn {_id, info} -> not voter?(info) end)
+
+      _ ->
+        false
+    end
+  end
+
+  defp voter?(%{voter_status: %{membership: :voter}}), do: true
+  defp voter?(%{membership: :voter}), do: true
+  defp voter?(_), do: false
 
   defp stop_server(server_id) do
     _ = Adapter.stop_server(System.system_name(), server_id)

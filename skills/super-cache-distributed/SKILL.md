@@ -73,13 +73,27 @@ Raft log is the source of truth — do not expect `:raft` to be as fast as
 make local reads linearizable. The upstream library is experimental and
 dual-licensed MPL-2.0/Apache-2.0; check licensing before shipping.
 
+Sizing: for `replication_factor: N`, run `N + 1` nodes so a spare remains for
+failover. Smaller clusters still start but report `:underprovisioned` in
+`SuperCache.cluster_stats().raft.topology` and in local health. A joining
+member rebuilds its partition from the committed Raft log (no ETS handoff);
+join time is proportional to log length. Leader loss recovers automatically
+when a majority remains; writes that fail only on leadership move are retried
+within the deadline, timeouts are never resubmitted.
+
 ## Read consistency
 
 ```elixir
 SuperCache.get!(data)                            # local ETS — fastest, maybe stale
 SuperCache.get!(data, read_mode: :primary)       # routed to partition primary
 SuperCache.get!(data, read_mode: :quorum)        # majority agreement across holders
+SuperCache.get!(data, read_mode: :consistent)    # Raft mode only: quorum-confirmed leader
 ```
+
+In Raft mode, `:consistent` confirms leadership with a voter quorum before
+reading the leader's partition; it fails with `SuperCache.Cluster.Error` when
+no quorum can be confirmed. It is opt-in per call and does not change `:local`
+or `:primary` behavior.
 
 Read-your-writes: after `put!`, reads of the same partition automatically
 upgrade to primary for ~5s, so you see your own writes even in local mode.
@@ -114,7 +128,7 @@ HealthMonitor.partition_balance()
 HealthMonitor.force_check()
 
 SuperCache.cluster_stats()
-# => %{..., raft: %{running: true|false, groups: [0, 1, ...]}, reliability: %{raft_failures: 0, ...}}
+# => %{..., raft: %{running: true|false, groups: [0, 1, ...], group_details: [...], topology: %{...}}, reliability: %{raft_failures: 0, ...}}
 SuperCache.Cluster.Stats.reliability().raft_failures
 SuperCache.Cluster.WAL.stats()               # %{pending: _, acks_pending: _}
 ```
