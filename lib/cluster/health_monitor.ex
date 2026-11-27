@@ -208,8 +208,26 @@ defmodule SuperCache.Cluster.HealthMonitor do
     |> Map.put(:raft, %{
       running: RaftSystem.running?(),
       groups: Group.tracked(),
-      topology: topology
+      topology: topology,
+      tuning: raft_tuning()
     })
+  end
+
+  defp raft_tuning do
+    SuperCache.Cluster.Raft.Config.all()
+    |> Keyword.take([
+      :max_pending_commands,
+      :command_batch_linger_ms,
+      :max_pipeline_count,
+      :max_append_entries_rpc_batch_size,
+      :snapshot_chunk_size,
+      :compaction_entry_threshold,
+      :compaction_wal_bytes,
+      :compaction_interval_ms
+    ])
+    |> Map.new()
+  rescue
+    _ -> %{}
   end
 
   @doc """

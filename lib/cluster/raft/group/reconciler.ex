@@ -8,9 +8,18 @@ defmodule SuperCache.Cluster.Raft.Group.Reconciler do
 
     * when the group has a leader, missing members are started and joined and
       stale members are removed;
-    * when the group has no leader (first formation or a lost quorum), the
-      primary stops the desired members' servers and forms the cluster again
-      from the current partition map.
+    * when the group has no leader (first formation, or a member departure
+      that took the leader with it), the primary reforms the cluster from
+      the current partition map so the group converges; survivors recover
+      their persisted logs and the new member catches up from the group.
+      Reformation after a member departure is a pure-removal change: no
+      committed entry is deleted to make it happen.
+
+  A join that cannot converge is different: when a member fails to catch up
+  (`:catch_up_timeout`/`:not_caught_up`) while the group holds committed
+  data, reconciliation reports a failure instead of rebuilding the group
+  from scratch with an empty log, so committed entries are never discarded
+  by a catch-up repair.
 
   Starting a member that still runs a stale server (for example a self-only
   group formed before the rest of the cluster was visible) first stops that
@@ -28,6 +37,13 @@ defmodule SuperCache.Cluster.Raft.Group.Reconciler do
   # are slower than a normal command, so they get their own budget instead of
   # the short `:command_timeout_ms` used for writes.
   @membership_timeout 10_000
+
+  # When no leader is usable, an election may still be in progress. Wait this
+  # long for one to emerge before reforming, so a transient election is not
+  # destroyed by reformation. A genuine departure never elects, and the wait
+  # then expires into reformation.
+  @leader_wait_ms 5_000
+  @leader_poll_ms 100
 
   # Promotion can be rejected while a freshly started member replays the
   # leader's log. Budget enough time for that catch-up without letting a failed
@@ -75,28 +91,86 @@ defmodule SuperCache.Cluster.Raft.Group.Reconciler do
 
     case Adapter.find_leader(cluster_name) do
       {:ok, leader} ->
-        case reconcile_with_leader(leader, desired, cluster_name, partition_idx) do
-          {:error, :noproc} ->
-            form_cluster(desired, cluster_name, partition_idx)
+        handle_leader_reconcile(leader, desired, cluster_name, partition_idx)
 
-          {:error, reason} when reason in [:catch_up_timeout, :not_caught_up] ->
-            # An incremental join can leave a peer stuck as promotable (its
-            # match_index never advances). Rebuild from the current partition
-            # map so the group has the full voter set.
-            Logger.warning(
-              "super_cache, raft.group, join failed (#{inspect(reason)}) — " <>
-                "forming cluster from current membership"
-            )
+      {:error, _} ->
+        # No leader: an election may be in progress — wait for it before
+        # reforming, so a transient election is not destroyed. A genuine
+        # departure never produces a leader, and reformation then converges
+        # the group from the current partition map.
+        reform_unless_leader_appears(desired, cluster_name, partition_idx)
+    end
+  end
 
-            form_cluster(desired, cluster_name, partition_idx)
+  defp handle_leader_reconcile(leader, desired, cluster_name, partition_idx) do
+    case reconcile_with_leader(leader, desired, cluster_name, partition_idx) do
+      {:error, :noproc} ->
+        # The leader process is gone; survivors may still elect a new one.
+        reform_unless_leader_appears(desired, cluster_name, partition_idx)
 
-          other ->
-            other
-        end
+      {:error, reason} when reason in [:catch_up_timeout, :not_caught_up] ->
+        handle_catch_up_failure(reason, desired, cluster_name, partition_idx)
+
+      other ->
+        other
+    end
+  end
+
+  # Wait briefly for an in-progress election before reforming. Reforming
+  # while an election can still succeed destroys the emerging leader and
+  # restarts the group from scratch; waiting preserves it. The follow-up
+  # in-place attempt never loops back into waiting, so reconciliation
+  # always terminates.
+  defp reform_unless_leader_appears(desired, cluster_name, partition_idx) do
+    case await_leader(cluster_name, @leader_wait_ms) do
+      {:ok, leader} ->
+        settle_with_leader(leader, desired, cluster_name, partition_idx)
 
       {:error, _} ->
         form_cluster(desired, cluster_name, partition_idx)
     end
+  end
+
+  # Single in-place attempt after the wait; falls back to reformation
+  # without waiting again.
+  defp settle_with_leader(leader, desired, cluster_name, partition_idx) do
+    case reconcile_with_leader(leader, desired, cluster_name, partition_idx) do
+      {:error, :noproc} ->
+        form_cluster(desired, cluster_name, partition_idx)
+
+      {:error, reason} when reason in [:catch_up_timeout, :not_caught_up] ->
+        handle_catch_up_failure(reason, desired, cluster_name, partition_idx)
+
+      other ->
+        other
+    end
+  end
+
+  defp await_leader(cluster_name, remaining) when remaining <= 0 do
+    Adapter.find_leader(cluster_name)
+  end
+
+  defp await_leader(cluster_name, remaining) do
+    case Adapter.find_leader(cluster_name) do
+      {:ok, _} = ok ->
+        ok
+
+      {:error, _} ->
+        Process.sleep(@leader_poll_ms)
+        await_leader(cluster_name, remaining - @leader_poll_ms)
+    end
+  end
+
+  # An incremental join can leave a peer stuck as promotable (its match_index
+  # never advances). Rebuilding from scratch here would discard committed log
+  # entries, so refuse when committed data exists and report the failure.
+  defp handle_catch_up_failure(reason, desired, cluster_name, partition_idx) do
+    Logger.warning(
+      "super_cache, raft.group, join failed (#{inspect(reason)}) — " <>
+        "refusing destructive reformation when committed data exists"
+    )
+
+    safe_form_cluster(desired, cluster_name, partition_idx)
   end
 
   defp reconcile_with_leader(leader, desired, cluster_name, partition_idx) do
@@ -353,8 +427,63 @@ defmodule SuperCache.Cluster.Raft.Group.Reconciler do
     :ok
   end
 
+  # Catch-up repair guard: rebuild the cluster only when no member reports
+  # committed log entries and the local partition holds no records (first
+  # formation). Otherwise fail instead of discarding committed log with an
+  # empty rebuild. Only the join-failure path uses this guard; departure and
+  # crash paths reform directly so the group converges.
+  defp safe_form_cluster(desired, cluster_name, partition_idx) do
+    if committed_data?(desired, partition_idx) do
+      Logger.warning(
+        "super_cache, raft.group, refusing to reform #{inspect(cluster_name)} " <>
+          "from scratch: committed data exists"
+      )
+
+      {:error, :committed_data_present}
+    else
+      form_cluster(desired, cluster_name, partition_idx)
+    end
+  end
+
+  defp committed_data?(desired, partition_idx) do
+    metrics_committed?(desired) or local_partition_has_records?(partition_idx)
+  end
+
+  defp metrics_committed?(desired) do
+    Enum.any?(desired, &server_committed?/1)
+  rescue
+    _ -> false
+  end
+
+  defp server_committed?(server_id) do
+    case Adapter.key_metrics(server_id, 2_000) do
+      map when is_map(map) ->
+        [:commit_index, :last_applied, :last_index, :last_written_index]
+        |> Enum.any?(&committed_index?(Map.get(map, &1)))
+
+      _ ->
+        false
+    end
+  end
+
+  defp committed_index?(idx) when is_integer(idx) and idx > 0, do: true
+  defp committed_index?(_), do: false
+
+  defp local_partition_has_records?(partition_idx) do
+    case SuperCache.Partition.get_partition_by_idx(partition_idx) do
+      nil -> false
+      partition -> :ets.info(partition, :size) not in [nil, :undefined, 0]
+    end
+  rescue
+    _ -> false
+  end
+
   # No leader: stop every desired member's server (they may hold stale group
-  # state) and form the cluster again from the current partition map.
+  # state) and bring the cluster back from the current partition map.
+  # Each member recovers its persisted server when it has one and starts
+  # fresh only when it never ran here, so surviving logs and terms are kept
+  # instead of wiped. A member that genuinely never recovers still fails
+  # loudly instead of hanging the group.
   defp form_cluster(desired, cluster_name, partition_idx) do
     Logger.info(
       "super_cache, raft.group, forming #{inspect(cluster_name)} with " <>
@@ -364,19 +493,41 @@ defmodule SuperCache.Cluster.Raft.Group.Reconciler do
     Enum.each(desired, &stop_server/1)
     Process.sleep(100)
 
-    case Adapter.start_cluster(
-           System.system_name(),
-           cluster_name,
-           Group.machine(partition_idx),
-           desired,
-           @membership_timeout
-         ) do
-      {:ok, _started, _not_started} ->
+    results =
+      Enum.map(desired, &recover_or_start_server(&1, cluster_name, partition_idx, desired))
+
+    case Enum.filter(results, &match?({:error, _}, &1)) do
+      [] ->
         :ok
 
-      other ->
-        Logger.warning("super_cache, raft.group, form cluster failed: #{inspect(other)}")
-        {:error, other}
+      failures ->
+        Logger.warning("super_cache, raft.group, form cluster failed: #{inspect(failures)}")
+
+        {:error, {:start_failed, failures}}
+    end
+  end
+
+  defp recover_or_start_server(server_id, cluster_name, partition_idx, desired) do
+    system = System.system_name()
+
+    case Adapter.restart_server(system, server_id) do
+      :ok -> :ok
+      {:ok, _} -> :ok
+      {:ok, _, _} -> :ok
+      {:error, _} -> start_fresh_server(server_id, cluster_name, partition_idx, desired)
+    end
+  end
+
+  defp start_fresh_server(server_id, cluster_name, partition_idx, desired) do
+    case Adapter.start_server(
+           System.system_name(),
+           cluster_name,
+           server_id,
+           Group.machine(partition_idx),
+           desired
+         ) do
+      :ok -> :ok
+      {:error, _} = err -> err
     end
   end
 

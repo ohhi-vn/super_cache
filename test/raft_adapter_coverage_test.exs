@@ -123,9 +123,13 @@ defmodule SuperCache.Cluster.RaftAdapterCoverageTest do
   end
 
   test "reconcile returns a cluster formation failure" do
-    :ok = RaftAdapterFake.install(start_cluster: [{:error, :formation_failed}])
+    :ok =
+      RaftAdapterFake.install(
+        restart_server: [{:error, :no_persisted_state}],
+        start_server: [{:error, :formation_failed}]
+      )
 
-    assert {:error, {:error, :formation_failed}} = Reconciler.reconcile(0)
+    assert {:error, {:start_failed, _}} = Reconciler.reconcile(0)
   end
 
   test "reconcile adds missing members and removes stale ones" do
@@ -338,12 +342,11 @@ defmodule SuperCache.Cluster.RaftAdapterCoverageTest do
     :ok =
       RaftAdapterFake.install(
         find_leader: [{:ok, leader}],
-        members: [{:error, :noproc}],
-        start_cluster: [{:ok, [], []}]
+        members: [{:error, :noproc}]
       )
 
     assert :ok = Reconciler.reconcile(0)
-    assert Enum.any?(RaftAdapterFake.trace(), &match?({:start_cluster, _}, &1))
+    assert Enum.any?(RaftAdapterFake.trace(), &match?({:restart_server, _}, &1))
   end
 
   test "unexpected errors are normalized" do
@@ -664,6 +667,8 @@ defmodule SuperCache.Cluster.RaftAdapterCoverageTest do
              fn -> Enum.any?(RaftAdapterFake.trace(), &match?({:find_leader, _}, &1)) end,
              2_000
            )
+
+    drain_reconciler()
   end
 
   test "manager drops stale raft groups when primacy or membership changes" do
@@ -689,6 +694,7 @@ defmodule SuperCache.Cluster.RaftAdapterCoverageTest do
            )
 
     assert Group.tracked() == [0]
+    drain_reconciler()
   end
 
   test "a failed planned leadership transfer is counted and reconciliation continues" do
@@ -717,6 +723,8 @@ defmodule SuperCache.Cluster.RaftAdapterCoverageTest do
              fn -> Enum.any?(RaftAdapterFake.trace(), &match?({:stop_server, _}, &1)) end,
              2_000
            )
+
+    drain_reconciler()
   end
 
   # ── Store ───────────────────────────────────────────────────────────────────
@@ -750,5 +758,16 @@ defmodule SuperCache.Cluster.RaftAdapterCoverageTest do
       Process.sleep(20)
       wait_until(fun, remaining - 20)
     end
+  end
+
+  # Flush the Reconciler's GenServer queue behind any async reconcile spawned
+  # by Manager membership handlers. Uses a partition map owned entirely by a
+  # remote node so the drain call itself performs no work and consumes no
+  # scripted fake responses; it returns only after in-flight reconciles
+  # complete, keeping later tests isolated.
+  defp drain_reconciler do
+    :persistent_term.put(@pt_map, %{0 => {:remote_node, []}})
+    _ = Reconciler.reconcile(0)
+    :ok
   end
 end

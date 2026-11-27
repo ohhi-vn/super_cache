@@ -276,6 +276,9 @@ defmodule SuperCache.Cluster.Raft.Group do
           :last_applied,
           :snapshot_index,
           :last_index,
+          :last_written_index,
+          :commit_latency,
+          :replication_lag,
           :state,
           :membership
         ])

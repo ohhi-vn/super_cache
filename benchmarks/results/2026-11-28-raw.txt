@@ -1,0 +1,112 @@
+# Raw distributed benchmark output — 2026-11-28
+# Elixir 1.20.5 / OTP 29 (erts 17.1.1) / 8 schedulers / raft_ex 0.7.0
+# Extracted from full run logs: only mode headers and measured result lines.
+# Full logs were kept outside the repo; the commands are in the result docs.
+
+## rf2_n1
+distributed benchmark — replication_mode: async
+put!: 500 ops in 826µs, 1.65µs/op, 605,327 ops/s
+get! :primary: 1000 ops in 771µs, 0.77µs/op, 1,297,017 ops/s
+get! :quorum: 1000 ops in 19974µs, 19.97µs/op, 50,065 ops/s
+distributed benchmark — replication_mode: sync
+put!: 500 ops in 5695µs, 11.39µs/op, 87,796 ops/s
+get! :primary: 1000 ops in 2836µs, 2.84µs/op, 352,609 ops/s
+get! :quorum: 1000 ops in 20472µs, 20.47µs/op, 48,847 ops/s
+distributed benchmark — replication_mode: strong
+put!: 500 ops in 2083µs, 4.17µs/op, 240,038 ops/s
+get! :primary: 1000 ops in 1157µs, 1.16µs/op, 864,304 ops/s
+get! :quorum: 1000 ops in 18497µs, 18.5µs/op, 54,063 ops/s
+distributed benchmark — replication_mode: raft
+put!: 500 ops in 1400052µs, 2800.1µs/op, 357 ops/s
+get! :primary: 1000 ops in 8362µs, 8.36µs/op, 119,589 ops/s
+get! :quorum: 1000 ops in 13240µs, 13.24µs/op, 75,529 ops/s
+
+## rf2_n3
+distributed benchmark — replication_mode: async
+put!: 500 ops in 5502µs, 11.0µs/op, 90,876 ops/s
+get! :primary: 1000 ops in 623µs, 0.62µs/op, 1,605,136 ops/s
+get! :quorum: 1000 ops in 79443µs, 79.44µs/op, 12,588 ops/s
+distributed benchmark — replication_mode: sync
+put!: 500 ops in 54092µs, 108.18µs/op, 9,244 ops/s
+get! :primary: 1000 ops in 425µs, 0.42µs/op, 2,352,941 ops/s
+get! :quorum: 1000 ops in 70411µs, 70.41µs/op, 14,202 ops/s
+distributed benchmark — replication_mode: strong
+put!: 500 ops in 46036µs, 92.07µs/op, 10,861 ops/s
+get! :primary: 1000 ops in 491µs, 0.49µs/op, 2,036,660 ops/s
+get! :quorum: 1000 ops in 72983µs, 72.98µs/op, 13,702 ops/s
+distributed benchmark — replication_mode: raft
+put!: 500 ops in 3625893µs, 7251.79µs/op, 138 ops/s
+get! :primary: 1000 ops in 6263µs, 6.26µs/op, 159,668 ops/s
+get! :quorum: 1000 ops in 84323µs, 84.32µs/op, 11,859 ops/s
+
+## rf2_n5
+distributed benchmark — replication_mode: async
+put!: 500 ops in 11495µs, 22.99µs/op, 43,497 ops/s
+get! :primary: 1000 ops in 1040µs, 1.04µs/op, 961,538 ops/s
+get! :quorum: 1000 ops in 88940µs, 88.94µs/op, 11,244 ops/s
+distributed benchmark — replication_mode: sync
+put!: 500 ops in 28107µs, 56.21µs/op, 17,789 ops/s
+get! :primary: 1000 ops in 330µs, 0.33µs/op, 3,030,303 ops/s
+get! :quorum: 1000 ops in 80762µs, 80.76µs/op, 12,382 ops/s
+distributed benchmark — replication_mode: strong
+put!: 500 ops in 51205µs, 102.41µs/op, 9,765 ops/s
+get! :primary: 1000 ops in 562µs, 0.56µs/op, 1,779,359 ops/s
+get! :quorum: 1000 ops in 67120µs, 67.12µs/op, 14,899 ops/s
+distributed benchmark — replication_mode: raft
+put!: 500 ops in 3812445µs, 7624.89µs/op, 131 ops/s
+get! :primary: 1000 ops in 4719µs, 4.72µs/op, 211,909 ops/s
+get! :quorum: 1000 ops in 78002µs, 78.0µs/op, 12,820 ops/s
+
+## rf3_n3
+distributed benchmark — replication_mode: async
+put!: 500 ops in 8666µs, 17.33µs/op, 57,697 ops/s
+get! :primary: 1000 ops in 1151µs, 1.15µs/op, 868,810 ops/s
+get! :quorum: 1000 ops in 101097µs, 101.1µs/op, 9,891 ops/s
+distributed benchmark — replication_mode: sync
+put!: 500 ops in 45929µs, 91.86µs/op, 10,886 ops/s
+get! :primary: 1000 ops in 438µs, 0.44µs/op, 2,283,105 ops/s
+get! :quorum: 1000 ops in 90471µs, 90.47µs/op, 11,053 ops/s
+distributed benchmark — replication_mode: strong
+put!: 500 ops in 60405µs, 120.81µs/op, 8,277 ops/s
+get! :primary: 1000 ops in 360µs, 0.36µs/op, 2,777,778 ops/s
+get! :quorum: 1000 ops in 78662µs, 78.66µs/op, 12,713 ops/s
+distributed benchmark — replication_mode: raft
+put!: 500 ops in 2201229µs, 4402.46µs/op, 227 ops/s
+get! :primary: 1000 ops in 5179µs, 5.18µs/op, 193,087 ops/s
+get! :quorum: 1000 ops in 82326µs, 82.33µs/op, 12,147 ops/s
+
+## rf3_n4
+distributed benchmark — replication_mode: async
+put!: 500 ops in 7698µs, 15.4µs/op, 64,952 ops/s
+get! :primary: 1000 ops in 733µs, 0.73µs/op, 1,364,256 ops/s
+get! :quorum: 1000 ops in 103915µs, 103.92µs/op, 9,623 ops/s
+distributed benchmark — replication_mode: sync
+put!: 500 ops in 57130µs, 114.26µs/op, 8,752 ops/s
+get! :primary: 1000 ops in 479µs, 0.48µs/op, 2,087,683 ops/s
+get! :quorum: 1000 ops in 91107µs, 91.11µs/op, 10,976 ops/s
+distributed benchmark — replication_mode: strong
+put!: 500 ops in 66826µs, 133.65µs/op, 7,482 ops/s
+get! :primary: 1000 ops in 339µs, 0.34µs/op, 2,949,853 ops/s
+get! :quorum: 1000 ops in 84236µs, 84.24µs/op, 11,871 ops/s
+distributed benchmark — replication_mode: raft
+put!: 500 ops in 2209766µs, 4419.53µs/op, 226 ops/s
+get! :primary: 1000 ops in 6164µs, 6.16µs/op, 162,232 ops/s
+get! :quorum: 1000 ops in 89190µs, 89.19µs/op, 11,212 ops/s
+
+## rf3_n5
+distributed benchmark — replication_mode: async
+put!: 500 ops in 13808µs, 27.62µs/op, 36,211 ops/s
+get! :primary: 1000 ops in 1022µs, 1.02µs/op, 978,474 ops/s
+get! :quorum: 1000 ops in 94102µs, 94.1µs/op, 10,627 ops/s
+distributed benchmark — replication_mode: sync
+put!: 500 ops in 57058µs, 114.12µs/op, 8,763 ops/s
+get! :primary: 1000 ops in 548µs, 0.55µs/op, 1,824,818 ops/s
+get! :quorum: 1000 ops in 88292µs, 88.29µs/op, 11,326 ops/s
+distributed benchmark — replication_mode: strong
+put!: 500 ops in 60812µs, 121.62µs/op, 8,222 ops/s
+get! :primary: 1000 ops in 362µs, 0.36µs/op, 2,762,431 ops/s
+get! :quorum: 1000 ops in 92989µs, 92.99µs/op, 10,754 ops/s
+distributed benchmark — replication_mode: raft
+put!: 500 ops in 2338700µs, 4677.4µs/op, 214 ops/s
+get! :primary: 1000 ops in 9265µs, 9.27µs/op, 107,933 ops/s
+get! :quorum: 1000 ops in 96098µs, 96.1µs/op, 10,406 ops/s

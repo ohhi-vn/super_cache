@@ -38,11 +38,28 @@ defmodule SuperCache.Cluster.Raft.System do
     |> Map.put(:wal_data_dir, Keyword.fetch!(config, :data_dir))
     |> Map.put(:wal_sync_method, Keyword.fetch!(config, :wal_sync_method))
     |> Map.put(:wal_max_size_bytes, Keyword.fetch!(config, :wal_max_size_bytes))
+    |> Map.put(:wal_max_batch_size, Keyword.fetch!(config, :wal_max_batch_size))
     |> Map.put(:election_timeout_min, Keyword.fetch!(config, :election_timeout_min))
     |> Map.put(:election_timeout_max, Keyword.fetch!(config, :election_timeout_max))
     |> Map.put(:heartbeat_interval, Keyword.fetch!(config, :heartbeat_interval))
     |> Map.put(:segment_max_entries, Keyword.fetch!(config, :segment_max_entries))
     |> Map.put(:segment_max_size_bytes, Keyword.fetch!(config, :segment_max_size_bytes))
+    |> Map.put(:segment_storage, Keyword.fetch!(config, :segment_storage))
+    |> Map.put(:segment_compute_checksums, Keyword.fetch!(config, :segment_compute_checksums))
+    |> Map.put(:snapshot_chunk_size, Keyword.fetch!(config, :snapshot_chunk_size))
+    |> Map.put(:max_pending_commands, Keyword.fetch!(config, :max_pending_commands))
+    |> Map.put(:command_batch_linger_ms, Keyword.fetch!(config, :command_batch_linger_ms))
+    |> Map.put(:max_pipeline_count, Keyword.fetch!(config, :max_pipeline_count))
+    |> Map.put(
+      :max_append_entries_rpc_batch_size,
+      Keyword.fetch!(config, :max_append_entries_rpc_batch_size)
+    )
+    |> Map.put(
+      :compaction_entry_threshold,
+      Keyword.fetch!(config, :compaction_entry_threshold)
+    )
+    |> Map.put(:compaction_wal_bytes, Keyword.fetch!(config, :compaction_wal_bytes))
+    |> Map.put(:compaction_interval_ms, Keyword.fetch!(config, :compaction_interval_ms))
     |> Map.put(:names, Adapter.derive_names(@system_name))
   end
 

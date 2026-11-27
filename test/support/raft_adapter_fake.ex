@@ -58,6 +58,9 @@ defmodule SuperCache.Test.RaftAdapterFake do
 
   def stop_server(system, server_id), do: call(:stop_server, [system, server_id], :ok)
 
+  def restart_server(system, server_id),
+    do: call(:restart_server, [system, server_id], :ok)
+
   def force_delete_server(system, server_id),
     do: call(:force_delete_server, [system, server_id], :ok)
 
@@ -87,6 +90,10 @@ defmodule SuperCache.Test.RaftAdapterFake do
   def key_metrics(server, timeout), do: call(:key_metrics, [server, timeout], %{})
 
   def member_overview(server, timeout), do: call(:member_overview, [server, timeout], %{})
+
+  def server_metrics(server), do: call(:server_metrics, [server], %{})
+
+  def cluster_metrics(cluster \\ nil), do: call(:cluster_metrics, [cluster], %{})
 
   defp call(name, args, default) do
     state = :persistent_term.get(@key, %{responses: %{}, trace: [], trace_pid: nil})

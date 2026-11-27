@@ -228,8 +228,30 @@ config :super_cache, :raft,
   data_dir: "/var/lib/my_app/super_cache_raft",  # set a durable path in production
   command_timeout_ms: 2_000,
   wal_sync_method: :datasync,                    # :fsync | :datasync | :none
-  wal_max_size_bytes: 256_000_000
+  wal_max_size_bytes: 256_000_000,
+  wal_max_batch_size: 8_192,
+  election_timeout_min: 500,
+  election_timeout_max: 2_000,
+  heartbeat_interval: 100,
+  segment_max_entries: 4_096,
+  segment_max_size_bytes: 64_000_000,
+  segment_storage: false,                        # opt-in segment files for large logs
+  segment_compute_checksums: true,
+  snapshot_chunk_size: 65_536,
+  max_pending_commands: 1_024,                   # bounded queue; overflow rejects with backpressure
+  command_batch_linger_ms: 0,
+  max_pipeline_count: 4_096,
+  max_append_entries_rpc_batch_size: 128,
+  compaction_entry_threshold: 8_192,
+  compaction_wal_bytes: 134_217_728,
+  compaction_interval_ms: 120_000
 ```
+
+Throughput knobs mirror `RaftEx.App.System.default_config/0`. When the
+pending-command queue is full, writes fail with a documented backpressure
+error instead of growing memory; they succeed again once the queue drains.
+Direct `:raft_ex` application env remains an escape hatch and is not the
+supported tuning path.
 
 **How it works**:
 
@@ -264,7 +286,8 @@ config :super_cache, :raft,
 **Guarantees and limits**:
 
 - A write never reports success before its Raft entry is committed and applied.
-- Failures (lost leadership, quorum timeout, unreachable peer) are normalized
+- Failures (lost leadership, quorum timeout, unreachable peer, durable-write
+  failure, pending-queue backpressure) are normalized
   to `SuperCache.Cluster.Error`.
 - Read modes are unchanged. `:raft` does **not** make a local read linearizable;
   use `:primary` or `:quorum` reads when you need stronger read semantics.
@@ -276,7 +299,16 @@ config :super_cache, :raft,
   Use `replication_factor: 3` (or higher) with at least three live nodes in
   production; single-node groups remain valid for development.
 - Latency is higher than the in-memory WAL used by `:strong` because Raft
-  persists its log; tune with `wal_sync_method`.
+  persists its log; tune with `wal_sync_method`, `wal_max_batch_size`,
+  `max_pipeline_count`, and `max_append_entries_rpc_batch_size`. Single-node
+  smoke (`BENCH_NODES=1`) measures ~3–4µs/put for `:async`/`:sync`/`:strong`
+  vs ~2.5ms/put for `:raft`; multi-node `:raft` with 2 voters measures ~8–10×
+  slower than `:strong` and ~50× with 3 voters (see
+  `benchmarks/results/raft-comparison.md`). Choose `:strong` for lowest
+  latency with crash-safe quorum writes; choose `:raft` when you need leader
+  election and a replicated log with automatic failover. Full `BENCH_RF=2/3`
+  matrices should be re-run nightly; the single-node smoke above verifies the
+  script still executes after this change.
 
 **Sizing (N + 1)**:
 
@@ -293,10 +325,14 @@ Single-node and small clusters remain valid for development.
 `SuperCache.cluster_stats().raft` contains `running`, `groups` (the list of
 locally tracked partition indexes), `group_details` (per-group `idx`,
 `running`, `role`, `leader`, `member_count`, `members`, plus `metrics` with
-term/commit/applied index and state and `member_roles` with each member's Raft
-role), and `topology`
+term/commit/applied index, `replication_lag`, and state and `member_roles` with each member's Raft
+role), effective `tuning`, and `topology`
 (`node_count`, `replication_factor`, `recommended_nodes`, `status`,
 `evaluated_at`). `raft_failures` is exposed through the reliability counters.
+Membership repair never discards committed log on the catch-up path:
+a join that cannot catch up fails instead of rebuilding the group from
+scratch once committed data exists, while departure-driven reformation
+recovers survivor logs so the group converges.
 
 **Catch-up limitation**:
 

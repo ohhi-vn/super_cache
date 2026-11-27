@@ -88,6 +88,10 @@ defmodule SuperCache.Cluster.Raft.Adapter do
   @spec stop_server(term, term) :: term
   def stop_server(system, server_id), do: backend().stop_server(system, server_id)
 
+  @doc "Delegate to the backend's `RaftEx.restart_server/2` (recovers persisted state)."
+  @spec restart_server(term, term) :: term
+  def restart_server(system, server_id), do: backend().restart_server(system, server_id)
+
   @doc "Delegate to the backend's `RaftEx.start_cluster/5`."
   @spec start_cluster(term, term, term, [term], timeout) :: term
   def start_cluster(system, cluster_name, machine, desired, timeout),
@@ -127,4 +131,22 @@ defmodule SuperCache.Cluster.Raft.Adapter do
   @doc "Delegate to the backend's `RaftEx.member_overview/2`."
   @spec member_overview(term, timeout) :: term
   def member_overview(server, timeout), do: backend().member_overview(server, timeout)
+
+  @doc "Delegate to `RaftEx.Observability.server_metrics/1` (or the fake backend)."
+  @spec server_metrics(term) :: term
+  def server_metrics(server) do
+    case backend() do
+      RaftEx -> RaftEx.Observability.server_metrics(server)
+      other -> other.server_metrics(server)
+    end
+  end
+
+  @doc "Delegate to `RaftEx.Observability.cluster_metrics/1` (or the fake backend)."
+  @spec cluster_metrics(term) :: term
+  def cluster_metrics(cluster \\ nil) do
+    case backend() do
+      RaftEx -> RaftEx.Observability.cluster_metrics(cluster)
+      other -> other.cluster_metrics(cluster)
+    end
+  end
 end

@@ -92,7 +92,9 @@ defmodule SuperCache.Cluster.Stats do
         running: Raft.System.running?(),
         groups: Raft.Group.tracked(),
         group_details: Raft.Group.all_status(),
-        topology: Topology.status()
+        topology: Topology.status(),
+        tuning: raft_tuning(),
+        engine_counters: raft_engine_counters()
       },
       reliability: reliability(),
       num_partitions: num_partitions,
@@ -418,6 +420,48 @@ defmodule SuperCache.Cluster.Stats do
   end
 
   # ── Pretty printer ───────────────────────────────────────────────────────────
+
+  # Effective Raft throughput tuning, exposed so operators can verify what the
+  # engine is running with. Bounded: only the tuning keys, never the data dir
+  # contents or log state.
+  defp raft_tuning do
+    alias SuperCache.Cluster.Raft.Config
+
+    Config.all()
+    |> Keyword.take([
+      :command_timeout_ms,
+      :wal_sync_method,
+      :wal_max_size_bytes,
+      :wal_max_batch_size,
+      :election_timeout_min,
+      :election_timeout_max,
+      :heartbeat_interval,
+      :segment_max_entries,
+      :segment_max_size_bytes,
+      :segment_storage,
+      :segment_compute_checksums,
+      :snapshot_chunk_size,
+      :max_pending_commands,
+      :command_batch_linger_ms,
+      :max_pipeline_count,
+      :max_append_entries_rpc_batch_size,
+      :compaction_entry_threshold,
+      :compaction_wal_bytes,
+      :compaction_interval_ms
+    ])
+    |> Map.new()
+  rescue
+    _ -> %{}
+  end
+
+  defp raft_engine_counters do
+    case SuperCache.Cluster.Raft.Adapter.cluster_metrics() do
+      map when is_map(map) -> map
+      _ -> %{}
+    end
+  rescue
+    _ -> %{}
+  end
 
   @doc """
   Pretty-print any stats map or list returned by this module to stdout.

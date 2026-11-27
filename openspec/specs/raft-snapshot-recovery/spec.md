@@ -25,6 +25,11 @@ The system SHALL checkpoint the highest applied log index into Raft snapshot met
 - **WHEN** applying a committed entry fails
 - **THEN** the applied index checkpoint does not advance past that entry
 
+#### Scenario: Automatic compaction preserves replay data
+
+- **WHEN** automatic compaction triggers on entry-count, WAL-bytes, or time thresholds
+- **THEN** entries still required to rebuild the partition remain available and committed state still converges after restart
+
 ### Requirement: Snapshot recovery restores the watermark
 
 On startup or log recovery from a snapshot, the system SHALL restore the applied-index watermark from persisted snapshot state so entries already applied before the restart are acknowledged without being applied twice.
@@ -52,3 +57,25 @@ When storage tables are dropped and recreated while Raft data is retained, the s
 
 - **WHEN** replay finishes after table recreation
 - **THEN** the applied watermark again matches the highest successfully applied index
+
+### Requirement: No log-discarding catch-up repair
+
+The system SHALL NOT discard committed Raft log entries as part of catch-up
+repair. When a joining member fails to catch up while the group holds
+committed data, reconciliation MUST report a failure instead of rebuilding
+the group from scratch with an empty log.
+
+#### Scenario: Repair preserves committed data
+
+- **WHEN** a joining member fails to catch up while its log contains committed writes
+- **THEN** reconciliation reports a failure and no committed entry is lost
+
+#### Scenario: Departure reforms from survivors
+
+- **WHEN** the leader departs and no leader exists for the group
+- **THEN** the group reforms from the current partition map and previously committed data remains readable on the surviving members
+
+#### Scenario: Snapshot transfer is used for catch-up
+
+- **WHEN** a joining member is behind beyond retained log entries
+- **THEN** the member catches up via snapshot transfer and converges to the leader's state

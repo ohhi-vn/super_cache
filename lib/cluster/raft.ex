@@ -54,7 +54,10 @@ defmodule SuperCache.Cluster.Raft do
   end
 
   # Bounded retry for leader-placement failures only. Ambiguous timeouts are
-  # never resubmitted because the command may already be committed.
+  # never resubmitted because the command may already be committed. Durable-write
+  # failures (:wal_down, {:not_appended, ...}) and bounded-queue backpressure
+  # (:backpressure) are terminal: the `other` clause below returns them without
+  # retry, since retrying would risk duplicates or hide overload.
   defp submit_with_retry(_server, _partition_idx, _command, _timeout, _deadline, attempts)
        when attempts <= 0 do
     {:error, :no_leader}
@@ -165,20 +168,14 @@ defmodule SuperCache.Cluster.Raft do
 
   defp submit_once(server, _partition_idx, command, timeout) do
     case Adapter.process_command(server, command, timeout) do
-      {:ok, reply, leader} ->
-        {:ok, reply, leader}
-
-      {:error, {:not_leader, leader}} ->
-        {:error, {:not_leader, leader}}
-
-      {:error, reason} ->
+      {:error, {:not_appended, reason, _, _}} ->
         {:error, reason}
 
-      {:timeout, server_id} ->
-        {:timeout, server_id}
+      {:error, {:not_appended, _} = not_appended} ->
+        {:error, not_appended}
 
-      other ->
-        other
+      result ->
+        result
     end
   rescue
     error ->

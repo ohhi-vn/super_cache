@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.10.0]
+
+### Changed
+
+- Raft membership repair distinguishes departure from catch-up failure:
+  no-leader and gone-leader paths wait briefly for an in-progress election
+  and then reform via restart-recovery (`start_or_restart_cluster`) so the
+  group converges with survivor logs and terms intact, while a join that
+  cannot catch up refuses destructive reformation once committed data exists
+  and reports `{:error, :committed_data_present}` instead of discarding the
+  log.
+- `raft_ex` 0.7 throughput surface is now configured (`max_pending_commands`,
+  `command_batch_linger_ms`, `max_pipeline_count`,
+  `max_append_entries_rpc_batch_size`, `snapshot_chunk_size`, segment-storage
+  and compaction knobs) with startup validation; backpressure
+  (`:backpressure`) and durable-write failures (`:wal_down`,
+  `{:not_appended, ...}`) are normalized to `SuperCache.Cluster.Error` without
+  retrying ambiguous timeouts.
+- Raft observability now includes `replication_lag`, commit gauges, effective
+  tuning, and engine counters in `cluster_stats().raft` and local health.
+- Refreshed distributed benchmark results on `raft_ex` 0.7:
+  `benchmarks/results/raft-comparison.md` and `distributed-scaling.md` now
+  report new latency/throughput measurements at RF=2 (1/3/5 nodes) and RF=3
+  (3/4/5 nodes), with raw output in `benchmarks/results/2026-11-28-raw.txt`.
+
 ## [1.9.0]
 
 ### Added
@@ -340,7 +367,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial public release with documentation for publishing the package.
 
-[Unreleased]: https://github.com/ohhi-vn/super_cache/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/ohhi-vn/super_cache/compare/v1.10.0...HEAD
+[1.10.0]: https://github.com/ohhi-vn/super_cache/compare/v1.9.0...v1.10.0
+[1.9.0]: https://github.com/ohhi-vn/super_cache/compare/v1.8.0...v1.9.0
+[1.8.0]: https://github.com/ohhi-vn/super_cache/compare/v1.7.0...v1.8.0
 [1.6.0]: https://github.com/ohhi-vn/super_cache/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/ohhi-vn/super_cache/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/ohhi-vn/super_cache/compare/v1.3.0...v1.4.0

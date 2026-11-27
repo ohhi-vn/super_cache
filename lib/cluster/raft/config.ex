@@ -9,15 +9,28 @@ defmodule SuperCache.Cluster.Raft.Config do
         command_timeout_ms: 2_000,
         wal_sync_method: :datasync,
         wal_max_size_bytes: 256_000_000,
+        wal_max_batch_size: 8_192,
         election_timeout_min: 500,
         election_timeout_max: 2_000,
         heartbeat_interval: 100,
         segment_max_entries: 4096,
-        segment_max_size_bytes: 64_000_000
+        segment_max_size_bytes: 64_000_000,
+        segment_storage: false,
+        segment_compute_checksums: true,
+        snapshot_chunk_size: 65_536,
+        max_pending_commands: 1_024,
+        command_batch_linger_ms: 0,
+        max_pipeline_count: 4_096,
+        max_append_entries_rpc_batch_size: 128,
+        compaction_entry_threshold: 8_192,
+        compaction_wal_bytes: 134_217_728,
+        compaction_interval_ms: 120_000
 
   The default `data_dir` is a per-node directory in the system temp dir;
   deployments that need durable Raft logs across restarts should set it
-  explicitly.
+  explicitly. Throughput knobs mirror `RaftEx.App.System.default_config/0`;
+  direct `:raft_ex` application env remains an escape hatch and is not the
+  supported tuning path.
   """
 
   @defaults [
@@ -25,11 +38,22 @@ defmodule SuperCache.Cluster.Raft.Config do
     command_timeout_ms: 2_000,
     wal_sync_method: :datasync,
     wal_max_size_bytes: 256_000_000,
+    wal_max_batch_size: 8_192,
     election_timeout_min: 500,
     election_timeout_max: 2_000,
     heartbeat_interval: 100,
     segment_max_entries: 4_096,
-    segment_max_size_bytes: 64_000_000
+    segment_max_size_bytes: 64_000_000,
+    segment_storage: false,
+    segment_compute_checksums: true,
+    snapshot_chunk_size: 65_536,
+    max_pending_commands: 1_024,
+    command_batch_linger_ms: 0,
+    max_pipeline_count: 4_096,
+    max_append_entries_rpc_batch_size: 128,
+    compaction_entry_threshold: 8_192,
+    compaction_wal_bytes: 134_217_728,
+    compaction_interval_ms: 120_000
   ]
 
   @sync_methods [:fsync, :datasync, :none]
@@ -87,6 +111,17 @@ defmodule SuperCache.Cluster.Raft.Config do
     validate_positive!(config, :heartbeat_interval)
     validate_positive!(config, :segment_max_entries)
     validate_positive!(config, :segment_max_size_bytes)
+    validate_positive!(config, :wal_max_batch_size)
+    validate_positive!(config, :snapshot_chunk_size)
+    validate_positive!(config, :max_pending_commands)
+    validate_positive!(config, :max_pipeline_count)
+    validate_positive!(config, :max_append_entries_rpc_batch_size)
+    validate_positive!(config, :compaction_entry_threshold)
+    validate_positive!(config, :compaction_wal_bytes)
+    validate_positive!(config, :compaction_interval_ms)
+    validate_non_negative!(config, :command_batch_linger_ms)
+    validate_boolean!(config, :segment_storage)
+    validate_boolean!(config, :segment_compute_checksums)
 
     if Keyword.fetch!(config, :election_timeout_min) >
          Keyword.fetch!(config, :election_timeout_max) do
@@ -101,6 +136,22 @@ defmodule SuperCache.Cluster.Raft.Config do
 
     unless is_integer(value) and value > 0 do
       raise ArgumentError, ":raft #{key} must be a positive integer"
+    end
+  end
+
+  defp validate_non_negative!(config, key) do
+    value = Keyword.fetch!(config, key)
+
+    unless is_integer(value) and value >= 0 do
+      raise ArgumentError, ":raft #{key} must be a non-negative integer"
+    end
+  end
+
+  defp validate_boolean!(config, key) do
+    value = Keyword.fetch!(config, key)
+
+    unless is_boolean(value) do
+      raise ArgumentError, ":raft #{key} must be a boolean"
     end
   end
 

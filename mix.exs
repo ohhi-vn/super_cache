@@ -4,7 +4,7 @@ defmodule SuperCache.MixProject do
   def project do
     [
       app: :super_cache,
-      version: "1.9.0",
+      version: "1.10.0",
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -54,7 +54,7 @@ defmodule SuperCache.MixProject do
       {:excoveralls, "~> 0.18", only: :test},
 
       # Opt-in Raft consensus replication (`:raft` replication mode).
-      {:raft_ex, "~> 0.6"},
+      {:raft_ex, "~> 0.7"},
 
       # Code quality
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},

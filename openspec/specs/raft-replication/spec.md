@@ -79,7 +79,7 @@ A write submitted to a node that is not the partition's Raft leader SHALL be rou
 
 ### Requirement: Raft failure normalization
 
-Failures specific to Raft — quorum timeouts, lost leadership, transport errors, and unreachable members — SHALL be normalized to the documented distributed error. Bang APIs MUST raise it and non-bang APIs MUST return `{:error, exception}`; raw exits and transport tuples MUST NOT escape to callers.
+Failures specific to Raft — quorum timeouts, lost leadership, transport errors, unreachable members, durable-write failures, and bounded-queue backpressure — SHALL be normalized to the documented distributed error. Bang APIs MUST raise it and non-bang APIs MUST return `{:error, exception}`; raw exits and transport tuples MUST NOT escape to callers.
 
 #### Scenario: Raft quorum times out
 
@@ -90,6 +90,16 @@ Failures specific to Raft — quorum timeouts, lost leadership, transport errors
 
 - **WHEN** a Raft peer is disconnected during a write
 - **THEN** the caller receives the documented error rather than a raw exit
+
+#### Scenario: Durable-write failure is reported
+
+- **WHEN** the Raft engine reports a durable-write failure instead of success
+- **THEN** the caller receives the documented error and the write is not reported as committed
+
+#### Scenario: Backpressure is reported
+
+- **WHEN** a raft-mode write is rejected because the pending-command bound is reached
+- **THEN** the caller receives a documented backpressure error through the same bang/non-bang contract
 
 ### Requirement: Deterministic partition-scoped groups
 
@@ -156,7 +166,7 @@ Enabling raft mode SHALL NOT change the semantics or guarantees of the existing 
 
 ### Requirement: Raft observability
 
-Raft mode SHALL expose its operational state through existing cluster statistics and health reporting. Write failures, leadership changes, and group status MUST be visible to operators.
+Raft mode SHALL expose its operational state through existing cluster statistics and health reporting. Write failures, leadership changes, group status, replication lag, and effective tuning MUST be visible to operators.
 
 #### Scenario: Raft stats are available
 
@@ -189,13 +199,18 @@ Raft mode SHALL expose its operational state through existing cluster statistics
 - **WHEN** an operator queries group details in raft mode
 - **THEN** reported members include their membership role and voter status when the engine provides them
 
+#### Scenario: Replication lag is reported
+
+- **WHEN** the engine provides per-server replication-lag gauges
+- **THEN** group details include the lag so operators can see catch-up progress
+
 ### Requirement: Raft engine configuration
 
 Raft mode SHALL validate Raft-specific configuration before starting any group and SHALL apply the accepted values to every group it forms. Configuration that cannot produce a working group MUST be rejected at startup rather than on the first write.
 
 #### Scenario: Valid configuration is applied
 
-- **WHEN** a node starts in raft mode with valid election, heartbeat, WAL, and snapshot settings
+- **WHEN** a node starts in raft mode with valid election, heartbeat, WAL, snapshot, throughput, compaction, and segment settings
 - **THEN** those settings are applied to the groups the node forms and startup succeeds
 
 #### Scenario: Invalid configuration is rejected
